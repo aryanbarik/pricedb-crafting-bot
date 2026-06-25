@@ -1,0 +1,39 @@
+diff --git a/node_modules/@tf2autobot/tf2/handlers.js b/node_modules/@tf2autobot/tf2/handlers.js
+index 9f942d8..a90dc0a 100644
+--- a/node_modules/@tf2autobot/tf2/handlers.js
++++ b/node_modules/@tf2autobot/tf2/handlers.js
+@@ -287,6 +287,16 @@ handlers[Language.CraftResponse] = function(body) {
+ 	this.emit('craftingComplete', blueprint, idList);
+ };
+ 
++handlers[Language.FulfillDynamicRecipeComponentResponse] = function(body) {
++	let result = -1;
++	try {
++		if (ByteBuffer.isByteBuffer(body) && body.remaining() >= 4) {
++			result = body.readInt32();
++		}
++	} catch (e) {}
++	this.emit('dynamicRecipeFulfilled', result);
++};
++
+ // Professor Speks
+ handlers[Language.FreeTrial_ThankedBySomeone] = function(body) {
+ 	let proto = decodeProto(Schema.CMsgTFThankedBySomeone, body);
+diff --git a/node_modules/@tf2autobot/tf2/index.js b/node_modules/@tf2autobot/tf2/index.js
+index aa5062f..0298172 100644
+--- a/node_modules/@tf2autobot/tf2/index.js
++++ b/node_modules/@tf2autobot/tf2/index.js
+@@ -241,6 +241,13 @@ TeamFortress2.prototype.useItem = function(item) {
+ 	this._send(Language.UseItemRequest, Schema.CMsgUseItem, {"item_id": item});
+ };
+ 
++TeamFortress2.prototype.fulfillDynamicRecipeComponent = function(toolItemId, components) {
++	this._send(Language.FulfillDynamicRecipeComponent, Schema.CMsgFulfillDynamicRecipeComponent, {
++		"tool_item_id": toolItemId,
++		"consumption_components": components
++	});
++};
++
+ TeamFortress2.prototype.tradeUP = function (items) {
+     this._send(Language.CraftCollectionUpgrade, Schema.CMsgCraftCollectionUpgrade, {
+         "item_id": items
