@@ -51,6 +51,7 @@ import sendTf2SystemMessage from '../DiscordWebhook/sendTf2SystemMessage';
 import sendTf2DisplayNotification from '../DiscordWebhook/sendTf2DisplayNotification';
 import sendTf2ItemBroadcast from '../DiscordWebhook/sendTf2ItemBroadcast';
 import { apiRequest } from '../../lib/apiRequest';
+import { FABRICATOR_DEFINDEXES } from '../../lib/fabricatorSlots';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -822,6 +823,24 @@ export default class MyHandler extends Handler {
 
         const itemsToGiveCount = offer.itemsToGive.length;
         const itemsToReceiveCount = offer.itemsToReceive.length;
+
+        // Crafting service: bot gives nothing, customer sends fabricator + parts
+        if (itemsToGiveCount === 0 && itemsToReceiveCount > 0) {
+            const fabricatorItem = offer.itemsToReceive.find(
+                (item: any) => typeof item.market_hash_name === 'string' && item.market_hash_name.includes('Fabricator')
+            ) as any | undefined;
+            if (fabricatorItem) {
+                const componentAssetIds = (offer.itemsToReceive as any[])
+                    .filter((item: any) => item.assetid !== fabricatorItem.assetid)
+                    .map((item: any) => String(item.assetid));
+                offer.data('craftingService', {
+                    fabricatorAssetId: String(fabricatorItem.assetid),
+                    componentAssetIds
+                });
+                offer.log('info', `detected crafting service trade — fabricator ${fabricatorItem.assetid} with ${componentAssetIds.length} component(s)`);
+                return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+            }
+        }
 
         // check if the trade is valid
         const isCannotProceedProcessingOffer = itemsToGiveCount === 0 && itemsToReceiveCount === 0;
@@ -2325,6 +2344,44 @@ export default class MyHandler extends Handler {
                     highValue.isDisableSKU = result.isDisableSKU;
                     highValue.theirItems = result.theirHighValuedItems;
                     highValue.items = result.items;
+
+                    // Crafting service: trigger fabricator craft after backpack sync
+                    const craftingService = offer.data('craftingService') as
+                        | { fabricatorAssetId: string; componentAssetIds: string[] }
+                        | undefined;
+                    if (craftingService) {
+                        const partnerSteamID64 = offer.partner.getSteamID64();
+                        log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
+                        setTimeout(() => {
+                            this.bot.tf2gc.craftFabricator(
+                                craftingService.fabricatorAssetId,
+                                craftingService.componentAssetIds,
+                                (err, kitId) => {
+                                    if (err || !kitId) {
+                                        log.warn(`[craftingService] Craft failed for offer ${offer.id}: ${err?.message ?? 'no kit returned'}`);
+                                        this.bot.sendMessage(
+                                            offer.partner,
+                                            `⚠️ Crafting failed: ${err?.message ?? 'unknown error'}. Please contact the bot owner.`
+                                        );
+                                        return;
+                                    }
+                                    log.info(`[craftingService] Craft succeeded — kit ${kitId}. Sending back to ${partnerSteamID64}`);
+                                    const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                    returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: kitId });
+                                    returnOffer.setMessage('Here is your Professional Killstreak Kit! Thanks for using the crafting service.');
+                                    returnOffer.send((sendErr: Error | null) => {
+                                        if (sendErr) {
+                                            log.warn(`[craftingService] Failed to send kit back to ${partnerSteamID64}: ${sendErr.message}`);
+                                            this.bot.sendMessage(
+                                                offer.partner,
+                                                `⚠️ Your kit was crafted (ID: ${kitId}) but we couldn't send it back automatically. Please contact the bot owner.`
+                                            );
+                                        }
+                                    });
+                                }
+                            );
+                        }, 5000);
+                    }
                 } else if (
                     offer.state === TradeOfferManager.ETradeOfferState['Declined'] &&
                     this.bot.options.tradeSummary.declinedTrade.enable &&
