@@ -1,5 +1,6 @@
 import Bot from './Bot';
 import log from '../lib/logger';
+import { decodeFabricatorSlots, buildCraftComponents, GCBackpackItem } from '../lib/fabricatorSlots';
 
 export enum Attributes {
     Paint = 1031,
@@ -36,17 +37,21 @@ type Job = {
         | 'delete'
         | 'sort'
         | 'removeAttributes'
-        | 'craftToken';
+        | 'craftToken'
+        | 'craftFabricator';
     defindex?: number;
     sku?: string;
     skus?: string[];
     assetid?: string;
     assetids?: string[];
+    fabricatorId?: string;
+    componentIds?: string[];
     tokenType?: TokenType;
     subTokenType?: SubTokenType;
     sortType?: number;
     attribute?: Attributes;
     callback?: (err?: Error) => void;
+    fabricatorCallback?: (err: Error | null, kitId?: string) => void;
 };
 
 type ListenForEvent =
@@ -151,6 +156,15 @@ export default class TF2GC {
         this.newJob({ type: 'craftToken', assetids, tokenType, subTokenType, callback: callback });
     }
 
+    craftFabricator(
+        fabricatorId: string,
+        componentIds: string[],
+        fabricatorCallback?: (err: Error | null, kitId?: string) => void
+    ): void {
+        log.debug(`Enqueueing craftFabricator job for fabricator ${fabricatorId}`);
+        this.newJob({ type: 'craftFabricator', fabricatorId, componentIds, fabricatorCallback });
+    }
+
     private newJob(job: Job): void {
         this.jobs.push(job);
         this.handleJobQueue();
@@ -203,6 +217,8 @@ export default class TF2GC {
                     func = this.handleSortJob.bind(this, job);
                 } else if (job.type === 'craftToken') {
                     func = this.handleCraftTokenJob.bind(this, job);
+                } else if (job.type === 'craftFabricator') {
+                    func = this.handleCraftFabricatorJob.bind(this, job);
                 }
 
                 if (func) {
@@ -321,6 +337,72 @@ export default class TF2GC {
                 this.finishedProcessingJob();
             },
             err => {
+                this.finishedProcessingJob(err);
+            }
+        );
+    }
+
+    private handleCraftFabricatorJob(job: Job): void {
+        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
+        const fabricator = backpack?.find(i => i.id === job.fabricatorId);
+
+        if (!fabricator) {
+            log.warn(`craftFabricator: fabricator ${job.fabricatorId} not found in backpack`);
+            if (job.fabricatorCallback) job.fabricatorCallback(new Error('Fabricator not found in backpack'));
+            return this.finishedProcessingJob(new Error('Fabricator not found'));
+        }
+
+        const components = buildCraftComponents(fabricator as unknown as GCBackpackItem, (job.componentIds ?? [])
+            .map(id => backpack.find(i => i.id === id))
+            .filter((i): i is TF2GCItem => i !== undefined) as unknown as GCBackpackItem[]);
+
+        if (components.length === 0) {
+            log.warn(`craftFabricator: no components could be mapped for fabricator ${job.fabricatorId}`);
+            if (job.fabricatorCallback) job.fabricatorCallback(new Error('No components matched recipe slots'));
+            return this.finishedProcessingJob(new Error('No components matched'));
+        }
+
+        log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${job.fabricatorId} with ${components.length} component(s)`);
+        (this.bot.tf2 as any).fulfillDynamicRecipeComponent(job.fabricatorId, components);
+
+        // After GC confirms the craft, listen for the new kit via itemAcquired
+        this.listenForEvent(
+            'dynamicRecipeFulfilled',
+            (result: number) => {
+                if (result !== 0) {
+                    log.warn(`craftFabricator: GC returned error result ${result}`);
+                    if (job.fabricatorCallback) job.fabricatorCallback(new Error(`GC error: ${result}`));
+                    this.finishedProcessingJob(new Error(`GC error result ${result}`));
+                    return;
+                }
+                // Kit will arrive via itemAcquired — listen for the next item with a KS kit defindex
+                const KS_KIT_DEFINDEXES = [6526, 6527, 6528]; // Professional, Specialized, Basic KS Kit
+                const cancel = this.listenForEvent(
+                    'itemAcquired',
+                    (item: TF2GCItem) => {
+                        if (KS_KIT_DEFINDEXES.includes(item.def_index)) {
+                            log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
+                            if (job.fabricatorCallback) job.fabricatorCallback(null, item.id);
+                            this.finishedProcessingJob();
+                            return { success: true };
+                        }
+                        return { success: false };
+                    },
+                    () => {
+                        // timeout — craft may have succeeded but kit had an unexpected defindex
+                        log.warn('craftFabricator: timed out waiting for KS kit item after successful GC response');
+                        if (job.fabricatorCallback) job.fabricatorCallback(new Error('Timed out waiting for kit'));
+                        this.finishedProcessingJob(new Error('Timed out waiting for kit'));
+                    },
+                    err => {
+                        if (job.fabricatorCallback) job.fabricatorCallback(err);
+                        this.finishedProcessingJob(err);
+                    }
+                );
+                void cancel; // held by listenForEvent internally; cancel fires on timeout/disconnect
+            },
+            err => {
+                if (job.fabricatorCallback) job.fabricatorCallback(err);
                 this.finishedProcessingJob(err);
             }
         );
