@@ -1,6 +1,6 @@
 import Bot from './Bot';
 import log from '../lib/logger';
-import { decodeFabricatorSlots, buildCraftComponents, GCBackpackItem } from '../lib/fabricatorSlots';
+import { decodeFabricatorSlots, buildCraftComponents, findBotComponents, GCBackpackItem } from '../lib/fabricatorSlots';
 
 export enum Attributes {
     Paint = 1031,
@@ -158,11 +158,18 @@ export default class TF2GC {
 
     craftFabricator(
         fabricatorId: string,
-        componentIds: string[],
+        componentIdsOrCallback?: string[] | ((err: Error | null, kitId?: string) => void),
         fabricatorCallback?: (err: Error | null, kitId?: string) => void
     ): void {
-        log.debug(`Enqueueing craftFabricator job for fabricator ${fabricatorId}`);
-        this.newJob({ type: 'craftFabricator', fabricatorId, componentIds, fabricatorCallback });
+        let componentIds: string[] | undefined;
+        let cb = fabricatorCallback;
+        if (Array.isArray(componentIdsOrCallback)) {
+            componentIds = componentIdsOrCallback;
+        } else if (typeof componentIdsOrCallback === 'function') {
+            cb = componentIdsOrCallback;
+        }
+        log.debug(`Enqueueing craftFabricator job for fabricator ${fabricatorId} (${componentIds?.length ?? 0} provided component(s))`);
+        this.newJob({ type: 'craftFabricator', fabricatorId, componentIds, fabricatorCallback: cb });
     }
 
     private newJob(job: Job): void {
@@ -352,14 +359,30 @@ export default class TF2GC {
             return this.finishedProcessingJob(new Error('Fabricator not found'));
         }
 
-        const components = buildCraftComponents(fabricator as unknown as GCBackpackItem, (job.componentIds ?? [])
-            .map(id => backpack.find(i => i.id === id))
-            .filter((i): i is TF2GCItem => i !== undefined) as unknown as GCBackpackItem[]);
+        let components: { subject_item_id: string; attribute_index: number }[];
 
-        if (components.length === 0) {
-            log.warn(`craftFabricator: no components could be mapped for fabricator ${job.fabricatorId}`);
-            if (job.fabricatorCallback) job.fabricatorCallback(new Error('No components matched recipe slots'));
-            return this.finishedProcessingJob(new Error('No components matched'));
+        if (job.componentIds && job.componentIds.length > 0) {
+            // Mode A: use the specific provided item IDs (already in bot's backpack after the trade)
+            const componentItems = job.componentIds
+                .map(id => backpack.find(i => i.id === id))
+                .filter((i): i is TF2GCItem => i !== undefined) as unknown as GCBackpackItem[];
+            components = buildCraftComponents(fabricator as unknown as GCBackpackItem, componentItems);
+            if (components.length === 0) {
+                log.warn(`craftFabricator [Mode A]: no components could be mapped for fabricator ${job.fabricatorId}`);
+                if (job.fabricatorCallback) job.fabricatorCallback(new Error('Provided items did not match any recipe slots'));
+                return this.finishedProcessingJob(new Error('No components matched'));
+            }
+        } else {
+            // Mode B: find matching items from the bot's own existing inventory
+            const botItems = backpack.filter(i => i.id !== job.fabricatorId) as unknown as GCBackpackItem[];
+            const { components: found, missing } = findBotComponents(fabricator as unknown as GCBackpackItem, botItems);
+            if (missing.length > 0) {
+                const msg = `Bot is missing parts: ${missing.join(', ')}`;
+                log.warn(`craftFabricator [Mode B]: ${msg}`);
+                if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
+                return this.finishedProcessingJob(new Error(msg));
+            }
+            components = found;
         }
 
         log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${job.fabricatorId} with ${components.length} component(s)`);

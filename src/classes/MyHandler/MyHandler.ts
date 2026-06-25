@@ -51,7 +51,6 @@ import sendTf2SystemMessage from '../DiscordWebhook/sendTf2SystemMessage';
 import sendTf2DisplayNotification from '../DiscordWebhook/sendTf2DisplayNotification';
 import sendTf2ItemBroadcast from '../DiscordWebhook/sendTf2ItemBroadcast';
 import { apiRequest } from '../../lib/apiRequest';
-import { FABRICATOR_DEFINDEXES } from '../../lib/fabricatorSlots';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -824,21 +823,37 @@ export default class MyHandler extends Handler {
         const itemsToGiveCount = offer.itemsToGive.length;
         const itemsToReceiveCount = offer.itemsToReceive.length;
 
-        // Crafting service: bot gives nothing, customer sends fabricator + parts
+        // Crafting service: bot gives nothing, customer sends fabricator + parts or fabricator + keys
         if (itemsToGiveCount === 0 && itemsToReceiveCount > 0) {
-            const fabricatorItem = offer.itemsToReceive.find(
+            const fabricatorItem = (offer.itemsToReceive as any[]).find(
                 (item: any) => typeof item.market_hash_name === 'string' && item.market_hash_name.includes('Fabricator')
-            ) as any | undefined;
+            );
             if (fabricatorItem) {
-                const componentAssetIds = (offer.itemsToReceive as any[])
-                    .filter((item: any) => item.assetid !== fabricatorItem.assetid)
-                    .map((item: any) => String(item.assetid));
-                offer.data('craftingService', {
-                    fabricatorAssetId: String(fabricatorItem.assetid),
-                    componentAssetIds
-                });
-                offer.log('info', `detected crafting service trade — fabricator ${fabricatorItem.assetid} with ${componentAssetIds.length} component(s)`);
-                return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                const fabAssetId = String(fabricatorItem.assetid);
+                const otherItems = (offer.itemsToReceive as any[]).filter(
+                    (item: any) => item.assetid !== fabricatorItem.assetid
+                );
+                const componentItems = otherItems.filter(
+                    (item: any) => item.market_hash_name !== 'Mann Co. Supply Crate Key'
+                );
+                const keyCount = otherItems.length - componentItems.length;
+
+                const isWhitelisted =
+                    isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+
+                if (isWhitelisted && componentItems.length > 0) {
+                    // Mode A (self-service): whitelisted user provides their own components
+                    const componentAssetIds = componentItems.map((i: any) => String(i.assetid));
+                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds });
+                    offer.log('info', `[Mode A] crafting service — fabricator ${fabAssetId} + ${componentItems.length} component(s)`);
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                } else if (keyCount >= 2) {
+                    // Mode B (key payment): bot uses own parts, keeps keys as payment
+                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds: [] });
+                    offer.log('info', `[Mode B] crafting service — fabricator ${fabAssetId} + ${keyCount} key(s)`);
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                }
+                // Lone fabricator or non-whitelisted with components: fall through to price check
             }
         }
 
@@ -2351,18 +2366,28 @@ export default class MyHandler extends Handler {
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
+                        const { fabricatorAssetId, componentAssetIds } = craftingService;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
                         setTimeout(() => {
                             this.bot.tf2gc.craftFabricator(
-                                craftingService.fabricatorAssetId,
-                                craftingService.componentAssetIds,
+                                fabricatorAssetId,
+                                componentAssetIds.length > 0 ? componentAssetIds : undefined,
                                 (err, kitId) => {
                                     if (err || !kitId) {
                                         log.warn(`[craftingService] Craft failed for offer ${offer.id}: ${err?.message ?? 'no kit returned'}`);
                                         this.bot.sendMessage(
                                             offer.partner,
-                                            `⚠️ Crafting failed: ${err?.message ?? 'unknown error'}. Please contact the bot owner.`
+                                            `⚠️ Crafting failed: ${err?.message ?? 'unknown error'}. Your items will be returned.`
                                         );
+                                        // Refund everything received (fabricator + components or fabricator + keys)
+                                        const refundOffer = this.bot.manager.createOffer(offer.partner);
+                                        (offer.itemsToReceive as any[]).forEach(item =>
+                                            refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(item.assetid) })
+                                        );
+                                        refundOffer.setMessage(`Refund — crafting failed: ${err?.message ?? 'unknown error'}`);
+                                        refundOffer.send((sendErr: Error | null) => {
+                                            if (sendErr) log.warn(`[craftingService] Refund send failed: ${sendErr.message}`);
+                                        });
                                         return;
                                     }
                                     log.info(`[craftingService] Craft succeeded — kit ${kitId}. Sending back to ${partnerSteamID64}`);
@@ -2371,10 +2396,10 @@ export default class MyHandler extends Handler {
                                     returnOffer.setMessage('Here is your Professional Killstreak Kit! Thanks for using the crafting service.');
                                     returnOffer.send((sendErr: Error | null) => {
                                         if (sendErr) {
-                                            log.warn(`[craftingService] Failed to send kit back to ${partnerSteamID64}: ${sendErr.message}`);
+                                            log.warn(`[craftingService] Failed to send kit to ${partnerSteamID64}: ${sendErr.message}`);
                                             this.bot.sendMessage(
                                                 offer.partner,
-                                                `⚠️ Your kit was crafted (ID: ${kitId}) but we couldn't send it back automatically. Please contact the bot owner.`
+                                                `⚠️ Kit crafted (ID: ${kitId}) but couldn't send automatically. Contact the bot owner.`
                                             );
                                         }
                                     });

@@ -177,3 +177,60 @@ export function buildCraftComponents(
 
     return result;
 }
+
+export interface BotComponentResult {
+    components: { subject_item_id: string; attribute_index: number }[];
+    missing: string[];
+}
+
+/**
+ * Scans the bot's own GC backpack to find items that fill each unfilled recipe slot.
+ * botBackpack should exclude the fabricator itself and any payment keys.
+ */
+export function findBotComponents(
+    fabricator: GCBackpackItem,
+    botBackpack: GCBackpackItem[]
+): BotComponentResult {
+    const slots = decodeFabricatorSlots(fabricator).filter(
+        s => s.attributeIndex !== SLOT_OUTPUT && s.numFulfilled < s.numRequired
+    );
+
+    const components: { subject_item_id: string; attribute_index: number }[] = [];
+    const missing: string[] = [];
+    const usedIds = new Set<string>();
+
+    for (const slot of slots) {
+        const needed = slot.numRequired - slot.numFulfilled;
+
+        if (slot.itemDefIndex === 0) {
+            // Weapon slot
+            const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
+            const candidates = botBackpack.filter(
+                i => !usedIds.has(i.id) && getItemAttrValue(i, ATTR_KILLSTREAK_TIER) === requiredTier
+            );
+            if (candidates.length < needed) {
+                missing.push(`${needed - candidates.length}× kt-${requiredTier} killstreak weapon`);
+                continue;
+            }
+            for (let k = 0; k < needed; k++) {
+                components.push({ subject_item_id: candidates[k].id, attribute_index: slot.attributeIndex });
+                usedIds.add(candidates[k].id);
+            }
+        } else {
+            // Robot part slot
+            const candidates = botBackpack.filter(
+                i => !usedIds.has(i.id) && i.def_index === slot.itemDefIndex
+            );
+            if (candidates.length < needed) {
+                missing.push(`${needed - candidates.length}× defindex ${slot.itemDefIndex}`);
+                continue;
+            }
+            for (let k = 0; k < needed; k++) {
+                components.push({ subject_item_id: candidates[k].id, attribute_index: slot.attributeIndex });
+                usedIds.add(candidates[k].id);
+            }
+        }
+    }
+
+    return { components, missing };
+}

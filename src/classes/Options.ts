@@ -2279,6 +2279,7 @@ export default interface Options extends JsonOptions {
     admins?: adminData[];
     keep?: string[];
     itemStatsWhitelist?: string[];
+    craftingServiceWhitelist?: string[];
     groups?: string[];
     alerts?: string[];
 
@@ -2605,6 +2606,7 @@ export function loadOptions(options?: Options): Options {
         admins: getOption('admins', [], jsonParseAdminData, incomingOptions),
         keep: getOption('keep', [], jsonParseArray, incomingOptions),
         itemStatsWhitelist: getOption('itemStatsWhitelist', [], jsonParseArray, incomingOptions),
+        craftingServiceWhitelist: getOption('craftingServiceWhitelist', [], jsonParseArray, incomingOptions),
         groups: getOption('groups', ['103582791475394761'], jsonParseArray, incomingOptions),
         alerts: getOption('alerts', ['trade'], jsonParseArray, incomingOptions),
 
