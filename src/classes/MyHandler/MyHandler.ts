@@ -51,7 +51,7 @@ import sendTf2SystemMessage from '../DiscordWebhook/sendTf2SystemMessage';
 import sendTf2DisplayNotification from '../DiscordWebhook/sendTf2DisplayNotification';
 import sendTf2ItemBroadcast from '../DiscordWebhook/sendTf2ItemBroadcast';
 import { apiRequest } from '../../lib/apiRequest';
-import { decodeFabricatorSlots } from '../../lib/fabricatorSlots';
+import { decodeFabricatorSlots, buildCraftComponents, KS_KIT_DEFINDEXES, FABRICATOR_DEFINDEXES } from '../../lib/fabricatorSlots';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -782,13 +782,13 @@ export default class MyHandler extends Handler {
         // Crafting service: bot gives nothing, customer sends fabricator + parts or fabricator + keys.
         // Must run before the admin check so admins also go through the craft flow.
         if (offer.itemsToGive.length === 0 && offer.itemsToReceive.length > 0) {
-            const fabricatorItem = (offer.itemsToReceive as any[]).find(
+            const fabricatorItems = (offer.itemsToReceive as any[]).filter(
                 (item: any) => typeof item.market_hash_name === 'string' && item.market_hash_name.includes('Fabricator')
             );
-            if (fabricatorItem) {
-                const fabAssetId = String(fabricatorItem.assetid);
+            if (fabricatorItems.length > 0) {
+                const fabricatorAssetIds = fabricatorItems.map((i: any) => String(i.assetid));
                 const otherItems = (offer.itemsToReceive as any[]).filter(
-                    (item: any) => item.assetid !== fabricatorItem.assetid
+                    (item: any) => !fabricatorAssetIds.includes(String(item.assetid))
                 );
                 const componentItems = otherItems.filter(
                     (item: any) => item.market_hash_name !== 'Mann Co. Supply Crate Key'
@@ -810,14 +810,14 @@ export default class MyHandler extends Handler {
                         .map((i: any) => String(i.assetid));
                     // Snapshot current GC backpack IDs BEFORE accepting — used to find new items after trade
                     const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds, kitAssetIds, preTradeIds });
-                    offer.log('info', `[Mode A] crafting service — fabricator ${fabAssetId} + ${componentItems.length} component(s)${kitAssetIds.length > 0 ? ` (${kitAssetIds.length} unapplied kit(s))` : ''}`);
+                    offer.data('craftingService', { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds });
+                    offer.log('info', `[Mode A] crafting service — ${fabricatorAssetIds.length} fabricator(s) [${fabricatorAssetIds.join(', ')}] + ${componentItems.length} component(s)${kitAssetIds.length > 0 ? ` (${kitAssetIds.length} unapplied kit(s))` : ''}`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 } else if (keyCount >= 2) {
                     // Mode B (key payment): bot uses own parts, keeps keys as payment
                     const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds: [], preTradeIds });
-                    offer.log('info', `[Mode B] crafting service — fabricator ${fabAssetId} + ${keyCount} key(s)`);
+                    offer.data('craftingService', { fabricatorAssetIds, componentAssetIds: [], preTradeIds });
+                    offer.log('info', `[Mode B] crafting service — ${fabricatorAssetIds.length} fabricator(s) + ${keyCount} key(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 }
                 // Lone fabricator or non-whitelisted with components: fall through
@@ -2374,11 +2374,11 @@ export default class MyHandler extends Handler {
 
                     // Crafting service: trigger fabricator craft after backpack sync
                     const craftingService = offer.data('craftingService') as
-                        | { fabricatorAssetId: string; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
+                        | { fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
-                        const { fabricatorAssetId, componentAssetIds, kitAssetIds, preTradeIds } = craftingService;
+                        const { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds } = craftingService;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
 
                         // preTradeIds was snapshotted in onNewTradeOffer before the trade was accepted.
@@ -2388,25 +2388,18 @@ export default class MyHandler extends Handler {
                         setTimeout(() => {
                             const currentBackpack: any[] = (this.bot.tf2 as any).backpack ?? [];
                             const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
-
-                            const FABRICATOR_DEFINDEXES = [20002, 20003];
-                            const KS_KIT_DEFINDEXES_ALL = [6526, 6527, 6528];
-                            const newFab = newItems.find((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index));
-                            const newCompIds = newItems
-                                .filter((i: any) => !FABRICATOR_DEFINDEXES.includes(i.def_index))
-                                .map((i: any) => String(i.id));
                             const allNewIds = newItems.map((i: any) => String(i.id));
 
-                            if (componentAssetIds.length > 0 && newCompIds.length !== componentAssetIds.length) {
-                                log.warn(`[craftingService] Backpack diff: expected ${componentAssetIds.length} component(s), got ${newCompIds.length} — may include unrelated items from concurrent operation`);
-                            }
+                            // All new fabs, Spec (20002) before Pro (20003)
+                            const newFabs = newItems
+                                .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
+                                .sort((a: any, b: any) => a.def_index - b.def_index);
 
-                            const resolvedFabId = newFab ? String(newFab.id) : fabricatorAssetId;
+                            // Component pool = all non-fab new items
+                            const availablePool: any[] = newItems.filter((i: any) => !FABRICATOR_DEFINDEXES.includes(i.def_index));
 
-                            if (newFab) {
-                                log.debug(`[craftingService] Resolved fabricator ID: ${resolvedFabId} (was ${fabricatorAssetId})`);
-                            } else {
-                                log.warn(`[craftingService] Could not find fabricator in backpack diff — using original ID ${fabricatorAssetId}`);
+                            if (componentAssetIds.length > 0 && availablePool.length !== componentAssetIds.length) {
+                                log.warn(`[craftingService] Backpack diff: expected ${componentAssetIds.length} component(s), got ${availablePool.length} — may include unrelated items from concurrent operation`);
                             }
 
                             const doRefund = (reason: string): void => {
@@ -2430,66 +2423,137 @@ export default class MyHandler extends Handler {
                                     .catch((sendErr: Error) => log.warn(`[craftingService] Refund send failed: ${sendErr.message}`));
                             };
 
-                            const doCraft = (resolvedComponentIds: string[]): void => {
-                                this.bot.tf2gc.craftFabricator(
-                                    resolvedFabId,
-                                    resolvedComponentIds.length > 0 ? resolvedComponentIds : undefined,
-                                    (err, kitId) => {
-                                        if (err || !kitId) {
-                                            doRefund(`Craft failed for offer ${offer.id}: ${err?.message ?? 'no kit returned'}`);
-                                            return;
-                                        }
-                                        log.info(`[craftingService] Craft succeeded — kit ${kitId}. Sending back to ${partnerSteamID64}`);
-                                        const kitBackpackItem = ((this.bot.tf2 as any).backpack as any[] ?? []).find((i: any) => String(i.id) === kitId);
-                                        const kitName = kitBackpackItem
-                                            ? ((this.bot.schema as any).getItemByDefindex?.(kitBackpackItem.def_index)?.item_name ?? 'Killstreak Kit')
-                                            : 'Killstreak Kit';
-                                        const returnOffer = this.bot.manager.createOffer(offer.partner);
-                                        returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: kitId });
-                                        returnOffer.setMessage(`Here is your ${kitName}! Thanks for using the crafting service.`);
-                                        this.bot.trades.sendOffer(returnOffer)
-                                            .then(status => {
-                                                if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                                            })
-                                            .catch((sendErr: Error) => {
-                                                log.warn(`[craftingService] Failed to send kit to ${partnerSteamID64}: ${sendErr.message}`);
-                                                this.bot.sendMessage(
-                                                    offer.partner,
-                                                    `⚠️ Kit crafted (ID: ${kitId}) but couldn't send automatically. Contact the bot owner.`
-                                                );
-                                            });
-                                    }
-                                );
-                            };
-
-                            // Identify unapplied KS Kits among new items (matched by original offer asset IDs)
-                            const unappliedKits = kitAssetIds && kitAssetIds.length > 0
-                                ? newItems.filter((i: any) => KS_KIT_DEFINDEXES_ALL.includes(i.def_index))
-                                : [];
-
-                            if (unappliedKits.length === 0) {
-                                // No kit application needed — proceed directly to fabricator crafting
-                                const resolvedCompIds = componentAssetIds.length > 0
-                                    ? (newCompIds.length > 0 ? newCompIds : componentAssetIds)
-                                    : [];
-                                doCraft(resolvedCompIds);
+                            if (newFabs.length === 0) {
+                                doRefund('Could not find any fabricators in backpack after trade');
                                 return;
                             }
 
-                            // Kit application path: apply each kit to its matching plain weapon sequentially,
-                            // then proceed with fabricator crafting using the resulting KS weapons.
+                            log.debug(`[craftingService] Found ${newFabs.length} fabricator(s) in backpack diff`);
+
+                            const ROBOT_PART_DEFINDEXES = [5700, 5701, 5702, 5703, 5704, 5705, 5706, 5707];
+
+                            const runMultiFabCraft = (pool: any[]): void => {
+                                const craftPlan: { fabId: string; componentIds: string[] }[] = [];
+                                const uncraftableFabIds: string[] = [];
+                                let remainingPool = [...pool];
+
+                                for (const fab of newFabs) {
+                                    const components = buildCraftComponents(fab as any, remainingPool as any);
+                                    const slots = decodeFabricatorSlots(fab as any).filter(
+                                        (s: any) => s.attributeIndex !== 2006 && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
+                                    );
+                                    const coveredCounts = new Map<number, number>();
+                                    for (const c of components) {
+                                        coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
+                                    }
+                                    const allCovered = slots.every(
+                                        (s: any) => (coveredCounts.get(s.attributeIndex) ?? 0) >= s.numRequired - s.numFulfilled
+                                    );
+
+                                    if (allCovered) {
+                                        const usedIds = new Set(components.map((c: any) => c.subject_item_id));
+                                        craftPlan.push({ fabId: String(fab.id), componentIds: [...usedIds] });
+                                        remainingPool = remainingPool.filter((i: any) => !usedIds.has(String(i.id)));
+                                    } else {
+                                        uncraftableFabIds.push(String(fab.id));
+                                    }
+                                }
+                                const leftoverIds = remainingPool.map((i: any) => String(i.id));
+
+                                log.info(`[craftingService] Craft plan: ${craftPlan.length} fab(s) craftable, ${uncraftableFabIds.length} uncraftable, ${leftoverIds.length} leftover component(s)`);
+
+                                if (craftPlan.length === 0) {
+                                    doRefund('No fabricators could be crafted — components insufficient');
+                                    return;
+                                }
+
+                                const resultKitIds: string[] = [];
+                                const failedFabIds: string[] = [...uncraftableFabIds];
+                                let planIndex = 0;
+
+                                const sendResults = (): void => {
+                                    const returnIds = [...resultKitIds, ...failedFabIds, ...leftoverIds];
+                                    if (returnIds.length === 0) {
+                                        log.warn(`[craftingService] Nothing to return for offer ${offer.id}`);
+                                        return;
+                                    }
+                                    const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                    returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+
+                                    let msg: string;
+                                    if (resultKitIds.length > 0 && failedFabIds.length === 0 && leftoverIds.length === 0) {
+                                        if (resultKitIds.length === 1) {
+                                            const kitBpItem = ((this.bot.tf2 as any).backpack as any[] ?? []).find((i: any) => String(i.id) === resultKitIds[0]);
+                                            const kitName = kitBpItem
+                                                ? ((this.bot.schema as any).getItemByDefindex?.(kitBpItem.def_index)?.item_name ?? 'Killstreak Kit')
+                                                : 'Killstreak Kit';
+                                            msg = `Here is your ${kitName}! Thanks for using the crafting service.`;
+                                        } else {
+                                            msg = `Here are your ${resultKitIds.length} Killstreak Kits! Thanks for using the crafting service.`;
+                                        }
+                                    } else {
+                                        const parts: string[] = [];
+                                        if (resultKitIds.length > 0) parts.push(`${resultKitIds.length} kit(s) crafted`);
+                                        if (failedFabIds.length > 0) parts.push(`${failedFabIds.length} fabricator(s) could not be crafted (returned)`);
+                                        if (leftoverIds.length > 0) parts.push(`${leftoverIds.length} leftover component(s) returned`);
+                                        msg = parts.join(', ') + '. Thanks for using the crafting service.';
+                                    }
+
+                                    returnOffer.setMessage(msg);
+                                    log.info(`[craftingService] Sending return offer to ${partnerSteamID64}: ${returnIds.length} item(s)`);
+                                    this.bot.trades.sendOffer(returnOffer)
+                                        .then(status => {
+                                            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                        })
+                                        .catch((sendErr: Error) => {
+                                            log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${sendErr.message}`);
+                                            this.bot.sendMessage(
+                                                offer.partner,
+                                                `⚠️ Crafting complete but couldn't send results automatically. Contact the bot owner. Kit IDs: ${resultKitIds.join(', ')}`
+                                            );
+                                        });
+                                };
+
+                                const craftNext = (): void => {
+                                    if (planIndex >= craftPlan.length) {
+                                        sendResults();
+                                        return;
+                                    }
+                                    const { fabId, componentIds } = craftPlan[planIndex++];
+                                    log.debug(`[craftingService] Crafting fab ${fabId} (${planIndex}/${craftPlan.length}) with ${componentIds.length} component(s)`);
+                                    this.bot.tf2gc.craftFabricator(fabId, componentIds.length > 0 ? componentIds : undefined, (err, kitId) => {
+                                        if (err || !kitId) {
+                                            log.warn(`[craftingService] Craft failed for fab ${fabId}: ${err?.message ?? 'no kit returned'}`);
+                                            failedFabIds.push(fabId);
+                                        } else {
+                                            log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${kitId}`);
+                                            resultKitIds.push(kitId);
+                                        }
+                                        craftNext();
+                                    });
+                                };
+
+                                craftNext();
+                            };
+
+                            // Kit application path: apply unapplied KS Kits to plain weapons, then craft fabs
+                            const unappliedKits = kitAssetIds && kitAssetIds.length > 0
+                                ? availablePool.filter((i: any) => KS_KIT_DEFINDEXES.includes(i.def_index))
+                                : [];
+
+                            if (unappliedKits.length === 0) {
+                                runMultiFabCraft(availablePool);
+                                return;
+                            }
+
                             log.info(`[craftingService] ${unappliedKits.length} unapplied kit(s) — applying before fabricator craft`);
 
-                            // Plain weapons = new items that are not the fabricator, not kits, and not robot parts (5700–5707)
-                            const ROBOT_PART_DEFINDEXES = [5700, 5701, 5702, 5703, 5704, 5705, 5706, 5707];
-                            const plainWeapons = newItems.filter((i: any) =>
-                                !FABRICATOR_DEFINDEXES.includes(i.def_index) &&
-                                !KS_KIT_DEFINDEXES_ALL.includes(i.def_index) &&
+                            const plainWeapons = availablePool.filter((i: any) =>
+                                !KS_KIT_DEFINDEXES.includes(i.def_index) &&
                                 !ROBOT_PART_DEFINDEXES.includes(i.def_index)
                             );
-                            const robotParts = newItems.filter((i: any) => ROBOT_PART_DEFINDEXES.includes(i.def_index));
+                            const robotPartItems = availablePool.filter((i: any) => ROBOT_PART_DEFINDEXES.includes(i.def_index));
 
-                            // Match each kit to a weapon by the kit's recipe slot itemDefIndex
                             const kitPairs: { kitId: string; weaponId: string }[] = [];
                             const usedWeaponIds = new Set<string>();
                             for (const kit of unappliedKits) {
@@ -2508,17 +2572,19 @@ export default class MyHandler extends Handler {
                                 kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
                             }
 
-                            // Apply kits sequentially; track resulting weapon IDs (may change if GC creates new item)
                             const resultWeaponIds: string[] = [];
                             let pairIndex = 0;
 
                             const applyNext = (): void => {
                                 if (pairIndex >= kitPairs.length) {
-                                    // All kits applied — combine KS weapons with robot parts for fabricator
-                                    const robotPartIds = robotParts.map((i: any) => String(i.id));
-                                    const allComponentIds = [...resultWeaponIds, ...robotPartIds];
-                                    log.debug(`[craftingService] Kit application done — proceeding with ${allComponentIds.length} component(s)`);
-                                    doCraft(allComponentIds);
+                                    // Look up resulting KS weapons from current backpack and build full pool
+                                    const currentBp: any[] = (this.bot.tf2 as any).backpack ?? [];
+                                    const resultWeaponItems = resultWeaponIds
+                                        .map(id => currentBp.find((i: any) => String(i.id) === id))
+                                        .filter(Boolean);
+                                    const fullPool = [...robotPartItems, ...resultWeaponItems];
+                                    log.debug(`[craftingService] Kit application done — pool: ${fullPool.length} item(s) for fab crafting`);
+                                    runMultiFabCraft(fullPool);
                                     return;
                                 }
                                 const { kitId, weaponId } = kitPairs[pairIndex++];
