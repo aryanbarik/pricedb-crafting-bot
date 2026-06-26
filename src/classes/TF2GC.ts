@@ -38,7 +38,8 @@ type Job = {
         | 'sort'
         | 'removeAttributes'
         | 'craftToken'
-        | 'craftFabricator';
+        | 'craftFabricator'
+        | 'applyKSKit';
     defindex?: number;
     sku?: string;
     skus?: string[];
@@ -46,12 +47,15 @@ type Job = {
     assetids?: string[];
     fabricatorId?: string;
     componentIds?: string[];
+    kitId?: string;
+    weaponId?: string;
     tokenType?: TokenType;
     subTokenType?: SubTokenType;
     sortType?: number;
     attribute?: Attributes;
     callback?: (err?: Error) => void;
     fabricatorCallback?: (err: Error | null, kitId?: string) => void;
+    kitCallback?: (err: Error | null, resultWeaponId?: string) => void;
 };
 
 type ListenForEvent =
@@ -172,6 +176,11 @@ export default class TF2GC {
         this.newJob({ type: 'craftFabricator', fabricatorId, componentIds, fabricatorCallback: cb });
     }
 
+    applyKSKit(kitId: string, weaponId: string, cb: (err: Error | null, resultWeaponId?: string) => void): void {
+        log.debug(`Enqueueing applyKSKit job: kit ${kitId} → weapon ${weaponId}`);
+        this.newJob({ type: 'applyKSKit', kitId, weaponId, kitCallback: cb });
+    }
+
     private newJob(job: Job): void {
         this.jobs.push(job);
         this.handleJobQueue();
@@ -226,6 +235,8 @@ export default class TF2GC {
                     func = this.handleCraftTokenJob.bind(this, job);
                 } else if (job.type === 'craftFabricator') {
                     func = this.handleCraftFabricatorJob.bind(this, job);
+                } else if (job.type === 'applyKSKit') {
+                    func = this.handleApplyKSKitJob.bind(this, job);
                 }
 
                 if (func) {
@@ -481,6 +492,102 @@ export default class TF2GC {
             log.warn(`craftFabricator: timed out waiting for KS kit for fabricator ${fabricator.id}`);
             if (job.fabricatorCallback) job.fabricatorCallback(err);
             this.finishedProcessingJob(err);
+        }, 20000);
+
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('itemAcquired', onItemAcquired);
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
+    }
+
+    private handleApplyKSKitJob(job: Job): void {
+        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
+
+        const kit = backpack?.find(i => i.id === job.kitId);
+        if (!kit) {
+            const err = new Error(`applyKSKit: kit ${job.kitId} not found in backpack`);
+            log.warn(err.message);
+            if (job.kitCallback) job.kitCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+        const weapon = backpack?.find(i => i.id === job.weaponId);
+        if (!weapon) {
+            const err = new Error(`applyKSKit: weapon ${job.weaponId} not found in backpack`);
+            log.warn(err.message);
+            if (job.kitCallback) job.kitCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+
+        // Decode the kit's recipe slots to find the weapon slot attribute index
+        const kitSlots = decodeFabricatorSlots(kit as unknown as GCBackpackItem);
+        log.debug(`applyKSKit: kit ${kit.id} (defidx ${kit.def_index}) slots: ${JSON.stringify(kitSlots.map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+
+        const weaponSlot = kitSlots.find(s => s.numFulfilled < s.numRequired);
+        if (!weaponSlot) {
+            const err = new Error(`applyKSKit: kit ${kit.id} has no unfilled slots (already applied?)`);
+            log.warn(err.message);
+            if (job.kitCallback) job.kitCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+
+        log.debug(`applyKSKit: applying kit ${kit.id} to weapon ${weapon.id} via slot attr ${weaponSlot.attributeIndex}`);
+        (this.bot.tf2 as any).fulfillDynamicRecipeComponent(kit.id, [
+            { subject_item_id: weapon.id, attribute_index: weaponSlot.attributeIndex }
+        ]);
+
+        let settled = false;
+        const originalWeaponId = String(weapon.id);
+        const originalWeaponDefidx = weapon.def_index;
+
+        const onItemAcquired = (item: TF2GCItem): void => {
+            // Kit application either creates a new KS weapon or modifies in place.
+            // If a new weapon arrives with the same defindex and a kt-tier attr, that's our result.
+            if (item.def_index !== originalWeaponDefidx) return;
+            const ktAttr = ((item as unknown as GCBackpackItem).attribute ?? []).find(a => a.def_index === 2025);
+            if (!ktAttr) return;
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            log.debug(`applyKSKit: new KS weapon acquired ${item.id} (defidx ${item.def_index})`);
+            if (job.kitCallback) job.kitCallback(null, String(item.id));
+            this.finishedProcessingJob();
+        };
+
+        const onDisconnected = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            const err = new Error('Disconnected from TF2 GC during kit application');
+            if (job.kitCallback) job.kitCallback(err);
+            this.finishedProcessingJob(err);
+        };
+
+        const applyTimeout = setTimeout(() => {
+            if (settled) return;
+            // Check if weapon was modified in place (same ID, now has kt-tier attribute)
+            const updatedWeapon = ((this.bot.tf2 as any).backpack as TF2GCItem[])?.find(i => i.id === originalWeaponId);
+            const hasKt = updatedWeapon
+                ? ((updatedWeapon as unknown as GCBackpackItem).attribute ?? []).some(a => a.def_index === 2025)
+                : false;
+            settled = true;
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            if (hasKt) {
+                log.debug(`applyKSKit: weapon ${originalWeaponId} modified in place (kt attr now present)`);
+                if (job.kitCallback) job.kitCallback(null, originalWeaponId);
+                this.finishedProcessingJob();
+            } else {
+                const err = new Error(`applyKSKit: timed out waiting for kit application on weapon ${originalWeaponId}`);
+                log.warn(err.message);
+                if (job.kitCallback) job.kitCallback(err);
+                this.finishedProcessingJob(err);
+            }
         }, 20000);
 
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
