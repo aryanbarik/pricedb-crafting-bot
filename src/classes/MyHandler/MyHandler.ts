@@ -2440,9 +2440,13 @@ export default class MyHandler extends Handler {
                                             return;
                                         }
                                         log.info(`[craftingService] Craft succeeded — kit ${kitId}. Sending back to ${partnerSteamID64}`);
+                                        const kitBackpackItem = ((this.bot.tf2 as any).backpack as any[] ?? []).find((i: any) => String(i.id) === kitId);
+                                        const kitName = kitBackpackItem
+                                            ? ((this.bot.schema as any).getItemByDefindex?.(kitBackpackItem.def_index)?.item_name ?? 'Killstreak Kit')
+                                            : 'Killstreak Kit';
                                         const returnOffer = this.bot.manager.createOffer(offer.partner);
                                         returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: kitId });
-                                        returnOffer.setMessage('Here is your Professional Killstreak Kit! Thanks for using the crafting service.');
+                                        returnOffer.setMessage(`Here is your ${kitName}! Thanks for using the crafting service.`);
                                         this.bot.trades.sendOffer(returnOffer)
                                             .then(status => {
                                                 if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
