@@ -802,15 +802,40 @@ export default class MyHandler extends Handler {
                     // Mode A (self-service): whitelisted user provides their own components.
                     // Components may include unapplied KS Kits + plain weapons instead of pre-applied KS weapons.
                     const componentAssetIds = componentItems.map((i: any) => String(i.assetid));
-                    const kitAssetIds = componentItems
-                        .filter((i: any) => {
-                            const name: string = i.market_hash_name ?? '';
-                            return name.includes('Killstreak') && name.includes('Kit') && !name.includes('Fabricator');
-                        })
-                        .map((i: any) => String(i.assetid));
+                    const isKitItem = (i: any): boolean => {
+                        const n: string = i.market_hash_name ?? '';
+                        return n.includes('Killstreak') && n.includes('Kit') && !n.includes('Fabricator');
+                    };
+                    const kitAssetIds = componentItems.filter(isKitItem).map((i: any) => String(i.assetid));
+
+                    // Match each kit to its target weapon by name before accepting.
+                    // GC item IDs are stable across trades so assetids remain valid in post-accept.
+                    const kitWeaponPairs: { kitAssetId: string; weaponAssetId: string }[] = [];
+                    const usedForPairing = new Set<string>();
+                    for (const kit of componentItems.filter(isKitItem)) {
+                        const rawName: string = kit.market_hash_name ?? '';
+                        const weaponName = rawName
+                            .replace(/^(Non-Craftable|Strange|Unique|Genuine)\s+/i, '')
+                            .replace(/^(Professional|Specialized)\s+Killstreak\s+/i, '')
+                            .replace(/^Killstreak\s+/i, '')
+                            .replace(/\s+Kit$/i, '')
+                            .trim();
+                        const match = componentItems.find((w: any) => {
+                            if (usedForPairing.has(String(w.assetid))) return false;
+                            if (String(w.assetid) === String(kit.assetid)) return false;
+                            const wn: string = w.market_hash_name ?? '';
+                            if (wn.includes('Killstreak') || wn.includes('Kit') || wn.includes('Fabricator')) return false;
+                            return weaponName.length > 0 && wn.includes(weaponName);
+                        });
+                        if (match) {
+                            usedForPairing.add(String(match.assetid));
+                            kitWeaponPairs.push({ kitAssetId: String(kit.assetid), weaponAssetId: String(match.assetid) });
+                        }
+                    }
+
                     // Snapshot current GC backpack IDs BEFORE accepting — used to find new items after trade
                     const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-                    offer.data('craftingService', { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds });
+                    offer.data('craftingService', { fabricatorAssetIds, componentAssetIds, kitAssetIds, kitWeaponPairs, preTradeIds });
                     offer.log('info', `[Mode A] crafting service — ${fabricatorAssetIds.length} fabricator(s) [${fabricatorAssetIds.join(', ')}] + ${componentItems.length} component(s)${kitAssetIds.length > 0 ? ` (${kitAssetIds.length} unapplied kit(s))` : ''}`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 } else if (keyCount >= 2) {
@@ -2374,11 +2399,11 @@ export default class MyHandler extends Handler {
 
                     // Crafting service: trigger fabricator craft after backpack sync
                     const craftingService = offer.data('craftingService') as
-                        | { fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
+                        | { fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; kitWeaponPairs?: { kitAssetId: string; weaponAssetId: string }[]; preTradeIds?: string[] }
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
-                        const { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds } = craftingService;
+                        const { fabricatorAssetIds, componentAssetIds, kitAssetIds, kitWeaponPairs, preTradeIds } = craftingService;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
 
                         // preTradeIds was snapshotted in onNewTradeOffer before the trade was accepted.
@@ -2548,28 +2573,30 @@ export default class MyHandler extends Handler {
 
                             log.info(`[craftingService] ${unappliedKits.length} unapplied kit(s) — applying before fabricator craft`);
 
+                            const robotPartItems = availablePool.filter((i: any) => ROBOT_PART_DEFINDEXES.includes(i.def_index));
                             const plainWeapons = availablePool.filter((i: any) =>
                                 !KS_KIT_DEFINDEXES.includes(i.def_index) &&
                                 !ROBOT_PART_DEFINDEXES.includes(i.def_index)
                             );
-                            const robotPartItems = availablePool.filter((i: any) => ROBOT_PART_DEFINDEXES.includes(i.def_index));
 
-                            const kitPairs: { kitId: string; weaponId: string }[] = [];
-                            const usedWeaponIds = new Set<string>();
-                            for (const kit of unappliedKits) {
-                                const kitSlots = decodeFabricatorSlots(kit as any);
-                                const weaponSlot = (kitSlots as any[]).find((s: any) => s.numFulfilled < s.numRequired);
-                                const requiredDefidx = weaponSlot?.itemDefIndex ?? 0;
-                                const match = plainWeapons.find((w: any) =>
-                                    !usedWeaponIds.has(String(w.id)) &&
-                                    (requiredDefidx === 0 || w.def_index === requiredDefidx)
-                                );
-                                if (!match) {
-                                    doRefund(`No matching weapon for kit ${kit.id} (requires defidx ${requiredDefidx})`);
-                                    return;
+                            // Use pre-stored kit→weapon pairs (matched by name at detection time, IDs stable across trades)
+                            const storedPairs = kitWeaponPairs ?? [];
+                            let kitPairs: { kitId: string; weaponId: string }[];
+                            if (storedPairs.length > 0) {
+                                kitPairs = storedPairs.map(p => ({ kitId: p.kitAssetId, weaponId: p.weaponAssetId }));
+                            } else {
+                                // Fallback: match each kit to any unused plain weapon (single-kit or unmatched case)
+                                kitPairs = [];
+                                const usedWeaponIds = new Set<string>();
+                                for (const kit of unappliedKits) {
+                                    const match = plainWeapons.find((w: any) => !usedWeaponIds.has(String(w.id)));
+                                    if (!match) {
+                                        doRefund(`No weapon available for kit ${kit.id}`);
+                                        return;
+                                    }
+                                    usedWeaponIds.add(String(match.id));
+                                    kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
                                 }
-                                usedWeaponIds.add(String(match.id));
-                                kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
                             }
 
                             const resultWeaponIds: string[] = [];

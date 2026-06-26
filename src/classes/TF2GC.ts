@@ -530,9 +530,10 @@ export default class TF2GC {
         const kitSlots = decodeFabricatorSlots(kit as unknown as GCBackpackItem);
         log.debug(`applyKSKit: kit ${kit.id} (defidx ${kit.def_index}) slots: ${JSON.stringify(kitSlots.map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
 
-        const weaponSlot = kitSlots.find(s => s.numFulfilled < s.numRequired);
+        // num_required may decode as 0 for NC kits (proto field absent from wire). Use first slot regardless.
+        const weaponSlot = kitSlots[0];
         if (!weaponSlot) {
-            const err = new Error(`applyKSKit: kit ${kit.id} has no unfilled slots (already applied?)`);
+            const err = new Error(`applyKSKit: kit ${kit.id} has no recipe slots`);
             log.warn(err.message);
             if (job.kitCallback) job.kitCallback(err);
             return this.finishedProcessingJob(err);
