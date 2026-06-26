@@ -361,6 +361,9 @@ export const optionsSchema: jsonschema.Schema = {
         }
     },
     properties: {
+        craftingServiceWhitelist: {
+            $ref: '#/definitions/string-array'
+        },
         globalDisable: {
             type: 'object',
             properties: {
