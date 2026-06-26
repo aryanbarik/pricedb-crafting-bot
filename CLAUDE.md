@@ -102,6 +102,42 @@ GC message IDs: 1085 (`FulfillDynamicRecipeComponent`), 1086 (`FulfillDynamicRec
 
 ---
 
+## GC Attribute Data Types — Common Bug Source
+
+When reading item attributes from the GC backpack (`this.bot.tf2.backpack`), type mismatches are a recurring source of bugs. Check these first when attribute comparisons fail:
+
+### How `decodeProto` (node-tf2) handles fields
+
+node-tf2's `decodeProto` merges `toObject({defaults: false})` and `toObject({defaults: true})`, then replaces any field that was **absent from the wire data** AND is a "replaceable default" with `null`. Replaceable defaults are: `0` (numbers), `false` (booleans), `''` (empty strings), empty Buffers.
+
+Practical result for `CSOEconItemAttribute`:
+- Field present in wire with value `2` → `attr.value = 2` (number)
+- Field absent from wire (default = 0) → `attr.value = null` (NOT `0`)
+- Empty `value_bytes` → `attr.value_bytes = null`
+- Non-empty `value_bytes` → `attr.value_bytes = Buffer([...])`
+
+### `value` vs `value_bytes` for simple attributes
+
+`CSOEconItemAttribute` has two fields: `value` (uint32) and `value_bytes` (bytes). TF2 may send a value in either or both:
+
+| Scenario | `attr.value` | `attr.value_bytes` |
+|---|---|---|
+| Simple attr, value set (e.g. kt-tier=2 in `value` field) | `2` | `null` |
+| Simple attr, value in bytes only | `null` | `Buffer([2,0,0,0])` |
+| Both present | `2` | `Buffer([2,0,0,0])` |
+
+**Integer attributes stored in `value_bytes` use uint32 LE encoding** — read with `buf.readUInt32LE(0)`, NOT `buf.readFloatLE(0)`. Float LE of `[0x02,0x00,0x00,0x00]` is `~2.8e-45`, not `2`. This caused a bug where user-provided killstreak weapons (kt-tier in `value_bytes`) failed to match the fabricator's conditions string `"2025|||2"`.
+
+### Conditions string format
+
+`CAttribute_DynamicRecipeComponent.attributes_string` format: `"attrDefIndex|||value|||attrDefIndex2|||value2"`. Values are the **semantic integer** (e.g., `"2"` for kt-tier 2), matching the uint32 encoding in `value`/`value_bytes`.
+
+### Item IDs
+
+GC item IDs (`CSOEconItem.id`) are `uint64` — node-tf2 returns them as **strings** (via `{longs: String}`). Always `String(id)` before comparing. Never compare with `===` against a number literal.
+
+---
+
 ## Standalone Reference Implementation
 
 `aryanbarik/autofabricator` — the standalone bot that was built first to discover the GC protocol, validate the protobuf decode logic, and confirm crafting works. Use it to test GC behaviour in isolation without tf2autobot overhead. The `src/inventory.ts` there is the source of truth for slot-decode logic (now ported to `src/lib/fabricatorSlots.ts` here).

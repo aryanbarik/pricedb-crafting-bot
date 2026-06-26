@@ -2388,6 +2388,10 @@ export default class MyHandler extends Handler {
                                 .map((i: any) => String(i.id));
                             const allNewIds = newItems.map((i: any) => String(i.id));
 
+                            if (componentAssetIds.length > 0 && newCompIds.length !== componentAssetIds.length) {
+                                log.warn(`[craftingService] Backpack diff: expected ${componentAssetIds.length} component(s), got ${newCompIds.length} — may include unrelated items from concurrent operation`);
+                            }
+
                             const resolvedFabId = newFab ? String(newFab.id) : fabricatorAssetId;
                             const resolvedCompIds = componentAssetIds.length > 0
                                 ? (newCompIds.length > 0 ? newCompIds : componentAssetIds)

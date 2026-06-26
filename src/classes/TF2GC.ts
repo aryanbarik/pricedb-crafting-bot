@@ -406,8 +406,9 @@ export default class TF2GC {
         }
 
         // Validate all required recipe slots are covered before sending to GC
-        const unfilledSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem)
-            .filter(s => s.attributeIndex !== 2006 && s.numFulfilled < s.numRequired);
+        const allSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem);
+        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => s.attributeIndex !== 2006).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+        const unfilledSlots = allSlots.filter(s => s.attributeIndex !== 2006 && s.numFulfilled < s.numRequired);
         const coveredCounts = new Map<number, number>();
         for (const c of components) {
             coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
@@ -416,7 +417,15 @@ export default class TF2GC {
             s => (coveredCounts.get(s.attributeIndex) ?? 0) < (s.numRequired - s.numFulfilled)
         );
         if (incompleteSlots.length > 0) {
-            const msg = `Incomplete recipe: ${incompleteSlots.length} slot(s) not provided (send all required weapon + robot parts)`;
+            const slotDetails = incompleteSlots.map(s => {
+                const have = coveredCounts.get(s.attributeIndex) ?? 0;
+                const need = s.numRequired - s.numFulfilled;
+                const itemDesc = s.itemDefIndex === 0
+                    ? `kt-? weapon (conditions: ${s.conditionsStr})`
+                    : `defindex ${s.itemDefIndex}`;
+                return `slot ${s.attributeIndex}: need ${need}×${itemDesc}, have ${have}`;
+            }).join('; ');
+            const msg = `Incomplete recipe: ${incompleteSlots.length} slot(s) — ${slotDetails}`;
             log.warn(`craftFabricator: ${msg}`);
             if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
             return this.finishedProcessingJob(new Error(msg));

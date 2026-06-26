@@ -73,7 +73,7 @@ function getItemAttrValue(item: GCBackpackItem, attrDefIndex: number): number | 
     if (!attr) return null;
     if (attr.value !== null && attr.value !== undefined) return Number(attr.value);
     const buf = toBuffer(attr.value_bytes);
-    if (buf && buf.length >= 4) return buf.readFloatLE(0);
+    if (buf && buf.length >= 4) return buf.readUInt32LE(0);
     return null;
 }
 
