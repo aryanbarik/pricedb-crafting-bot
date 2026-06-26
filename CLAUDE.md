@@ -4,6 +4,17 @@ This is a fork of [TF2-Price-DB/tf2autobot-pricedb](https://github.com/TF2-Price
 
 All crafting-related changes live on the `feature/fabricator-crafting` branch.
 
+## Known-Good Rollback Point
+
+**Tag `crafting-working-v1` (commit `bbecd81c`) — Pro KS Fabricator crafting confirmed working end-to-end on 2026-06-26.**
+
+To restore: `git checkout crafting-working-v1`
+
+What was confirmed working at this tag:
+- Mode A: user sends fabricator + Spec KS weapons + robot parts → bot crafts → Pro KS Kit returned
+- Output-spec slots (defidx ∈ {6526,6527,6528}) correctly skipped as non-inputs
+- `value_bytes` for killstreak tier read as float32 LE (`readFloatLE`) — tier 2 = `[0,0,0,64]` = 2.0
+
 ---
 
 ## The `@tf2autobot/tf2` Patch — How It Works and How to Maintain It
