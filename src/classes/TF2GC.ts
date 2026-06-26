@@ -405,50 +405,71 @@ export default class TF2GC {
             components = found;
         }
 
+        // Validate all required recipe slots are covered before sending to GC
+        const unfilledSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem)
+            .filter(s => s.attributeIndex !== 2006 && s.numFulfilled < s.numRequired);
+        const coveredCounts = new Map<number, number>();
+        for (const c of components) {
+            coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
+        }
+        const incompleteSlots = unfilledSlots.filter(
+            s => (coveredCounts.get(s.attributeIndex) ?? 0) < (s.numRequired - s.numFulfilled)
+        );
+        if (incompleteSlots.length > 0) {
+            const msg = `Incomplete recipe: ${incompleteSlots.length} slot(s) not provided (send all required weapon + robot parts)`;
+            log.warn(`craftFabricator: ${msg}`);
+            if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
+            return this.finishedProcessingJob(new Error(msg));
+        }
+
         log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${fabricator.id} with ${components.length} component(s)`);
         (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
 
-        // After GC confirms the craft, listen for the new kit via itemAcquired
-        this.listenForEvent(
-            'dynamicRecipeFulfilled',
-            (result: number) => {
-                if (result !== 0) {
-                    log.warn(`craftFabricator: GC returned error result ${result}`);
-                    if (job.fabricatorCallback) job.fabricatorCallback(new Error(`GC error: ${result}`));
-                    this.finishedProcessingJob(new Error(`GC error result ${result}`));
-                    return;
-                }
-                // Kit will arrive via itemAcquired — listen for the next item with a KS kit defindex
-                const KS_KIT_DEFINDEXES = [6526, 6527, 6528]; // Professional, Specialized, Basic KS Kit
-                const cancel = this.listenForEvent(
-                    'itemAcquired',
-                    (item: TF2GCItem) => {
-                        if (KS_KIT_DEFINDEXES.includes(item.def_index)) {
-                            log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
-                            if (job.fabricatorCallback) job.fabricatorCallback(null, item.id);
-                            this.finishedProcessingJob();
-                            return { success: true };
-                        }
-                        return { success: false };
-                    },
-                    () => {
-                        // timeout — craft may have succeeded but kit had an unexpected defindex
-                        log.warn('craftFabricator: timed out waiting for KS kit item after successful GC response');
-                        if (job.fabricatorCallback) job.fabricatorCallback(new Error('Timed out waiting for kit'));
-                        this.finishedProcessingJob(new Error('Timed out waiting for kit'));
-                    },
-                    err => {
-                        if (job.fabricatorCallback) job.fabricatorCallback(err);
-                        this.finishedProcessingJob(err);
-                    }
-                );
-                void cancel; // held by listenForEvent internally; cancel fires on timeout/disconnect
-            },
-            err => {
-                if (job.fabricatorCallback) job.fabricatorCallback(err);
-                this.finishedProcessingJob(err);
-            }
-        );
+        // Listen directly for itemAcquired — standalone confirmed the response event (1086) is not needed.
+        // Use raw listeners with a 20-second timeout (listenForEvent is hardcoded to 10s, too short).
+        const KS_KIT_DEFINDEXES = [6526, 6527, 6528];
+        let settled = false;
+
+        const onItemAcquired = (item: TF2GCItem): void => {
+            if (!KS_KIT_DEFINDEXES.includes(item.def_index)) return;
+            if (settled) return;
+            settled = true;
+            clearTimeout(kitTimeout);
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
+            if (job.fabricatorCallback) job.fabricatorCallback(null, item.id);
+            this.finishedProcessingJob();
+        };
+
+        const onDisconnected = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(kitTimeout);
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            const err = new Error('Disconnected from TF2 GC');
+            if (job.fabricatorCallback) job.fabricatorCallback(err);
+            this.finishedProcessingJob(err);
+        };
+
+        const kitTimeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            const err = new Error('Timed out waiting for kit');
+            log.warn(`craftFabricator: timed out waiting for KS kit for fabricator ${fabricator.id}`);
+            if (job.fabricatorCallback) job.fabricatorCallback(err);
+            this.finishedProcessingJob(err);
+        }, 20000);
+
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('itemAcquired', onItemAcquired);
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
     }
 
     private handleCraftJobWeapon(job: Job): void {
