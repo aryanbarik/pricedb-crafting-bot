@@ -778,6 +778,41 @@ export default class MyHandler extends Handler {
         const isContainsHighValue =
             Object.keys(getHighValue.our.items).length > 0 || Object.keys(getHighValue.their.items).length > 0;
 
+        // Crafting service: bot gives nothing, customer sends fabricator + parts or fabricator + keys.
+        // Must run before the admin check so admins also go through the craft flow.
+        if (offer.itemsToGive.length === 0 && offer.itemsToReceive.length > 0) {
+            const fabricatorItem = (offer.itemsToReceive as any[]).find(
+                (item: any) => typeof item.market_hash_name === 'string' && item.market_hash_name.includes('Fabricator')
+            );
+            if (fabricatorItem) {
+                const fabAssetId = String(fabricatorItem.assetid);
+                const otherItems = (offer.itemsToReceive as any[]).filter(
+                    (item: any) => item.assetid !== fabricatorItem.assetid
+                );
+                const componentItems = otherItems.filter(
+                    (item: any) => item.market_hash_name !== 'Mann Co. Supply Crate Key'
+                );
+                const keyCount = otherItems.length - componentItems.length;
+
+                const isWhitelisted =
+                    isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+
+                if (isWhitelisted && componentItems.length > 0) {
+                    // Mode A (self-service): whitelisted user provides their own components
+                    const componentAssetIds = componentItems.map((i: any) => String(i.assetid));
+                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds });
+                    offer.log('info', `[Mode A] crafting service — fabricator ${fabAssetId} + ${componentItems.length} component(s)`);
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                } else if (keyCount >= 2) {
+                    // Mode B (key payment): bot uses own parts, keeps keys as payment
+                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds: [] });
+                    offer.log('info', `[Mode B] crafting service — fabricator ${fabAssetId} + ${keyCount} key(s)`);
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                }
+                // Lone fabricator or non-whitelisted with components: fall through
+            }
+        }
+
         // Check if the offer is from an admin
         if (isAdmin) {
             offer.log(
@@ -822,40 +857,6 @@ export default class MyHandler extends Handler {
 
         const itemsToGiveCount = offer.itemsToGive.length;
         const itemsToReceiveCount = offer.itemsToReceive.length;
-
-        // Crafting service: bot gives nothing, customer sends fabricator + parts or fabricator + keys
-        if (itemsToGiveCount === 0 && itemsToReceiveCount > 0) {
-            const fabricatorItem = (offer.itemsToReceive as any[]).find(
-                (item: any) => typeof item.market_hash_name === 'string' && item.market_hash_name.includes('Fabricator')
-            );
-            if (fabricatorItem) {
-                const fabAssetId = String(fabricatorItem.assetid);
-                const otherItems = (offer.itemsToReceive as any[]).filter(
-                    (item: any) => item.assetid !== fabricatorItem.assetid
-                );
-                const componentItems = otherItems.filter(
-                    (item: any) => item.market_hash_name !== 'Mann Co. Supply Crate Key'
-                );
-                const keyCount = otherItems.length - componentItems.length;
-
-                const isWhitelisted =
-                    isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
-
-                if (isWhitelisted && componentItems.length > 0) {
-                    // Mode A (self-service): whitelisted user provides their own components
-                    const componentAssetIds = componentItems.map((i: any) => String(i.assetid));
-                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds });
-                    offer.log('info', `[Mode A] crafting service — fabricator ${fabAssetId} + ${componentItems.length} component(s)`);
-                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
-                } else if (keyCount >= 2) {
-                    // Mode B (key payment): bot uses own parts, keeps keys as payment
-                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds: [] });
-                    offer.log('info', `[Mode B] crafting service — fabricator ${fabAssetId} + ${keyCount} key(s)`);
-                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
-                }
-                // Lone fabricator or non-whitelisted with components: fall through to price check
-            }
-        }
 
         // check if the trade is valid
         const isCannotProceedProcessingOffer = itemsToGiveCount === 0 && itemsToReceiveCount === 0;
