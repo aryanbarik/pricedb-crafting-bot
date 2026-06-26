@@ -2418,24 +2418,28 @@ export default class MyHandler extends Handler {
                                             refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                         );
                                         refundOffer.setMessage(`Refund — crafting failed: ${err?.message ?? 'unknown error'}`);
-                                        refundOffer.send((sendErr: Error | null) => {
-                                            if (sendErr) log.warn(`[craftingService] Refund send failed: ${sendErr.message}`);
-                                        });
+                                        this.bot.trades.sendOffer(refundOffer)
+                                            .then(status => {
+                                                if (status === 'pending') void this.bot.trades.acceptConfirmation(refundOffer);
+                                            })
+                                            .catch((sendErr: Error) => log.warn(`[craftingService] Refund send failed: ${sendErr.message}`));
                                         return;
                                     }
                                     log.info(`[craftingService] Craft succeeded — kit ${kitId}. Sending back to ${partnerSteamID64}`);
                                     const returnOffer = this.bot.manager.createOffer(offer.partner);
                                     returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: kitId });
                                     returnOffer.setMessage('Here is your Professional Killstreak Kit! Thanks for using the crafting service.');
-                                    returnOffer.send((sendErr: Error | null) => {
-                                        if (sendErr) {
+                                    this.bot.trades.sendOffer(returnOffer)
+                                        .then(status => {
+                                            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                        })
+                                        .catch((sendErr: Error) => {
                                             log.warn(`[craftingService] Failed to send kit to ${partnerSteamID64}: ${sendErr.message}`);
                                             this.bot.sendMessage(
                                                 offer.partner,
                                                 `⚠️ Kit crafted (ID: ${kitId}) but couldn't send automatically. Contact the bot owner.`
                                             );
-                                        }
-                                    });
+                                        });
                                 }
                             );
                         }, 5000);
