@@ -351,30 +351,51 @@ export default class TF2GC {
 
     private handleCraftFabricatorJob(job: Job): void {
         const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
-        const fabricator = backpack?.find(i => i.id === job.fabricatorId);
+        const FABRICATOR_DEFINDEXES = [20002, 20003];
 
+        // Asset IDs change when a trade completes — try original ID first, then fall back to defindex search
+        let fabricator = backpack?.find(i => i.id === job.fabricatorId);
         if (!fabricator) {
-            log.warn(`craftFabricator: fabricator ${job.fabricatorId} not found in backpack`);
-            if (job.fabricatorCallback) job.fabricatorCallback(new Error('Fabricator not found in backpack'));
-            return this.finishedProcessingJob(new Error('Fabricator not found'));
+            const candidates = (backpack ?? []).filter(i => FABRICATOR_DEFINDEXES.includes(i.def_index));
+            if (candidates.length === 1) {
+                fabricator = candidates[0];
+                log.debug(`craftFabricator: original ID ${job.fabricatorId} changed after trade; found by defindex as ${fabricator.id}`);
+            } else if (candidates.length > 1) {
+                log.warn(`craftFabricator: fabricator ${job.fabricatorId} not found by ID; ${candidates.length} candidates by defindex, ambiguous`);
+                if (job.fabricatorCallback) job.fabricatorCallback(new Error('Fabricator not found in backpack (ambiguous — multiple fabricators)'));
+                return this.finishedProcessingJob(new Error('Fabricator not found (ambiguous)'));
+            } else {
+                log.warn(`craftFabricator: fabricator ${job.fabricatorId} not found in backpack`);
+                if (job.fabricatorCallback) job.fabricatorCallback(new Error('Fabricator not found in backpack'));
+                return this.finishedProcessingJob(new Error('Fabricator not found'));
+            }
         }
 
         let components: { subject_item_id: string; attribute_index: number }[];
 
         if (job.componentIds && job.componentIds.length > 0) {
-            // Mode A: use the specific provided item IDs (already in bot's backpack after the trade)
-            const componentItems = job.componentIds
+            // Mode A: use provided components — try by original ID first, fall back to recipe-based lookup
+            const foundById = job.componentIds
                 .map(id => backpack.find(i => i.id === id))
                 .filter((i): i is TF2GCItem => i !== undefined) as unknown as GCBackpackItem[];
+
+            const componentItems: GCBackpackItem[] = foundById.length === job.componentIds.length
+                ? foundById
+                : (backpack.filter(i => i.id !== fabricator!.id) as unknown as GCBackpackItem[]);
+
+            if (foundById.length !== job.componentIds.length) {
+                log.debug(`craftFabricator [Mode A]: ${job.componentIds.length - foundById.length} component ID(s) changed after trade; matching from backpack by recipe slots`);
+            }
+
             components = buildCraftComponents(fabricator as unknown as GCBackpackItem, componentItems);
             if (components.length === 0) {
-                log.warn(`craftFabricator [Mode A]: no components could be mapped for fabricator ${job.fabricatorId}`);
+                log.warn(`craftFabricator [Mode A]: no components could be mapped for fabricator ${fabricator.id}`);
                 if (job.fabricatorCallback) job.fabricatorCallback(new Error('Provided items did not match any recipe slots'));
                 return this.finishedProcessingJob(new Error('No components matched'));
             }
         } else {
             // Mode B: find matching items from the bot's own existing inventory
-            const botItems = backpack.filter(i => i.id !== job.fabricatorId) as unknown as GCBackpackItem[];
+            const botItems = backpack.filter(i => i.id !== fabricator!.id) as unknown as GCBackpackItem[];
             const { components: found, missing } = findBotComponents(fabricator as unknown as GCBackpackItem, botItems);
             if (missing.length > 0) {
                 const msg = `Bot is missing parts: ${missing.join(', ')}`;
@@ -385,8 +406,8 @@ export default class TF2GC {
             components = found;
         }
 
-        log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${job.fabricatorId} with ${components.length} component(s)`);
-        (this.bot.tf2 as any).fulfillDynamicRecipeComponent(job.fabricatorId, components);
+        log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${fabricator.id} with ${components.length} component(s)`);
+        (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
 
         // After GC confirms the craft, listen for the new kit via itemAcquired
         this.listenForEvent(
