@@ -14,6 +14,7 @@ What was confirmed working at this tag:
 - Mode A: user sends fabricator + Spec KS weapons + robot parts → bot crafts → Pro KS Kit returned
 - Output-spec slots (defidx ∈ {6526,6527,6528}) correctly skipped as non-inputs
 - `value_bytes` for killstreak tier read as float32 LE (`readFloatLE`) — tier 2 = `[0,0,0,64]` = 2.0
+- Refund flow works: on craft failure, all provided components are returned to the user
 
 ---
 
