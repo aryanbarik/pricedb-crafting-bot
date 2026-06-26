@@ -800,12 +800,15 @@ export default class MyHandler extends Handler {
                 if (isWhitelisted && componentItems.length > 0) {
                     // Mode A (self-service): whitelisted user provides their own components
                     const componentAssetIds = componentItems.map((i: any) => String(i.assetid));
-                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds });
+                    // Snapshot current GC backpack IDs BEFORE accepting — used to find new items after trade
+                    const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds, preTradeIds });
                     offer.log('info', `[Mode A] crafting service — fabricator ${fabAssetId} + ${componentItems.length} component(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 } else if (keyCount >= 2) {
                     // Mode B (key payment): bot uses own parts, keeps keys as payment
-                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds: [] });
+                    const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+                    offer.data('craftingService', { fabricatorAssetId: fabAssetId, componentAssetIds: [], preTradeIds });
                     offer.log('info', `[Mode B] crafting service — fabricator ${fabAssetId} + ${keyCount} key(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 }
@@ -2363,28 +2366,20 @@ export default class MyHandler extends Handler {
 
                     // Crafting service: trigger fabricator craft after backpack sync
                     const craftingService = offer.data('craftingService') as
-                        | { fabricatorAssetId: string; componentAssetIds: string[] }
+                        | { fabricatorAssetId: string; componentAssetIds: string[]; preTradeIds?: string[] }
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
-                        const { fabricatorAssetId, componentAssetIds } = craftingService;
+                        const { fabricatorAssetId, componentAssetIds, preTradeIds } = craftingService;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
 
-                        // Snapshot GC backpack IDs now, before the trade's items arrive.
-                        // itemAcquired events will fire as the GC syncs — items not in the snapshot are from this trade.
-                        const knownIds = new Set<string>(
-                            ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id))
-                        );
-                        const newItems: any[] = [];
-                        const onItemAcquired = (item: any): void => {
-                            if (!knownIds.has(String(item.id))) {
-                                newItems.push(item);
-                            }
-                        };
-                        (this.bot.tf2 as any).on('itemAcquired', onItemAcquired);
+                        // preTradeIds was snapshotted in onNewTradeOffer before the trade was accepted.
+                        // After 5s the GC backpack is synced — any ID not in the snapshot is from this trade.
+                        const knownIds = new Set<string>(preTradeIds ?? []);
 
                         setTimeout(() => {
-                            (this.bot.tf2 as any).removeListener('itemAcquired', onItemAcquired);
+                            const currentBackpack: any[] = (this.bot.tf2 as any).backpack ?? [];
+                            const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
 
                             const FABRICATOR_DEFINDEXES = [20002, 20003];
                             const newFab = newItems.find((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index));
@@ -2401,7 +2396,7 @@ export default class MyHandler extends Handler {
                             if (newFab) {
                                 log.debug(`[craftingService] Resolved fabricator ID: ${resolvedFabId} (was ${fabricatorAssetId})`);
                             } else {
-                                log.warn(`[craftingService] itemAcquired did not fire for fabricator — using original ID ${fabricatorAssetId}`);
+                                log.warn(`[craftingService] Could not find fabricator in backpack diff — using original ID ${fabricatorAssetId}`);
                             }
 
                             this.bot.tf2gc.craftFabricator(
@@ -2414,7 +2409,7 @@ export default class MyHandler extends Handler {
                                             offer.partner,
                                             `⚠️ Crafting failed: ${err?.message ?? 'unknown error'}. Your items will be returned.`
                                         );
-                                        // Use new IDs from itemAcquired — original offer IDs are stale after trade
+                                        // Use new IDs from backpack diff — original offer IDs are stale after trade
                                         const refundIds = allNewIds.length > 0
                                             ? allNewIds
                                             : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
