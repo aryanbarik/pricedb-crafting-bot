@@ -7,7 +7,8 @@ export const FABRICATOR_DEFINDEXES = [20002, 20003]; // Specialized, Professiona
 const SLOT_OUTPUT = 2006;
 const ATTR_KILLSTREAK_TIER = 2025;
 // KS Kit defindexes — when a slot's itemDefIndex is one of these, it's an output specification, not an input
-const KS_KIT_DEFINDEXES = [6526, 6527, 6528];
+// 6523 = Specialized KS Kit (Spec KS Fabricator output), 6526 = Professional KS Kit (Pro KS Fabricator output)
+export const KS_KIT_DEFINDEXES = [6523, 6526, 6527, 6528];
 
 export interface RecipeSlot {
     attributeIndex: number; // equals the attribute_index field in CMsgFulfillDynamicRecipeComponent

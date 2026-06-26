@@ -1,6 +1,6 @@
 import Bot from './Bot';
 import log from '../lib/logger';
-import { decodeFabricatorSlots, buildCraftComponents, findBotComponents, GCBackpackItem } from '../lib/fabricatorSlots';
+import { decodeFabricatorSlots, buildCraftComponents, findBotComponents, GCBackpackItem, KS_KIT_DEFINDEXES } from '../lib/fabricatorSlots';
 
 export enum Attributes {
     Paint = 1031,
@@ -427,9 +427,8 @@ export default class TF2GC {
 
         // Validate all required recipe slots are covered before sending to GC
         const allSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem);
-        const KS_KIT_OUT = [6526, 6527, 6528]; // output spec slots — defidx is the kit produced, not an input
-        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_OUT.includes(s.itemDefIndex)).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
-        const unfilledSlots = allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_OUT.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired);
+        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex)).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+        const unfilledSlots = allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired);
         const coveredCounts = new Map<number, number>();
         for (const c of components) {
             coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
@@ -441,12 +440,20 @@ export default class TF2GC {
             const slotDetails = incompleteSlots.map(s => {
                 const have = coveredCounts.get(s.attributeIndex) ?? 0;
                 const need = s.numRequired - s.numFulfilled;
-                const itemDesc = s.itemDefIndex === 0
-                    ? `kt-? weapon (conditions: ${s.conditionsStr})`
-                    : `defindex ${s.itemDefIndex}`;
-                return `slot ${s.attributeIndex}: need ${need}×${itemDesc}, have ${have}`;
+                let itemDesc: string;
+                if (s.itemDefIndex === 0) {
+                    const tierMatch = s.conditionsStr.split(/[^0-9.]+/).filter(Boolean);
+                    const tierIdx = tierMatch.indexOf('2025');
+                    const tier = tierIdx >= 0 ? Number(tierMatch[tierIdx + 1]) : 2;
+                    const tierName = tier === 1 ? 'Killstreak' : tier === 2 ? 'Specialized Killstreak' : 'Professional Killstreak';
+                    itemDesc = `${tierName} weapon`;
+                } else {
+                    const schemaItem = (this.bot.schema as any).getItemByDefindex?.(s.itemDefIndex);
+                    itemDesc = schemaItem?.item_name ?? `item (defindex ${s.itemDefIndex})`;
+                }
+                return `need ${need}× ${itemDesc}, have ${have}`;
             }).join('; ');
-            const msg = `Incomplete recipe: ${incompleteSlots.length} slot(s) — ${slotDetails}`;
+            const msg = `Missing components — ${slotDetails}`;
             log.warn(`craftFabricator: ${msg}`);
             if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
             return this.finishedProcessingJob(new Error(msg));
@@ -456,8 +463,7 @@ export default class TF2GC {
         (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
 
         // Listen directly for itemAcquired — standalone confirmed the response event (1086) is not needed.
-        // Use raw listeners with a 20-second timeout (listenForEvent is hardcoded to 10s, too short).
-        const KS_KIT_DEFINDEXES = [6526, 6527, 6528];
+        // Use raw listeners with a 30-second timeout (listenForEvent is hardcoded to 10s, too short).
         let settled = false;
 
         const onItemAcquired = (item: TF2GCItem): void => {
@@ -492,7 +498,7 @@ export default class TF2GC {
             log.warn(`craftFabricator: timed out waiting for KS kit for fabricator ${fabricator.id}`);
             if (job.fabricatorCallback) job.fabricatorCallback(err);
             this.finishedProcessingJob(err);
-        }, 20000);
+        }, 30000);
 
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore

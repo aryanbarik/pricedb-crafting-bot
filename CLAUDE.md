@@ -103,12 +103,15 @@ The crafting code touches:
 | Specialized Fabricator | 20002 |
 | Professional Fabricator | 20003 |
 | Robot parts | 5700–5707 |
-| Professional KS Kit | 6526 |
-| Specialized KS Kit | 6527 |
+| Specialized KS Kit (output of Spec KS Fabricators) | **6523** |
+| Professional KS Kit (output of Pro KS Fabricators) | **6526** |
+| Specialized KS Kit (generic — may appear in `itemAcquired`) | 6527 |
 | Basic KS Kit | 6528 |
 | Mann Co. Supply Crate Key | SKU `5021;6` / market name `Mann Co. Supply Crate Key` |
 
-Recipe slot attribute def_indexes: 2000 (weapon), 2001–2005 (robot parts), 2006 (output — skip).
+Recipe slot attribute def_indexes: 2000 (weapon), 2001–2005 (robot parts/other inputs), 2005–2006 (output spec — skip if `itemDefIndex` ∈ `KS_KIT_DEFINDEXES`).
+
+**Output spec slots**: Slots whose `itemDefIndex` ∈ `[6523, 6526, 6527, 6528]` encode the fabricator's OUTPUT product, not an input. Filter these out in `decodeFabricatorSlots` consumers. `KS_KIT_DEFINDEXES` is exported from `src/lib/fabricatorSlots.ts` as the single source of truth.
 
 GC message IDs: 1085 (`FulfillDynamicRecipeComponent`), 1086 (`FulfillDynamicRecipeComponentResponse`).
 
