@@ -122,11 +122,13 @@ Practical result for `CSOEconItemAttribute`:
 
 | Scenario | `attr.value` | `attr.value_bytes` |
 |---|---|---|
-| Simple attr, value set (e.g. kt-tier=2 in `value` field) | `2` | `null` |
-| Simple attr, value in bytes only | `null` | `Buffer([2,0,0,0])` |
-| Both present | `2` | `Buffer([2,0,0,0])` |
+| Simple attr, value set (e.g. kt-tier=2 in `value` field) | `2` (integer) | `null` |
+| Simple attr, value in bytes only | `null` | `Buffer([0,0,0,64])` = float32 2.0 |
+| Both present | `2` | `Buffer([0,0,0,64])` |
 
-**Integer attributes stored in `value_bytes` use uint32 LE encoding** — read with `buf.readUInt32LE(0)`, NOT `buf.readFloatLE(0)`. Float LE of `[0x02,0x00,0x00,0x00]` is `~2.8e-45`, not `2`. This caused a bug where user-provided killstreak weapons (kt-tier in `value_bytes`) failed to match the fabricator's conditions string `"2025|||2"`.
+**`value_bytes` stores attribute values as float32 LE** — read with `buf.readFloatLE(0)`. For killstreak tier 2, the bytes are `[0x00, 0x00, 0x00, 0x40]` = IEEE 754 float 2.0, NOT `[0x02, 0x00, 0x00, 0x00]` (uint32 2). Do NOT use `readUInt32LE` — that returns `1073741824` for tier-2 weapons (the raw bit pattern of float 2.0), which never matches `2`.
+
+The `value` field (proto uint32) and the `value_bytes` float32 both encode the same logical value — e.g. killstreak tier 2 — so `Number(attr.value) === buf.readFloatLE(0)` holds when both are present.
 
 ### Conditions string format
 
