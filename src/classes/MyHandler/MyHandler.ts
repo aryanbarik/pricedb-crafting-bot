@@ -2369,10 +2369,44 @@ export default class MyHandler extends Handler {
                         const partnerSteamID64 = offer.partner.getSteamID64();
                         const { fabricatorAssetId, componentAssetIds } = craftingService;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
+
+                        // Snapshot GC backpack IDs now, before the trade's items arrive.
+                        // itemAcquired events will fire as the GC syncs — items not in the snapshot are from this trade.
+                        const knownIds = new Set<string>(
+                            ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id))
+                        );
+                        const newItems: any[] = [];
+                        const onItemAcquired = (item: any): void => {
+                            if (!knownIds.has(String(item.id))) {
+                                newItems.push(item);
+                            }
+                        };
+                        (this.bot.tf2 as any).on('itemAcquired', onItemAcquired);
+
                         setTimeout(() => {
+                            (this.bot.tf2 as any).removeListener('itemAcquired', onItemAcquired);
+
+                            const FABRICATOR_DEFINDEXES = [20002, 20003];
+                            const newFab = newItems.find((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index));
+                            const newCompIds = newItems
+                                .filter((i: any) => !FABRICATOR_DEFINDEXES.includes(i.def_index))
+                                .map((i: any) => String(i.id));
+                            const allNewIds = newItems.map((i: any) => String(i.id));
+
+                            const resolvedFabId = newFab ? String(newFab.id) : fabricatorAssetId;
+                            const resolvedCompIds = componentAssetIds.length > 0
+                                ? (newCompIds.length > 0 ? newCompIds : componentAssetIds)
+                                : [];
+
+                            if (newFab) {
+                                log.debug(`[craftingService] Resolved fabricator ID: ${resolvedFabId} (was ${fabricatorAssetId})`);
+                            } else {
+                                log.warn(`[craftingService] itemAcquired did not fire for fabricator — using original ID ${fabricatorAssetId}`);
+                            }
+
                             this.bot.tf2gc.craftFabricator(
-                                fabricatorAssetId,
-                                componentAssetIds.length > 0 ? componentAssetIds : undefined,
+                                resolvedFabId,
+                                resolvedCompIds.length > 0 ? resolvedCompIds : undefined,
                                 (err, kitId) => {
                                     if (err || !kitId) {
                                         log.warn(`[craftingService] Craft failed for offer ${offer.id}: ${err?.message ?? 'no kit returned'}`);
@@ -2380,10 +2414,13 @@ export default class MyHandler extends Handler {
                                             offer.partner,
                                             `⚠️ Crafting failed: ${err?.message ?? 'unknown error'}. Your items will be returned.`
                                         );
-                                        // Refund everything received (fabricator + components or fabricator + keys)
+                                        // Use new IDs from itemAcquired — original offer IDs are stale after trade
+                                        const refundIds = allNewIds.length > 0
+                                            ? allNewIds
+                                            : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
                                         const refundOffer = this.bot.manager.createOffer(offer.partner);
-                                        (offer.itemsToReceive as any[]).forEach(item =>
-                                            refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(item.assetid) })
+                                        refundIds.forEach(id =>
+                                            refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                         );
                                         refundOffer.setMessage(`Refund — crafting failed: ${err?.message ?? 'unknown error'}`);
                                         refundOffer.send((sendErr: Error | null) => {

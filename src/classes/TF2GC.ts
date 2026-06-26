@@ -374,17 +374,16 @@ export default class TF2GC {
         let components: { subject_item_id: string; attribute_index: number }[];
 
         if (job.componentIds && job.componentIds.length > 0) {
-            // Mode A: use provided components — try by original ID first, fall back to recipe-based lookup
-            const foundById = job.componentIds
+            // Mode A: use provided component IDs — MyHandler resolves new IDs via itemAcquired before this runs
+            const componentItems = job.componentIds
                 .map(id => backpack.find(i => i.id === id))
                 .filter((i): i is TF2GCItem => i !== undefined) as unknown as GCBackpackItem[];
 
-            const componentItems: GCBackpackItem[] = foundById.length === job.componentIds.length
-                ? foundById
-                : (backpack.filter(i => i.id !== fabricator!.id) as unknown as GCBackpackItem[]);
-
-            if (foundById.length !== job.componentIds.length) {
-                log.debug(`craftFabricator [Mode A]: ${job.componentIds.length - foundById.length} component ID(s) changed after trade; matching from backpack by recipe slots`);
+            if (componentItems.length !== job.componentIds.length) {
+                const missing = job.componentIds.length - componentItems.length;
+                log.warn(`craftFabricator [Mode A]: ${missing} component ID(s) not found in backpack`);
+                if (job.fabricatorCallback) job.fabricatorCallback(new Error(`${missing} component item(s) not found in backpack`));
+                return this.finishedProcessingJob(new Error('Component items not found'));
             }
 
             components = buildCraftComponents(fabricator as unknown as GCBackpackItem, componentItems);
