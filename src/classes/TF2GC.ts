@@ -386,6 +386,15 @@ export default class TF2GC {
                 return this.finishedProcessingJob(new Error('Component items not found'));
             }
 
+            // Diagnostic: log attr 2025 (killstreak tier) for each non-part component
+            const ROBOT_PART_DEFINDEXES = [5700, 5701, 5702, 5703, 5704, 5705, 5706, 5707];
+            for (const item of componentItems) {
+                if (!ROBOT_PART_DEFINDEXES.includes(item.def_index as unknown as number)) {
+                    const attrs = (item as unknown as GCBackpackItem).attribute ?? [];
+                    const tier = attrs.find(a => a.def_index === 2025);
+                    log.debug(`craftFabricator [Mode A] weapon candidate ${(item as any).id} defidx=${item.def_index}: attr2025=${JSON.stringify(tier)}, all_attrs=${JSON.stringify(attrs.map(a => ({ d: a.def_index, v: a.value, vb: (a as any).value_bytes })))}`);
+                }
+            }
             components = buildCraftComponents(fabricator as unknown as GCBackpackItem, componentItems);
             if (components.length === 0) {
                 log.warn(`craftFabricator [Mode A]: no components could be mapped for fabricator ${fabricator.id}`);
@@ -407,8 +416,9 @@ export default class TF2GC {
 
         // Validate all required recipe slots are covered before sending to GC
         const allSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem);
-        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => s.attributeIndex !== 2006).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
-        const unfilledSlots = allSlots.filter(s => s.attributeIndex !== 2006 && s.numFulfilled < s.numRequired);
+        const KS_KIT_OUT = [6526, 6527, 6528]; // output spec slots — defidx is the kit produced, not an input
+        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_OUT.includes(s.itemDefIndex)).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+        const unfilledSlots = allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_OUT.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired);
         const coveredCounts = new Map<number, number>();
         for (const c of components) {
             coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);

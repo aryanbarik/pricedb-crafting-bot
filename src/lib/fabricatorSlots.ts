@@ -6,6 +6,8 @@ export const FABRICATOR_DEFINDEXES = [20002, 20003]; // Specialized, Professiona
 // Attribute def_index constants for recipe slots
 const SLOT_OUTPUT = 2006;
 const ATTR_KILLSTREAK_TIER = 2025;
+// KS Kit defindexes — when a slot's itemDefIndex is one of these, it's an output specification, not an input
+const KS_KIT_DEFINDEXES = [6526, 6527, 6528];
 
 export interface RecipeSlot {
     attributeIndex: number; // equals the attribute_index field in CMsgFulfillDynamicRecipeComponent
@@ -61,7 +63,9 @@ export function decodeFabricatorSlots(item: GCBackpackItem): RecipeSlot[] {
 }
 
 function parseRequiredAttrValue(conditionsStr: string, attrDefIndex: number): number | null {
-    const parts = conditionsStr.split('|||');
+    // Separator is pipe + [0x01,0x02,0x01,0x03] + pipe (binary sequence appearing twice between key and value)
+    const SEP = '|||';
+    const parts = conditionsStr.split(SEP);
     for (let i = 0; i + 1 < parts.length; i += 2) {
         if (Number(parts[i]) === attrDefIndex) return Number(parts[i + 1]);
     }
@@ -96,7 +100,7 @@ export function validateFabricatorTrade(
     }
 
     const unfilledSlots = slots.filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && s.numFulfilled < s.numRequired
+        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
     if (unfilledSlots.length === 0) {
         return { valid: false, reason: 'fabricator is already fully filled' };
@@ -148,7 +152,7 @@ export function buildCraftComponents(
     componentItems: GCBackpackItem[]
 ): { subject_item_id: string; attribute_index: number }[] {
     const slots = decodeFabricatorSlots(fabricator).filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && s.numFulfilled < s.numRequired
+        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
 
     const result: { subject_item_id: string; attribute_index: number }[] = [];
@@ -192,7 +196,7 @@ export function findBotComponents(
     botBackpack: GCBackpackItem[]
 ): BotComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && s.numFulfilled < s.numRequired
+        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
 
     const components: { subject_item_id: string; attribute_index: number }[] = [];
