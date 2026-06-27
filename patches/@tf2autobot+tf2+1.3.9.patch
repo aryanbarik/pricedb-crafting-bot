@@ -1,8 +1,8 @@
 diff --git a/node_modules/@tf2autobot/tf2/handlers.js b/node_modules/@tf2autobot/tf2/handlers.js
-index 9f942d8..a90dc0a 100644
+index 9f942d8..3e06320 100644
 --- a/node_modules/@tf2autobot/tf2/handlers.js
 +++ b/node_modules/@tf2autobot/tf2/handlers.js
-@@ -287,6 +287,16 @@ handlers[Language.CraftResponse] = function(body) {
+@@ -287,6 +287,26 @@ handlers[Language.CraftResponse] = function(body) {
  	this.emit('craftingComplete', blueprint, idList);
  };
  
@@ -16,17 +16,41 @@ index 9f942d8..a90dc0a 100644
 +	this.emit('dynamicRecipeFulfilled', result);
 +};
 +
++handlers[Language.UseItemResponse] = function(body) {
++	let result = -1;
++	try {
++		if (ByteBuffer.isByteBuffer(body) && body.remaining() >= 4) {
++			result = body.readInt32();
++		}
++	} catch (e) {}
++	this.emit('useItemResponse', result);
++};
++
  // Professor Speks
  handlers[Language.FreeTrial_ThankedBySomeone] = function(body) {
  	let proto = decodeProto(Schema.CMsgTFThankedBySomeone, body);
 diff --git a/node_modules/@tf2autobot/tf2/index.js b/node_modules/@tf2autobot/tf2/index.js
-index aa5062f..0298172 100644
+index aa5062f..9b89c40 100644
 --- a/node_modules/@tf2autobot/tf2/index.js
 +++ b/node_modules/@tf2autobot/tf2/index.js
-@@ -241,6 +241,13 @@ TeamFortress2.prototype.useItem = function(item) {
+@@ -241,6 +241,27 @@ TeamFortress2.prototype.useItem = function(item) {
  	this._send(Language.UseItemRequest, Schema.CMsgUseItem, {"item_id": item});
  };
  
++TeamFortress2.prototype.useItemOn = function(toolItemId, targetItemId) {
++	// CMsgUseItem field 8 (item_to_apply_action_to) is absent from the outdated proto definition.
++	// Encode manually with protobufjs Writer so field 8 is included in the wire bytes.
++	if (!this._steam.steamID) return false;
++	this.emit('debug', 'Sending GC message UseItemRequest (useItemOn)');
++	const $protobuf = require('protobufjs/minimal');
++	const Long = $protobuf.util.Long;
++	const writer = $protobuf.Writer.create();
++	writer.uint32(/* field 1, wire type 0 */ 8).uint64(Long.fromString(String(toolItemId), true));
++	writer.uint32(/* field 8, wire type 0 */ 64).uint64(Long.fromString(String(targetItemId), true));
++	this._steam.sendToGC(440, Language.UseItemRequest, {}, Buffer.from(writer.finish()));
++	return true;
++};
++
 +TeamFortress2.prototype.fulfillDynamicRecipeComponent = function(toolItemId, components) {
 +	this._send(Language.FulfillDynamicRecipeComponent, Schema.CMsgFulfillDynamicRecipeComponent, {
 +		"tool_item_id": toolItemId,
