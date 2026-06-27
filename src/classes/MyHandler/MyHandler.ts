@@ -821,6 +821,25 @@ export default class MyHandler extends Handler {
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 }
                 // Lone fabricator or non-whitelisted with components: fall through
+            } else {
+                // No fabricator in offer — check for kit-only trade (kit + weapon, whitelisted)
+                const allItems = offer.itemsToReceive as any[];
+                const kitItems = allItems.filter((i: any) => {
+                    const n: string = i.market_hash_name ?? '';
+                    return n.includes('Killstreak') && n.includes('Kit') && !n.includes('Fabricator');
+                });
+                const isWhitelisted =
+                    isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+                if (isWhitelisted && kitItems.length > 0) {
+                    const kitAssetIds = kitItems.map((i: any) => String(i.assetid));
+                    const componentAssetIds = allItems
+                        .filter((i: any) => i.market_hash_name !== 'Mann Co. Supply Crate Key')
+                        .map((i: any) => String(i.assetid));
+                    const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+                    offer.data('craftingService', { fabricatorAssetIds: [], componentAssetIds, kitAssetIds, preTradeIds });
+                    offer.log('info', `[Mode Kit] crafting service — ${kitItems.length} kit(s) → apply and return`);
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                }
             }
         }
 
@@ -2578,6 +2597,23 @@ export default class MyHandler extends Handler {
                                     const resultWeaponItems = resultWeaponIds
                                         .map(id => currentBp.find((i: any) => String(i.id) === id))
                                         .filter(Boolean);
+
+                                    if (newFabs.length === 0) {
+                                        // Kit-only trade — return the resulting KS weapons directly
+                                        log.info(`[craftingService] Kit-only trade — returning ${resultWeaponIds.length} KS weapon(s)`);
+                                        const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                        resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                                        returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
+                                        this.bot.trades.sendOffer(returnOffer)
+                                            .then(status => {
+                                                if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                            })
+                                            .catch((sendErr: Error) => {
+                                                log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${sendErr.message}`);
+                                            });
+                                        return;
+                                    }
+
                                     const fullPool = [...robotPartItems, ...resultWeaponItems];
                                     log.debug(`[craftingService] Kit application done — pool: ${fullPool.length} item(s) for fab crafting`);
                                     runMultiFabCraft(fullPool);

@@ -529,6 +529,7 @@ export default class TF2GC {
         // Decode the kit's recipe slots to find the weapon slot attribute index
         const kitSlots = decodeFabricatorSlots(kit as unknown as GCBackpackItem);
         log.debug(`applyKSKit: kit ${kit.id} (defidx ${kit.def_index}) slots: ${JSON.stringify(kitSlots.map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+        log.debug(`applyKSKit: kit ${kit.id} all attrs: ${JSON.stringify(((kit as unknown as GCBackpackItem).attribute ?? []).map(a => ({ def: a.def_index, val: a.value })))}`);
 
         // num_required may decode as 0 for NC kits (proto field absent from wire). Use first slot regardless.
         const weaponSlot = kitSlots[0];
@@ -539,24 +540,32 @@ export default class TF2GC {
             return this.finishedProcessingJob(err);
         }
 
+        let settled = false;
+        const originalWeaponId = String(weapon.id);
+        const originalWeaponDefidx = weapon.def_index;
+
+        // Listen for GC result code before sending — tells us if the call was accepted (0) or rejected (≠0)
+        const onRecipeFulfilled = (result: number): void => {
+            log.debug(`applyKSKit: dynamicRecipeFulfilled result=${result} (kit ${kit.id})`);
+        };
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.once('dynamicRecipeFulfilled', onRecipeFulfilled);
+
         log.debug(`applyKSKit: applying kit ${kit.id} to weapon ${weapon.id} via slot attr ${weaponSlot.attributeIndex}`);
         (this.bot.tf2 as any).fulfillDynamicRecipeComponent(kit.id, [
             { subject_item_id: weapon.id, attribute_index: weaponSlot.attributeIndex }
         ]);
 
-        let settled = false;
-        const originalWeaponId = String(weapon.id);
-        const originalWeaponDefidx = weapon.def_index;
-
         const onItemAcquired = (item: TF2GCItem): void => {
-            // Kit application either creates a new KS weapon or modifies in place.
-            // If a new weapon arrives with the same defindex and a kt-tier attr, that's our result.
-            if (item.def_index !== originalWeaponDefidx) return;
+            // Accept any newly acquired item that has a killstreak-tier attribute (attr 2025)
             const ktAttr = ((item as unknown as GCBackpackItem).attribute ?? []).find(a => a.def_index === 2025);
             if (!ktAttr) return;
             if (settled) return;
             settled = true;
             clearTimeout(applyTimeout);
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
             this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
             this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
             log.debug(`applyKSKit: new KS weapon acquired ${item.id} (defidx ${item.def_index})`);
@@ -568,6 +577,8 @@ export default class TF2GC {
             if (settled) return;
             settled = true;
             clearTimeout(applyTimeout);
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
             this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
             this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
             const err = new Error('Disconnected from TF2 GC during kit application');
@@ -583,6 +594,8 @@ export default class TF2GC {
                 ? ((updatedWeapon as unknown as GCBackpackItem).attribute ?? []).some(a => a.def_index === 2025)
                 : false;
             settled = true;
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
             this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
             this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
             if (hasKt) {
@@ -595,7 +608,7 @@ export default class TF2GC {
                 if (job.kitCallback) job.kitCallback(err);
                 this.finishedProcessingJob(err);
             }
-        }, 20000);
+        }, 30000);
 
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
