@@ -2409,6 +2409,8 @@ export default class MyHandler extends Handler {
                             const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
                             const allNewIds = newItems.map((i: any) => String(i.id));
 
+                            log.debug(`[craftingService] Backpack diff: ${newItems.length} new item(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
+
                             // All new fabs, Spec (20002) before Pro (20003)
                             const newFabs = newItems
                                 .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
@@ -2442,12 +2444,14 @@ export default class MyHandler extends Handler {
                                     .catch((sendErr: Error) => log.warn(`[craftingService] Refund send failed: ${sendErr.message}`));
                             };
 
-                            if (newFabs.length === 0) {
+                            if (newFabs.length === 0 && fabricatorAssetIds.length > 0) {
                                 doRefund('Could not find any fabricators in backpack after trade');
                                 return;
                             }
 
-                            log.debug(`[craftingService] Found ${newFabs.length} fabricator(s) in backpack diff`);
+                            if (newFabs.length > 0) {
+                                log.debug(`[craftingService] Found ${newFabs.length} fabricator(s) in backpack diff`);
+                            }
 
                             const ROBOT_PART_DEFINDEXES = [5700, 5701, 5702, 5703, 5704, 5705, 5706, 5707];
 
@@ -2561,6 +2565,10 @@ export default class MyHandler extends Handler {
                                 : [];
 
                             if (unappliedKits.length === 0) {
+                                if (fabricatorAssetIds.length === 0) {
+                                    doRefund('Kits not found in backpack after trade — cannot apply');
+                                    return;
+                                }
                                 runMultiFabCraft(availablePool);
                                 return;
                             }
