@@ -1,8 +1,8 @@
 diff --git a/node_modules/@tf2autobot/tf2/handlers.js b/node_modules/@tf2autobot/tf2/handlers.js
-index 9f942d8..3e06320 100644
+index 9f942d8..77c8857 100644
 --- a/node_modules/@tf2autobot/tf2/handlers.js
 +++ b/node_modules/@tf2autobot/tf2/handlers.js
-@@ -287,6 +287,26 @@ handlers[Language.CraftResponse] = function(body) {
+@@ -287,6 +287,36 @@ handlers[Language.CraftResponse] = function(body) {
  	this.emit('craftingComplete', blueprint, idList);
  };
  
@@ -24,6 +24,16 @@ index 9f942d8..3e06320 100644
 +		}
 +	} catch (e) {}
 +	this.emit('useItemResponse', result);
++};
++
++handlers[Language.ApplyXifierResponse] = function(body) {
++	let result = -1;
++	try {
++		if (ByteBuffer.isByteBuffer(body) && body.remaining() >= 4) {
++			result = body.readInt32();
++		}
++	} catch (e) {}
++	this.emit('applyXifierResponse', result);
 +};
 +
  // Professor Speks

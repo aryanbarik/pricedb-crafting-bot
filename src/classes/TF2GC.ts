@@ -537,19 +537,19 @@ export default class TF2GC {
             this.bot.tf2.removeListener('itemChanged', onItemChanged);
             this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
             // @ts-ignore
-            this.bot.tf2.removeListener('useItemResponse', onUseResponse);
+            this.bot.tf2.removeListener('applyXifierResponse', onXifierResponse);
         };
 
         // Log the GC response code — 0 typically means accepted
-        const onUseResponse = (result: number): void => {
-            log.debug(`applyKSKit: useItemResponse result=${result} (kit ${kit.id})`);
+        const onXifierResponse = (result: number): void => {
+            log.debug(`applyKSKit: applyXifierResponse result=${result} (kit ${kit.id})`);
         };
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
-        this.bot.tf2.once('useItemResponse', onUseResponse);
+        this.bot.tf2.once('applyXifierResponse', onXifierResponse);
 
-        log.debug(`applyKSKit: applying kit ${kit.id} to weapon ${weapon.id} via UseItemRequest`);
-        (this.bot.tf2 as any).useItemOn(kit.id, weapon.id);
+        log.debug(`applyKSKit: applying kit ${kit.id} to weapon ${weapon.id} via ApplyXifier`);
+        (this.bot.tf2 as any).applyStrangifierOrUnusualifier(weapon.id, kit.id);
 
         // Catches weapon created as a new GC item (kit consumed + new weapon spawned)
         const onItemAcquired = (item: TF2GCItem): void => {
