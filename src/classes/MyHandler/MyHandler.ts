@@ -2576,9 +2576,17 @@ export default class MyHandler extends Handler {
                             log.info(`[craftingService] ${unappliedKits.length} unapplied kit(s) — applying before fabricator craft`);
 
                             const robotPartItems = availablePool.filter((i: any) => ROBOT_PART_DEFINDEXES.includes(i.def_index));
+                            const hasKsAttr = (i: any): boolean =>
+                                ((i as any).attribute ?? []).some((a: any) => a.def_index === 2025);
+                            const alreadyKsWeapons = availablePool.filter((i: any) =>
+                                !KS_KIT_DEFINDEXES.includes(i.def_index) &&
+                                !ROBOT_PART_DEFINDEXES.includes(i.def_index) &&
+                                hasKsAttr(i)
+                            );
                             const plainWeapons = availablePool.filter((i: any) =>
                                 !KS_KIT_DEFINDEXES.includes(i.def_index) &&
-                                !ROBOT_PART_DEFINDEXES.includes(i.def_index)
+                                !ROBOT_PART_DEFINDEXES.includes(i.def_index) &&
+                                !hasKsAttr(i)
                             );
 
                             // Match each kit to an unused plain weapon in order.
@@ -2622,7 +2630,7 @@ export default class MyHandler extends Handler {
                                         return;
                                     }
 
-                                    const fullPool = [...robotPartItems, ...resultWeaponItems];
+                                    const fullPool = [...robotPartItems, ...alreadyKsWeapons, ...resultWeaponItems];
                                     log.debug(`[craftingService] Kit application done — pool: ${fullPool.length} item(s) for fab crafting`);
                                     runMultiFabCraft(fullPool);
                                     return;
