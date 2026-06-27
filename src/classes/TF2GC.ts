@@ -54,7 +54,7 @@ type Job = {
     sortType?: number;
     attribute?: Attributes;
     callback?: (err?: Error) => void;
-    fabricatorCallback?: (err: Error | null, kitId?: string) => void;
+    fabricatorCallback?: (err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void;
     kitCallback?: (err: Error | null, resultWeaponId?: string) => void;
 };
 
@@ -162,8 +162,8 @@ export default class TF2GC {
 
     craftFabricator(
         fabricatorId: string,
-        componentIdsOrCallback?: string[] | ((err: Error | null, kitId?: string) => void),
-        fabricatorCallback?: (err: Error | null, kitId?: string) => void
+        componentIdsOrCallback?: string[] | ((err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void),
+        fabricatorCallback?: (err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void
     ): void {
         let componentIds: string[] | undefined;
         let cb = fabricatorCallback;
@@ -437,44 +437,44 @@ export default class TF2GC {
             s => (coveredCounts.get(s.attributeIndex) ?? 0) < (s.numRequired - s.numFulfilled)
         );
         if (incompleteSlots.length > 0) {
-            const slotDetails = incompleteSlots.map(s => {
-                const have = coveredCounts.get(s.attributeIndex) ?? 0;
-                const need = s.numRequired - s.numFulfilled;
-                let itemDesc: string;
-                if (s.itemDefIndex === 0) {
-                    const tierMatch = s.conditionsStr.split(/[^0-9.]+/).filter(Boolean);
-                    const tierIdx = tierMatch.indexOf('2025');
-                    const tier = tierIdx >= 0 ? Number(tierMatch[tierIdx + 1]) : 2;
-                    const tierName = tier === 1 ? 'Killstreak' : tier === 2 ? 'Specialized Killstreak' : 'Professional Killstreak';
-                    itemDesc = `${tierName} weapon`;
-                } else {
-                    const schemaItem = (this.bot.schema as any).getItemByDefindex?.(s.itemDefIndex);
-                    itemDesc = schemaItem?.item_name ?? `item (defindex ${s.itemDefIndex})`;
-                }
-                return `need ${need}× ${itemDesc}, have ${have}`;
-            }).join('; ');
-            const msg = `Missing components — ${slotDetails}`;
-            log.warn(`craftFabricator: ${msg}`);
-            if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
-            return this.finishedProcessingJob(new Error(msg));
+            log.debug(`craftFabricator: partial fill — ${incompleteSlots.length} slot(s) not fully covered; proceeding with available components`);
         }
 
         log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${fabricator.id} with ${components.length} component(s)`);
         (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
 
-        // Listen directly for itemAcquired — standalone confirmed the response event (1086) is not needed.
+        // Listen for full craft (itemAcquired = kit) OR partial fill (itemChanged = fab updated in place).
         // Use raw listeners with a 30-second timeout (listenForEvent is hardcoded to 10s, too short).
         let settled = false;
+        const fabricatorId = String(fabricator.id);
+
+        const cleanup = (): void => {
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
+            this.bot.tf2.removeListener('itemChanged', onItemChanged);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+        };
 
         const onItemAcquired = (item: TF2GCItem): void => {
             if (!KS_KIT_DEFINDEXES.includes(item.def_index)) return;
             if (settled) return;
             settled = true;
             clearTimeout(kitTimeout);
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            cleanup();
             log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
-            if (job.fabricatorCallback) job.fabricatorCallback(null, item.id);
+            if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(item.id) });
+            this.finishedProcessingJob();
+        };
+
+        const onItemChanged = (oldItem: TF2GCItem, newItem: TF2GCItem): void => {
+            if (String(newItem.id) !== fabricatorId) return;
+            if (settled) return;
+            settled = true;
+            clearTimeout(kitTimeout);
+            cleanup();
+            log.debug(`craftFabricator: partial fill — fab ${fabricatorId} updated in place`);
+            if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId });
             this.finishedProcessingJob();
         };
 
@@ -482,8 +482,7 @@ export default class TF2GC {
             if (settled) return;
             settled = true;
             clearTimeout(kitTimeout);
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            cleanup();
             const err = new Error('Disconnected from TF2 GC');
             if (job.fabricatorCallback) job.fabricatorCallback(err);
             this.finishedProcessingJob(err);
@@ -492,17 +491,35 @@ export default class TF2GC {
         const kitTimeout = setTimeout(() => {
             if (settled) return;
             settled = true;
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
-            const err = new Error('Timed out waiting for kit');
-            log.warn(`craftFabricator: timed out waiting for KS kit for fabricator ${fabricator.id}`);
-            if (job.fabricatorCallback) job.fabricatorCallback(err);
-            this.finishedProcessingJob(err);
+            cleanup();
+            // Last-chance: is the fab still present (partial fill event missed) or gone (full craft event missed)?
+            const currentBackpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
+            const updatedFab = currentBackpack?.find(i => String(i.id) === fabricatorId);
+            if (!updatedFab) {
+                // Fab gone — full craft succeeded but itemAcquired was missed; look for the new kit
+                const newKit = currentBackpack?.find(i => KS_KIT_DEFINDEXES.includes(i.def_index));
+                if (newKit) {
+                    log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
+                    if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(newKit.id) });
+                } else {
+                    const err = new Error('Timed out — fabricator gone but no kit found');
+                    log.warn(`craftFabricator: ${err.message} (fab ${fabricatorId})`);
+                    if (job.fabricatorCallback) job.fabricatorCallback(err);
+                }
+            } else {
+                // Fab still present — partial fill happened but itemChanged was missed
+                log.debug(`craftFabricator: timeout — fab ${fabricatorId} still present, treating as partial fill`);
+                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId });
+            }
+            this.finishedProcessingJob();
         }, 30000);
 
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
         this.bot.tf2.on('itemAcquired', onItemAcquired);
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('itemChanged', onItemChanged);
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
         this.bot.tf2.on('disconnectedFromGC', onDisconnected);

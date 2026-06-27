@@ -2462,18 +2462,7 @@ export default class MyHandler extends Handler {
 
                                 for (const fab of newFabs) {
                                     const components = buildCraftComponents(fab as any, remainingPool as any);
-                                    const slots = decodeFabricatorSlots(fab as any).filter(
-                                        (s: any) => s.attributeIndex !== 2006 && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
-                                    );
-                                    const coveredCounts = new Map<number, number>();
-                                    for (const c of components) {
-                                        coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
-                                    }
-                                    const allCovered = slots.every(
-                                        (s: any) => (coveredCounts.get(s.attributeIndex) ?? 0) >= s.numRequired - s.numFulfilled
-                                    );
-
-                                    if (allCovered) {
+                                    if (components.length > 0) {
                                         const usedIds = new Set(components.map((c: any) => c.subject_item_id));
                                         craftPlan.push({ fabId: String(fab.id), componentIds: [...usedIds] });
                                         remainingPool = remainingPool.filter((i: any) => !usedIds.has(String(i.id)));
@@ -2483,19 +2472,20 @@ export default class MyHandler extends Handler {
                                 }
                                 const leftoverIds = remainingPool.map((i: any) => String(i.id));
 
-                                log.info(`[craftingService] Craft plan: ${craftPlan.length} fab(s) craftable, ${uncraftableFabIds.length} uncraftable, ${leftoverIds.length} leftover component(s)`);
+                                log.info(`[craftingService] Craft plan: ${craftPlan.length} fab(s) to attempt, ${uncraftableFabIds.length} with no matching components, ${leftoverIds.length} leftover component(s)`);
 
                                 if (craftPlan.length === 0) {
-                                    doRefund('No fabricators could be crafted — components insufficient');
+                                    doRefund('No fabricators could be matched with any components');
                                     return;
                                 }
 
                                 const resultKitIds: string[] = [];
+                                const partialFabIds: string[] = [];
                                 const failedFabIds: string[] = [...uncraftableFabIds];
                                 let planIndex = 0;
 
                                 const sendResults = (): void => {
-                                    const returnIds = [...resultKitIds, ...failedFabIds, ...leftoverIds];
+                                    const returnIds = [...resultKitIds, ...partialFabIds, ...failedFabIds, ...leftoverIds];
                                     if (returnIds.length === 0) {
                                         log.warn(`[craftingService] Nothing to return for offer ${offer.id}`);
                                         return;
@@ -2504,7 +2494,7 @@ export default class MyHandler extends Handler {
                                     returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
 
                                     let msg: string;
-                                    if (resultKitIds.length > 0 && failedFabIds.length === 0 && leftoverIds.length === 0) {
+                                    if (resultKitIds.length > 0 && partialFabIds.length === 0 && failedFabIds.length === 0 && leftoverIds.length === 0) {
                                         if (resultKitIds.length === 1) {
                                             const kitBpItem = ((this.bot.tf2 as any).backpack as any[] ?? []).find((i: any) => String(i.id) === resultKitIds[0]);
                                             const kitName = kitBpItem
@@ -2517,6 +2507,7 @@ export default class MyHandler extends Handler {
                                     } else {
                                         const parts: string[] = [];
                                         if (resultKitIds.length > 0) parts.push(`${resultKitIds.length} kit(s) crafted`);
+                                        if (partialFabIds.length > 0) parts.push(`${partialFabIds.length} fabricator(s) partially filled and returned`);
                                         if (failedFabIds.length > 0) parts.push(`${failedFabIds.length} fabricator(s) could not be crafted (returned)`);
                                         if (leftoverIds.length > 0) parts.push(`${leftoverIds.length} leftover component(s) returned`);
                                         msg = parts.join(', ') + '. Thanks for using the crafting service.';
@@ -2544,13 +2535,16 @@ export default class MyHandler extends Handler {
                                     }
                                     const { fabId, componentIds } = craftPlan[planIndex++];
                                     log.debug(`[craftingService] Crafting fab ${fabId} (${planIndex}/${craftPlan.length}) with ${componentIds.length} component(s)`);
-                                    this.bot.tf2gc.craftFabricator(fabId, componentIds.length > 0 ? componentIds : undefined, (err, kitId) => {
-                                        if (err || !kitId) {
-                                            log.warn(`[craftingService] Craft failed for fab ${fabId}: ${err?.message ?? 'no kit returned'}`);
+                                    this.bot.tf2gc.craftFabricator(fabId, componentIds.length > 0 ? componentIds : undefined, (err, result) => {
+                                        if (err || !result) {
+                                            log.warn(`[craftingService] Craft failed for fab ${fabId}: ${err?.message ?? 'no result'}`);
                                             failedFabIds.push(fabId);
-                                        } else {
-                                            log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${kitId}`);
-                                            resultKitIds.push(kitId);
+                                        } else if (result.kitId) {
+                                            log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${result.kitId}`);
+                                            resultKitIds.push(result.kitId);
+                                        } else if (result.partialFabId) {
+                                            log.info(`[craftingService] Partial fill for fab ${fabId} — returning partially filled fab`);
+                                            partialFabIds.push(result.partialFabId);
                                         }
                                         craftNext();
                                     });
