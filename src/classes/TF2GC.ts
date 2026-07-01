@@ -440,6 +440,13 @@ export default class TF2GC {
             log.debug(`craftFabricator: partial fill — ${incompleteSlots.length} slot(s) not fully covered; proceeding with available components`);
         }
 
+        // Snapshot kit IDs the bot already owns so the timeout fallback can find only NEWLY crafted kits
+        const preExistingKitIds = new Set<string>(
+            ((this.bot.tf2 as any).backpack as TF2GCItem[] ?? [])
+                .filter(i => KS_KIT_DEFINDEXES.includes(i.def_index))
+                .map(i => String(i.id))
+        );
+
         log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${fabricator.id} with ${components.length} component(s)`);
         (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
 
@@ -457,6 +464,7 @@ export default class TF2GC {
         };
 
         const onItemAcquired = (item: TF2GCItem): void => {
+            log.debug(`craftFabricator: itemAcquired defindex=${item.def_index} id=${item.id}`);
             if (!KS_KIT_DEFINDEXES.includes(item.def_index)) return;
             if (settled) return;
             settled = true;
@@ -497,7 +505,9 @@ export default class TF2GC {
             const updatedFab = currentBackpack?.find(i => String(i.id) === fabricatorId);
             if (!updatedFab) {
                 // Fab gone — full craft succeeded but itemAcquired was missed; look for the new kit
-                const newKit = currentBackpack?.find(i => KS_KIT_DEFINDEXES.includes(i.def_index));
+                const newKit = currentBackpack?.find(
+                    i => KS_KIT_DEFINDEXES.includes(i.def_index) && !preExistingKitIds.has(String(i.id))
+                );
                 if (newKit) {
                     log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
                     if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(newKit.id) });

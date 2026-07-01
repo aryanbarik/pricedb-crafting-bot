@@ -2515,17 +2515,25 @@ export default class MyHandler extends Handler {
 
                                     returnOffer.setMessage(msg);
                                     log.info(`[craftingService] Sending return offer to ${partnerSteamID64}: ${returnIds.length} item(s)`);
-                                    this.bot.trades.sendOffer(returnOffer)
-                                        .then(status => {
-                                            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                                        })
-                                        .catch((sendErr: Error) => {
-                                            log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${sendErr.message}`);
-                                            this.bot.sendMessage(
-                                                offer.partner,
-                                                `⚠️ Crafting complete but couldn't send results automatically. Contact the bot owner. Kit IDs: ${resultKitIds.join(', ')}`
-                                            );
-                                        });
+                                    const attemptSend = (retriesLeft: number): void => {
+                                        this.bot.trades.sendOffer(returnOffer)
+                                            .then(status => {
+                                                if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                            })
+                                            .catch((sendErr: Error) => {
+                                                if (retriesLeft > 0) {
+                                                    log.warn(`[craftingService] Failed to send return offer (${sendErr.message}), retrying in 15s (${retriesLeft} left)`);
+                                                    setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                                                    return;
+                                                }
+                                                log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${sendErr.message}`);
+                                                this.bot.sendMessage(
+                                                    offer.partner,
+                                                    `⚠️ Crafting complete but couldn't send results automatically. Contact the bot owner. Kit IDs: ${resultKitIds.join(', ')}`
+                                                );
+                                            });
+                                    };
+                                    attemptSend(3);
                                 };
 
                                 const craftNext = (): void => {
