@@ -2672,7 +2672,7 @@ export default class MyHandler extends Handler {
             if (offer.state === TradeOfferManager.ETradeOfferState['Accepted']) {
                 // Offer is accepted
 
-                if (this.isCraftingManual === false) {
+                if (this.isCraftingManual === false && !offer.data('craftingService')) {
                     // Smelt / combine metal
                     keepMetalSupply(this.bot, this.minimumScrap, this.minimumReclaimed, this.combineThreshold);
 
