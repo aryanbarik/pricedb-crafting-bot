@@ -446,6 +446,15 @@ export default class TF2GC {
                 .filter(i => KS_KIT_DEFINDEXES.includes(i.def_index))
                 .map(i => String(i.id))
         );
+        // Snapshot fabricator IDs the bot already owns so a NEW fabricator-defindex item appearing
+        // after this craft (the GC sometimes re-issues a partially-filled fabricator under a new id
+        // instead of updating it in place via itemChanged/SO_Update) can be told apart from one that
+        // was already there.
+        const preExistingFabIds = new Set<string>(
+            ((this.bot.tf2 as any).backpack as TF2GCItem[] ?? [])
+                .filter(i => FABRICATOR_DEFINDEXES.includes(i.def_index))
+                .map(i => String(i.id))
+        );
 
         log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${fabricator.id} with ${components.length} component(s)`);
         (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
@@ -465,14 +474,27 @@ export default class TF2GC {
 
         const onItemAcquired = (item: TF2GCItem): void => {
             log.debug(`craftFabricator: itemAcquired defindex=${item.def_index} id=${item.id}`);
-            if (!KS_KIT_DEFINDEXES.includes(item.def_index)) return;
-            if (settled) return;
-            settled = true;
-            clearTimeout(kitTimeout);
-            cleanup();
-            log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
-            if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(item.id) });
-            this.finishedProcessingJob();
+            if (KS_KIT_DEFINDEXES.includes(item.def_index)) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(kitTimeout);
+                cleanup();
+                log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
+                if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(item.id) });
+                this.finishedProcessingJob();
+                return;
+            }
+            if (FABRICATOR_DEFINDEXES.includes(item.def_index) && !preExistingFabIds.has(String(item.id))) {
+                // Partial fill — GC re-issued the fabricator under a new id instead of updating it
+                // in place. Use the NEW id, not the stale original one.
+                if (settled) return;
+                settled = true;
+                clearTimeout(kitTimeout);
+                cleanup();
+                log.debug(`craftFabricator: partial fill — fab re-issued as new id ${item.id} (was ${fabricatorId})`);
+                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(item.id) });
+                this.finishedProcessingJob();
+            }
         };
 
         const onItemChanged = (oldItem: TF2GCItem, newItem: TF2GCItem): void => {
@@ -512,9 +534,19 @@ export default class TF2GC {
                     log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
                     if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(newKit.id) });
                 } else {
-                    const err = new Error('Timed out — fabricator gone but no kit found');
-                    log.warn(`craftFabricator: ${err.message} (fab ${fabricatorId})`);
-                    if (job.fabricatorCallback) job.fabricatorCallback(err);
+                    // No new kit either — check whether the fabricator was re-issued under a new id
+                    // (partial fill) before declaring hard failure.
+                    const newFab = currentBackpack?.find(
+                        i => FABRICATOR_DEFINDEXES.includes(i.def_index) && !preExistingFabIds.has(String(i.id))
+                    );
+                    if (newFab) {
+                        log.debug(`craftFabricator: timeout — fab gone, found re-issued fab ${newFab.id} in backpack (partial fill)`);
+                        if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(newFab.id) });
+                    } else {
+                        const err = new Error('Timed out — fabricator gone but no kit found');
+                        log.warn(`craftFabricator: ${err.message} (fab ${fabricatorId})`);
+                        if (job.fabricatorCallback) job.fabricatorCallback(err);
+                    }
                 }
             } else {
                 // Fab still present — partial fill happened but itemChanged was missed

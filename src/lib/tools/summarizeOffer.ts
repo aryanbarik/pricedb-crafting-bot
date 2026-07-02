@@ -101,8 +101,8 @@ export default function summarize(
     const items = (offer.data('dict') as ItemsDict) || { our: null, their: null };
     const showStockChanges = bot.options.tradeSummary.showStockChanges;
 
-    const ourCount = Object.keys(items.our).length;
-    const theirCount = Object.keys(items.their).length;
+    const ourCount = items.our ? Object.keys(items.our).length : 0;
+    const theirCount = items.their ? Object.keys(items.their).length : 0;
 
     const isCompressSummary = (ourCount > 15 && theirCount > 15) || ourCount + theirCount > 28; // Estimate until limit reached
 
