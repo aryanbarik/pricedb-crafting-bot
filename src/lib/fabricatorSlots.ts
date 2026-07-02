@@ -1,3 +1,5 @@
+import SKU from '@tf2autobot/tf2-sku';
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Schema = require('../../node_modules/@tf2autobot/tf2/protobufs/generated/_load.js');
 
@@ -238,4 +240,119 @@ export function findBotComponents(
     }
 
     return { components, missing };
+}
+
+/**
+ * Derives the target weapon's display name from a fabricator's own item name, e.g.
+ * "Specialized Killstreak Degreaser Kit Fabricator" -> "Degreaser".
+ */
+export function extractTargetWeaponName(fabItemName: string): string {
+    return fabItemName
+        .replace(/^(Professional|Specialized) Killstreak /, '')
+        .replace(/ Kit Fabricator$/, '')
+        .trim();
+}
+
+/**
+ * Parses the killstreak tier (1=Killstreak, 2=Specialized, 3=Professional) implied by an
+ * unapplied KS Kit's own item name, e.g. "Professional Killstreak Kit" -> 3.
+ */
+export function ksKitTierFromName(name: string): number | undefined {
+    if (name.startsWith('Professional Killstreak ')) return 3;
+    if (name.startsWith('Specialized Killstreak ')) return 2;
+    if (name.startsWith('Killstreak ')) return 1;
+    return undefined;
+}
+
+export interface PartnerComponentResult {
+    /** Flat list of the trade partner's asset IDs to request, across all slots. */
+    assetIds: string[];
+    /** Human-readable descriptions of what could not be found, for messaging the partner. */
+    missing: string[];
+}
+
+/**
+ * Finds which of a trade partner's owned items satisfy the fabricator's unfilled recipe slots,
+ * using SKU lookups against their inventory rather than a flat backpack array (the bot doesn't
+ * own these items yet — this is used to build the follow-up "please send me these parts" offer).
+ *
+ * Unlike findBotComponents, this fills slots partially: if the partner owns 2 of 3 needed robot
+ * parts, the 2 found are still requested rather than skipping the whole slot.
+ *
+ * For the weapon slot, tries a premade killstreak weapon of the right tier first, then falls back
+ * to an unapplied KS Kit of the right tier + a matching plain weapon (both items are requested;
+ * the existing accepted-offer pipeline already knows how to apply a kit it receives before craft).
+ */
+export function findPartnerComponents(
+    fabricator: GCBackpackItem,
+    targetWeaponDefindex: number | null,
+    kitDefindexByTier: Partial<Record<number, number>>,
+    lookupSku: (sku: string, tradableOnly?: boolean) => string[]
+): PartnerComponentResult {
+    const slots = decodeFabricatorSlots(fabricator).filter(
+        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
+    );
+
+    const assetIds: string[] = [];
+    const missing: string[] = [];
+    const usedIds = new Set<string>();
+
+    const takeFromSku = (sku: string): string | undefined => {
+        const found = lookupSku(sku, true).find(id => !usedIds.has(id));
+        if (found) usedIds.add(found);
+        return found;
+    };
+
+    for (const slot of slots) {
+        const needed = slot.numRequired - slot.numFulfilled;
+
+        if (slot.itemDefIndex === 0) {
+            // Weapon slot
+            const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
+            let foundForSlot = 0;
+            for (let k = 0; k < needed; k++) {
+                if (targetWeaponDefindex === null) break;
+
+                const premadeSku = SKU.fromObject({ defindex: targetWeaponDefindex, quality: 6, killstreak: requiredTier });
+                const premadeId = takeFromSku(premadeSku);
+                if (premadeId) {
+                    assetIds.push(premadeId);
+                    foundForSlot++;
+                    continue;
+                }
+
+                const kitDefindex = kitDefindexByTier[requiredTier];
+                if (kitDefindex === undefined) continue;
+                const kitSku = SKU.fromObject({ defindex: kitDefindex, quality: 6 });
+                const weaponSku = SKU.fromObject({ defindex: targetWeaponDefindex, quality: 6 });
+                const kitId = takeFromSku(kitSku);
+                if (!kitId) continue;
+                const weaponId = takeFromSku(weaponSku);
+                if (!weaponId) {
+                    usedIds.delete(kitId);
+                    continue;
+                }
+                assetIds.push(kitId, weaponId);
+                foundForSlot++;
+            }
+            if (foundForSlot < needed) {
+                missing.push(`${needed - foundForSlot}× kt-${requiredTier} weapon (or kit + weapon)`);
+            }
+        } else {
+            // Robot part slot
+            const sku = SKU.fromObject({ defindex: slot.itemDefIndex, quality: 6 });
+            let foundForSlot = 0;
+            for (let k = 0; k < needed; k++) {
+                const id = takeFromSku(sku);
+                if (!id) break;
+                assetIds.push(id);
+                foundForSlot++;
+            }
+            if (foundForSlot < needed) {
+                missing.push(`${needed - foundForSlot}× defindex ${slot.itemDefIndex}`);
+            }
+        }
+    }
+
+    return { assetIds, missing };
 }

@@ -51,7 +51,15 @@ import sendTf2SystemMessage from '../DiscordWebhook/sendTf2SystemMessage';
 import sendTf2DisplayNotification from '../DiscordWebhook/sendTf2DisplayNotification';
 import sendTf2ItemBroadcast from '../DiscordWebhook/sendTf2ItemBroadcast';
 import { apiRequest } from '../../lib/apiRequest';
-import { decodeFabricatorSlots, buildCraftComponents, KS_KIT_DEFINDEXES, FABRICATOR_DEFINDEXES } from '../../lib/fabricatorSlots';
+import {
+    decodeFabricatorSlots,
+    buildCraftComponents,
+    findPartnerComponents,
+    extractTargetWeaponName,
+    ksKitTierFromName,
+    KS_KIT_DEFINDEXES,
+    FABRICATOR_DEFINDEXES
+} from '../../lib/fabricatorSlots';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -2397,15 +2405,19 @@ export default class MyHandler extends Handler {
 
                     // Crafting service: trigger fabricator craft after backpack sync
                     const craftingService = offer.data('craftingService') as
-                        | { fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
+                        | { phase: 'intake'; fabricatorAssetId: string; preTradeIds?: string[] }
+                        | { phase: 'components'; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
+                        | { phase?: undefined; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
-                        const { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds } = craftingService;
+                        const preTradeIds = craftingService.preTradeIds;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
 
-                        // preTradeIds was snapshotted in onNewTradeOffer before the trade was accepted.
-                        // After 5s the GC backpack is synced — any ID not in the snapshot is from this trade.
+                        // preTradeIds was snapshotted before the trade was accepted (either in
+                        // onNewTradeOffer, or in HttpManager.ts / handleCraftingIntake for
+                        // bot-initiated website offers). After 5s the GC backpack is synced —
+                        // any ID not in the snapshot is from this trade.
                         const knownIds = new Set<string>(preTradeIds ?? []);
 
                         setTimeout(() => {
@@ -2419,6 +2431,29 @@ export default class MyHandler extends Handler {
                             const newFabs = newItems
                                 .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
                                 .sort((a: any, b: any) => a.def_index - b.def_index);
+
+                            if (craftingService.phase === 'intake') {
+                                // Website sent us a lone fabricator — read its real recipe now that we
+                                // own it, then send a follow-up offer requesting matching components.
+                                if (newFabs.length !== 1) {
+                                    log.warn(`[craftingService] Intake: expected exactly 1 new fabricator, found ${newFabs.length}`);
+                                    this.bot.sendMessage(
+                                        offer.partner,
+                                        newFabs.length === 0
+                                            ? `⚠️ Something went wrong receiving your fabricator — please contact the bot owner.`
+                                            : `⚠️ Ambiguous fabricator match — please contact the bot owner.`
+                                    );
+                                    return;
+                                }
+                                void this.handleCraftingIntake(offer, newFabs[0]);
+                                return;
+                            }
+
+                            const { fabricatorAssetIds, componentAssetIds, kitAssetIds } = craftingService as {
+                                fabricatorAssetIds: string[];
+                                componentAssetIds: string[];
+                                kitAssetIds?: string[];
+                            };
 
                             // Component pool = all non-fab new items
                             const availablePool: any[] = newItems.filter((i: any) => !FABRICATOR_DEFINDEXES.includes(i.def_index));
@@ -2726,6 +2761,119 @@ export default class MyHandler extends Handler {
     private static removePolldataKeys(offer: TradeOffer): void {
         offer.data('notify', undefined);
         offer.data('meta', undefined);
+    }
+
+    /**
+     * Handles the "intake" phase of a website-initiated crafting-service trade: the bot just
+     * received a lone fabricator, and — now owning it — can read its real recipe via
+     * decodeFabricatorSlots(). This checks what components the same trade partner currently owns
+     * and sends a follow-up offer requesting whatever subset they have (partial fulfillment is
+     * fine; the existing craft pipeline already tolerates unfilled slots).
+     */
+    private async handleCraftingIntake(offer: TradeOffer, fab: any): Promise<void> {
+        const partnerSteamID64 = offer.partner.getSteamID64();
+        try {
+            const fabSchemaItem = (this.bot.schema as any).getItemByDefindex?.(fab.def_index);
+            const targetWeaponName = fabSchemaItem ? extractTargetWeaponName(fabSchemaItem.item_name) : null;
+            const targetWeaponDefindex = targetWeaponName
+                ? ((this.bot.schema as any).getItemByItemName?.(targetWeaponName)?.defindex ?? null)
+                : null;
+
+            if (targetWeaponDefindex === null) {
+                log.warn(
+                    `[craftingService] Intake: could not resolve target weapon defindex for fabricator ${fab.id} (def=${fab.def_index}) — will only attempt robot-part slots`
+                );
+            }
+
+            const kitDefindexByTier: Partial<Record<number, number>> = {};
+            for (const defindex of KS_KIT_DEFINDEXES) {
+                const kitSchemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
+                const tier = kitSchemaItem ? ksKitTierFromName(kitSchemaItem.item_name) : undefined;
+                if (tier !== undefined) kitDefindexByTier[tier] = defindex;
+            }
+
+            const theirInventory = new Inventory(offer.partner, this.bot, 'their', this.bot.boundInventoryGetter);
+            try {
+                await theirInventory.fetch();
+            } catch (err) {
+                log.warn(`[craftingService] Intake: failed to load ${partnerSteamID64}'s inventory: ${(err as Error).message}`);
+                this.bot.sendMessage(
+                    offer.partner,
+                    `⚠️ Failed to load your inventory — Steam might be down, or your inventory is private. ` +
+                        `Please set it to public and contact the bot owner to retry; your fabricator is being held.`
+                );
+                return;
+            }
+
+            const result = findPartnerComponents(
+                fab as any,
+                targetWeaponDefindex,
+                kitDefindexByTier,
+                (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly)
+            );
+
+            if (result.assetIds.length === 0) {
+                log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
+                const returnOffer = this.bot.manager.createOffer(offer.partner);
+                returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
+                returnOffer.setMessage(
+                    `You don't currently own any of the parts needed for this fabricator` +
+                        (result.missing.length > 0 ? ` (need: ${result.missing.join(', ')})` : '') +
+                        `. Your fabricator is being returned — trade it back once you've picked up the parts!`
+                );
+                this.bot.trades
+                    .sendOffer(returnOffer)
+                    .then(status => {
+                        if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                    })
+                    .catch((sendErr: Error) => {
+                        log.warn(`[craftingService] Intake: failed to return fabricator to ${partnerSteamID64}: ${sendErr.message}`);
+                    });
+                return;
+            }
+
+            const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+            const componentOffer = this.bot.manager.createOffer(offer.partner);
+            result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
+            componentOffer.data('craftingService', {
+                phase: 'components',
+                fabricatorAssetIds: [String(fab.id)],
+                componentAssetIds: [],
+                preTradeIds
+            });
+            componentOffer.setMessage(
+                `Thanks! I read your fabricator's recipe and found these parts in your inventory — please accept to continue crafting.` +
+                    (result.missing.length > 0
+                        ? ` Note: you're missing ${result.missing.join(', ')}, so the fabricator will only be partially filled.`
+                        : '')
+            );
+
+            const attemptSend = (retriesLeft: number): void => {
+                this.bot.trades
+                    .sendOffer(componentOffer)
+                    .then(status => {
+                        if (status === 'pending') void this.bot.trades.acceptConfirmation(componentOffer);
+                        log.info(
+                            `[craftingService] Intake: sent components offer ${componentOffer.id} to ${partnerSteamID64} (${result.assetIds.length} item(s), missing: ${result.missing.join(', ') || 'none'})`
+                        );
+                    })
+                    .catch((sendErr: Error) => {
+                        if (retriesLeft > 0) {
+                            log.warn(
+                                `[craftingService] Intake: failed to send components offer (${sendErr.message}), retrying in 15s (${retriesLeft} left)`
+                            );
+                            setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                            return;
+                        }
+                        log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${sendErr.message}`);
+                        this.bot.sendMessage(offer.partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner.`);
+                    });
+            };
+            attemptSend(3);
+        } catch (err) {
+            log.error(`[craftingService] Intake: unexpected error handling fabricator ${fab.id}:`, err);
+            this.bot.sendMessage(offer.partner, `⚠️ Something went wrong processing your fabricator — please contact the bot owner.`);
+        }
     }
 
     onOfferAction(

@@ -266,8 +266,10 @@ export default class HttpManager {
             }
         });
 
-        // Website crafting endpoint: bot sends the user a trade offer requesting their selected items.
-        // The website calls this after the user picks a fabricator + components via the UI.
+        // Website crafting endpoint: bot requests a single fabricator from the user.
+        // Once accepted, the bot reads the fabricator's real recipe (it can only do this once it
+        // owns the item) and sends a SECOND offer requesting whatever matching components the user
+        // owns — see onTradeOfferChanged's `phase === 'intake'` handling in MyHandler.ts.
         this.app.post('/api/crafting/request-offer', this.validateApiKey.bind(this), async (req, res) => {
             try {
                 if (!this.bot) {
@@ -275,12 +277,10 @@ export default class HttpManager {
                     return;
                 }
 
-                const { steamId, tradeUrl, fabricatorIds, componentIds, kitIds } = req.body as {
+                const { steamId, tradeUrl, fabricatorAssetId } = req.body as {
                     steamId?: string;
                     tradeUrl?: string;
-                    fabricatorIds?: string[];
-                    componentIds?: string[];
-                    kitIds?: string[];
+                    fabricatorAssetId?: string;
                 };
 
                 if (!steamId || typeof steamId !== 'string') {
@@ -291,34 +291,28 @@ export default class HttpManager {
                     res.status(400).json({ success: false, error: 'Missing or invalid tradeUrl' });
                     return;
                 }
-                if (!fabricatorIds?.length) {
-                    res.status(400).json({ success: false, error: 'fabricatorIds must be a non-empty array' });
+                if (!fabricatorAssetId || typeof fabricatorAssetId !== 'string') {
+                    res.status(400).json({ success: false, error: 'Missing fabricatorAssetId' });
                     return;
                 }
-
-                const allAssetIds = [
-                    ...(fabricatorIds ?? []),
-                    ...(componentIds ?? []),
-                    ...(kitIds ?? [])
-                ];
 
                 // Snapshot bot's GC backpack before creating the offer so the crafting pipeline
                 // can compute the backpack diff after the user accepts.
                 const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
 
                 const offer = this.bot.manager.createOffer(tradeUrl);
-                allAssetIds.forEach(assetid => {
-                    offer.addTheirItem({ appid: 440, contextid: '2', assetid });
-                });
+                offer.addTheirItem({ appid: 440, contextid: '2', assetid: fabricatorAssetId });
 
                 // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
                 offer.data('craftingService', {
-                    fabricatorAssetIds: fabricatorIds ?? [],
-                    componentAssetIds: componentIds ?? [],
-                    kitAssetIds: kitIds ?? [],
+                    phase: 'intake',
+                    fabricatorAssetId,
                     preTradeIds
                 });
-                offer.setMessage('Please accept this offer to start your Killstreak Fabricator craft!');
+                offer.setMessage(
+                    'Please accept this offer to send me your fabricator — ' +
+                        "I'll read its recipe and send you a follow-up offer requesting the parts I need!"
+                );
 
                 const status = await this.bot.trades.sendOffer(offer);
                 if (status === 'pending') {
@@ -327,7 +321,7 @@ export default class HttpManager {
                     });
                 }
 
-                log.info(`[craftingService] Sent request-offer ${offer.id} to ${steamId} (${allAssetIds.length} item(s))`);
+                log.info(`[craftingService] Sent intake request-offer ${offer.id} to ${steamId} for fabricator ${fabricatorAssetId}`);
                 res.json({ success: true, offerId: offer.id });
             } catch (error) {
                 log.error('Error in /api/crafting/request-offer:', error);
