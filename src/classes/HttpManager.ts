@@ -341,7 +341,7 @@ export default class HttpManager {
      */
     start(): Promise<void> {
         return new Promise(resolve => {
-            this.app.listen(this.options.httpApiPort, () => {
+            this.app.listen(this.options.httpApiPort, '127.0.0.1', () => {
                 log.debug(`HTTP Server started: http://127.0.0.1:${this.options.httpApiPort}`);
                 log.info(`This is NOT a HTTP API used to handle data within the bot.
                 It is solely for managing the bot programatically by providing healthchecks & uptime details.`);
