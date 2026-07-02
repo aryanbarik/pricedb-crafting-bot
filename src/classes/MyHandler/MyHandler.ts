@@ -829,8 +829,17 @@ export default class MyHandler extends Handler {
                     offer.data('craftingService', { fabricatorAssetIds, componentAssetIds: [], preTradeIds });
                     offer.log('info', `[Mode B] crafting service — ${fabricatorAssetIds.length} fabricator(s) + ${keyCount} key(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                } else if (fabricatorAssetIds.length === 1) {
+                    // Lone fabricator, no components, <2 keys: we can't build a craft plan without
+                    // knowing the real recipe, and the GC won't tell us that until we own the item.
+                    // Accept it, then decode the recipe and request matching parts back — same
+                    // two-phase flow as the website's bot-initiated /api/crafting/request-offer.
+                    const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+                    offer.data('craftingService', { phase: 'intake', fabricatorAssetId: fabricatorAssetIds[0], preTradeIds });
+                    offer.log('info', `[Intake] lone fabricator ${fabricatorAssetIds[0]} — accepting to read real recipe`);
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 }
-                // Lone fabricator or non-whitelisted with components: fall through
+                // Multiple lone fabricators with no components, or non-whitelisted with components: fall through
             } else {
                 // No fabricator in offer — check for kit-only trade (kit + weapon, whitelisted)
                 const allItems = offer.itemsToReceive as any[];
