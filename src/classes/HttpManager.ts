@@ -265,6 +265,75 @@ export default class HttpManager {
                 });
             }
         });
+
+        // Website crafting endpoint: bot sends the user a trade offer requesting their selected items.
+        // The website calls this after the user picks a fabricator + components via the UI.
+        this.app.post('/api/crafting/request-offer', this.validateApiKey.bind(this), async (req, res) => {
+            try {
+                if (!this.bot) {
+                    res.status(503).json({ success: false, error: 'Bot not initialized' });
+                    return;
+                }
+
+                const { steamId, tradeUrl, fabricatorIds, componentIds, kitIds } = req.body as {
+                    steamId?: string;
+                    tradeUrl?: string;
+                    fabricatorIds?: string[];
+                    componentIds?: string[];
+                    kitIds?: string[];
+                };
+
+                if (!steamId || typeof steamId !== 'string') {
+                    res.status(400).json({ success: false, error: 'Missing steamId' });
+                    return;
+                }
+                if (!tradeUrl || typeof tradeUrl !== 'string' || !tradeUrl.includes('steamcommunity.com/tradeoffer')) {
+                    res.status(400).json({ success: false, error: 'Missing or invalid tradeUrl' });
+                    return;
+                }
+                if (!fabricatorIds?.length) {
+                    res.status(400).json({ success: false, error: 'fabricatorIds must be a non-empty array' });
+                    return;
+                }
+
+                const allAssetIds = [
+                    ...(fabricatorIds ?? []),
+                    ...(componentIds ?? []),
+                    ...(kitIds ?? [])
+                ];
+
+                // Snapshot bot's GC backpack before creating the offer so the crafting pipeline
+                // can compute the backpack diff after the user accepts.
+                const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+
+                const offer = this.bot.manager.createOffer(tradeUrl);
+                allAssetIds.forEach(assetid => {
+                    offer.addTheirItem({ appid: 440, contextid: '2', assetid });
+                });
+
+                // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
+                offer.data('craftingService', {
+                    fabricatorAssetIds: fabricatorIds ?? [],
+                    componentAssetIds: componentIds ?? [],
+                    kitAssetIds: kitIds ?? [],
+                    preTradeIds
+                });
+                offer.setMessage('Please accept this offer to start your Killstreak Fabricator craft!');
+
+                const status = await this.bot.trades.sendOffer(offer);
+                if (status === 'pending') {
+                    await this.bot.trades.acceptConfirmation(offer).catch(err => {
+                        log.warn(`[craftingService] Failed to confirm outgoing offer ${offer.id}:`, err);
+                    });
+                }
+
+                log.info(`[craftingService] Sent request-offer ${offer.id} to ${steamId} (${allAssetIds.length} item(s))`);
+                res.json({ success: true, offerId: offer.id });
+            } catch (error) {
+                log.error('Error in /api/crafting/request-offer:', error);
+                res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Internal error' });
+            }
+        });
     }
 
     /**

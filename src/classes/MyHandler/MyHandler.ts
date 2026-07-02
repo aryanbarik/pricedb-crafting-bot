@@ -795,11 +795,13 @@ export default class MyHandler extends Handler {
                 );
                 const keyCount = otherItems.length - componentItems.length;
 
-                const isWhitelisted =
-                    isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+                // PAYMENT GATE (currently disabled — open pilot period).
+                // To re-enable paid-only access, restore this whitelist check and remove the `true` below.
+                // const isWhitelisted = isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+                const isWhitelisted = true;
 
                 if (isWhitelisted && componentItems.length > 0) {
-                    // Mode A (self-service): whitelisted user provides their own components.
+                    // Mode A (self-service): user provides their own components.
                     // Components may include unapplied KS Kits + plain weapons instead of pre-applied KS weapons.
                     const componentAssetIds = componentItems.map((i: any) => String(i.assetid));
                     const kitAssetIds = componentItems
@@ -828,8 +830,10 @@ export default class MyHandler extends Handler {
                     const n: string = i.market_hash_name ?? '';
                     return n.includes('Killstreak') && n.includes('Kit') && !n.includes('Fabricator');
                 });
-                const isWhitelisted =
-                    isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+                // PAYMENT GATE (currently disabled — open pilot period).
+                // To re-enable paid-only access, restore this whitelist check and remove the `true` below.
+                // const isWhitelisted = isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
+                const isWhitelisted = true;
                 if (isWhitelisted && kitItems.length > 0) {
                     const kitAssetIds = kitItems.map((i: any) => String(i.assetid));
                     const componentAssetIds = allItems
