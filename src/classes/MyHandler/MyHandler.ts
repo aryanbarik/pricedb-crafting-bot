@@ -2506,11 +2506,31 @@ export default class MyHandler extends Handler {
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                 );
                                 refundOffer.setMessage(`Refund — crafting failed: ${reason}`);
-                                this.bot.trades.sendOffer(refundOffer)
-                                    .then(status => {
-                                        if (status === 'pending') void this.bot.trades.acceptConfirmation(refundOffer);
-                                    })
-                                    .catch((sendErr: Error) => log.warn(`[craftingService] Refund send failed: ${sendErr.message}`));
+
+                                const attemptSend = (retriesLeft: number): void => {
+                                    this.bot.trades.sendOffer(refundOffer)
+                                        .then(status => {
+                                            if (status === 'pending') void this.bot.trades.acceptConfirmation(refundOffer);
+                                        })
+                                        .catch((sendErr: Error) => {
+                                            if (retriesLeft > 0) {
+                                                log.warn(`[craftingService] Refund send failed (${sendErr.message}), retrying in 15s (${retriesLeft} left)`);
+                                                setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                                                return;
+                                            }
+                                            log.warn(`[craftingService] Refund send failed permanently to ${partnerSteamID64}: ${sendErr.message}`);
+                                            this.bot.sendMessage(
+                                                offer.partner,
+                                                `⚠️ Crafting failed and I couldn't return your items automatically. Please contact the bot owner. Item IDs: ${refundIds.join(', ')}`
+                                            );
+                                            this.bot.messageAdmins(
+                                                `⚠️ [craftingService] Refund to ${partnerSteamID64} failed after 3 attempts (${sendErr.message}). ` +
+                                                    `Manual return needed — item IDs: ${refundIds.join(', ')}`,
+                                                []
+                                            );
+                                        });
+                                };
+                                attemptSend(3);
                             };
 
                             if (newFabs.length === 0 && fabricatorAssetIds.length > 0) {
