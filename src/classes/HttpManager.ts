@@ -303,6 +303,11 @@ export default class HttpManager {
                 const offer = this.bot.manager.createOffer(tradeUrl);
                 offer.addTheirItem({ appid: 440, contextid: '2', assetid: fabricatorAssetId });
 
+                // summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's
+                // never set. It's normally set by the Cart classes or onNewTradeOffer's own evaluation —
+                // neither of which runs for offers created directly via manager.createOffer().
+                offer.data('dict', { our: {}, their: { [fabricatorAssetId]: 1 } });
+
                 // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
                 offer.data('craftingService', {
                     phase: 'intake',

@@ -66,6 +66,15 @@ const filterReasons = (reasons: string[]) => {
     return [...filtered];
 };
 
+// summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's never set.
+// It's normally set by the Cart classes or by onNewTradeOffer's own evaluation — neither of which
+// runs for offers the crafting service creates directly via manager.createOffer(). The exact
+// per-item SKU keys don't matter here, this is only used to print an item-count chat summary.
+function craftingDict(giveIds: string[], receiveIds: string[]): { our: Record<string, number>; their: Record<string, number> } {
+    const toCounts = (ids: string[]) => Object.fromEntries(ids.map(id => [id, 1]));
+    return { our: toCounts(giveIds), their: toCounts(receiveIds) };
+}
+
 export default class MyHandler extends Handler {
     readonly commands: Commands;
 
@@ -2436,25 +2445,25 @@ export default class MyHandler extends Handler {
 
                             log.debug(`[craftingService] Backpack diff: ${newItems.length} new item(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
 
-                            // All new fabs, Spec (20002) before Pro (20003)
-                            const newFabs = newItems
+                            // All new fabs in this trade's diff, Spec (20002) before Pro (20003)
+                            const newFabsFromDiff = newItems
                                 .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
                                 .sort((a: any, b: any) => a.def_index - b.def_index);
 
                             if (craftingService.phase === 'intake') {
                                 // Website sent us a lone fabricator — read its real recipe now that we
                                 // own it, then send a follow-up offer requesting matching components.
-                                if (newFabs.length !== 1) {
-                                    log.warn(`[craftingService] Intake: expected exactly 1 new fabricator, found ${newFabs.length}`);
+                                if (newFabsFromDiff.length !== 1) {
+                                    log.warn(`[craftingService] Intake: expected exactly 1 new fabricator, found ${newFabsFromDiff.length}`);
                                     this.bot.sendMessage(
                                         offer.partner,
-                                        newFabs.length === 0
+                                        newFabsFromDiff.length === 0
                                             ? `⚠️ Something went wrong receiving your fabricator — please contact the bot owner.`
                                             : `⚠️ Ambiguous fabricator match — please contact the bot owner.`
                                     );
                                     return;
                                 }
-                                void this.handleCraftingIntake(offer, newFabs[0]);
+                                void this.handleCraftingIntake(offer, newFabsFromDiff[0]);
                                 return;
                             }
 
@@ -2463,6 +2472,17 @@ export default class MyHandler extends Handler {
                                 componentAssetIds: string[];
                                 kitAssetIds?: string[];
                             };
+
+                            // phase 'components': the fabricator was already received in a prior intake
+                            // trade, so it won't appear in THIS trade's diff — look it up directly by its
+                            // now-current id instead. Legacy Mode A/B (no phase) still expects the
+                            // fabricator to arrive in the same diff as the components.
+                            const newFabs = craftingService.phase === 'components' && fabricatorAssetIds.length > 0
+                                ? fabricatorAssetIds
+                                      .map((id: string) => currentBackpack.find((i: any) => String(i.id) === id))
+                                      .filter(Boolean)
+                                      .sort((a: any, b: any) => a.def_index - b.def_index)
+                                : newFabsFromDiff;
 
                             // Component pool = all non-fab new items
                             const availablePool: any[] = newItems.filter((i: any) => !FABRICATOR_DEFINDEXES.includes(i.def_index));
@@ -2481,6 +2501,7 @@ export default class MyHandler extends Handler {
                                     ? allNewIds
                                     : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
                                 const refundOffer = this.bot.manager.createOffer(offer.partner);
+                                refundOffer.data('dict', craftingDict(refundIds, []));
                                 refundIds.forEach(id =>
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                 );
@@ -2539,6 +2560,7 @@ export default class MyHandler extends Handler {
                                         return;
                                     }
                                     const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                    returnOffer.data('dict', craftingDict(returnIds, []));
                                     returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
 
                                     let msg: string;
@@ -2668,6 +2690,7 @@ export default class MyHandler extends Handler {
                                         // Kit-only trade — return the resulting KS weapons directly
                                         log.info(`[craftingService] Kit-only trade — returning ${resultWeaponIds.length} KS weapon(s)`);
                                         const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                        returnOffer.data('dict', craftingDict(resultWeaponIds, []));
                                         resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
                                         this.bot.trades.sendOffer(returnOffer)
@@ -2824,6 +2847,7 @@ export default class MyHandler extends Handler {
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
                 const returnOffer = this.bot.manager.createOffer(offer.partner);
+                returnOffer.data('dict', craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
                     `You don't currently own any of the parts needed for this fabricator` +
@@ -2843,6 +2867,7 @@ export default class MyHandler extends Handler {
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
             const componentOffer = this.bot.manager.createOffer(offer.partner);
+            componentOffer.data('dict', craftingDict([], result.assetIds));
             result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
             componentOffer.data('craftingService', {
                 phase: 'components',
