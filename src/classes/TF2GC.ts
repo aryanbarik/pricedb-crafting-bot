@@ -427,8 +427,8 @@ export default class TF2GC {
 
         // Validate all required recipe slots are covered before sending to GC
         const allSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem);
-        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex)).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
-        const unfilledSlots = allSlots.filter(s => s.attributeIndex !== 2006 && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired);
+        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex)).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+        const unfilledSlots = allSlots.filter(s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired);
         const coveredCounts = new Map<number, number>();
         for (const c of components) {
             coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
