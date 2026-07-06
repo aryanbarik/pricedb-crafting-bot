@@ -1107,7 +1107,7 @@ export default class Commands {
     }
 
     // Diagnostic command: dumps every raw GC attribute on an item already in the bot's own backpack.
-    // Usage: !dumpattrs assetid=<id>
+    // Usage: !dumpattrs assetid=<id>  OR  !dumpattrs name=<partial item name>
     private dumpAttrsCommand(steamID: SteamID, message: string): void {
         const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
         const assetid =
@@ -1116,20 +1116,41 @@ export default class Commands {
                 : typeof params.assetid === 'number'
                 ? String(params.assetid)
                 : undefined;
+        const nameQuery = typeof params.name === 'string' ? params.name.toLowerCase() : undefined;
 
-        if (!assetid) {
-            return this.bot.sendMessage(steamID, '❌ Usage: !dumpattrs assetid=<id>');
+        if (!assetid && !nameQuery) {
+            return this.bot.sendMessage(steamID, '❌ Usage: !dumpattrs assetid=<id>  OR  !dumpattrs name=<partial item name>');
         }
 
         const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
-        const item = backpack.find((i: any) => String(i.id) === assetid);
 
-        if (!item) {
-            return this.bot.sendMessage(steamID, `❌ No item with assetid ${assetid} found in the bot's GC backpack.`);
+        const matches = assetid
+            ? backpack.filter((i: any) => String(i.id) === assetid)
+            : backpack.filter((i: any) => {
+                  const schemaItem = this.bot.schema.getItemByDefindex(i.def_index);
+                  return schemaItem?.item_name?.toLowerCase().includes(nameQuery);
+              });
+
+        if (matches.length === 0) {
+            return this.bot.sendMessage(
+                steamID,
+                `❌ No item found in the bot's GC backpack matching ${assetid ? `assetid ${assetid}` : `name "${nameQuery}"`}.`
+            );
         }
 
+        if (!assetid && matches.length > 1) {
+            const list = matches
+                .map((i: any) => `${i.id} (${this.bot.schema.getItemByDefindex(i.def_index)?.item_name ?? 'unknown'})`)
+                .join(', ');
+            return this.bot.sendMessage(
+                steamID,
+                `🔍 ${matches.length} matches — re-run with a specific assetid: ${list}`
+            );
+        }
+
+        const item = matches[0];
         const lines: string[] = [
-            `🔍 Attributes for item ${assetid} (defindex ${item.def_index}, quality ${item.quality}):`
+            `🔍 Attributes for item ${item.id} (defindex ${item.def_index}, quality ${item.quality}):`
         ];
 
         for (const attr of item.attribute ?? []) {
