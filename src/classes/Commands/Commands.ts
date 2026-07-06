@@ -204,6 +204,8 @@ export default class Commands {
                 this.withdrawCommand(steamID, message, prefix);
             } else if (command === 'withdrawmptf' && isAdmin) {
                 void this.withdrawMptfCommand(steamID, message);
+            } else if (command === 'dumpattrs' && isAdmin) {
+                void this.dumpAttrsCommand(steamID, message);
             } else if (command === 'withdrawall' && isAdmin) {
                 void this.withdrawAllCommand(steamID, message);
             } else if (command === 'add' && isAdmin) {
@@ -1102,6 +1104,52 @@ export default class Commands {
 
         cart.addOurItem(sku, amount);
         Cart.addCart(cart);
+    }
+
+    // Diagnostic command: dumps every raw GC attribute on an item already in the bot's own backpack.
+    // Usage: !dumpattrs assetid=<id>
+    private dumpAttrsCommand(steamID: SteamID, message: string): void {
+        const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
+        const assetid =
+            typeof params.assetid === 'string'
+                ? params.assetid
+                : typeof params.assetid === 'number'
+                ? String(params.assetid)
+                : undefined;
+
+        if (!assetid) {
+            return this.bot.sendMessage(steamID, '❌ Usage: !dumpattrs assetid=<id>');
+        }
+
+        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        const item = backpack.find((i: any) => String(i.id) === assetid);
+
+        if (!item) {
+            return this.bot.sendMessage(steamID, `❌ No item with assetid ${assetid} found in the bot's GC backpack.`);
+        }
+
+        const lines: string[] = [
+            `🔍 Attributes for item ${assetid} (defindex ${item.def_index}, quality ${item.quality}):`
+        ];
+
+        for (const attr of item.attribute ?? []) {
+            const schemaAttr = this.bot.schema.getAttributeByDefindex(attr.def_index);
+            const name = schemaAttr?.name ?? 'unknown';
+            const parts: string[] = [`#${attr.def_index} (${name})`];
+
+            if (attr.value !== undefined && attr.value !== null) parts.push(`value=${attr.value}`);
+            if (attr.float_value !== undefined && attr.float_value !== null) parts.push(`float=${attr.float_value}`);
+            if (attr.value_bytes) {
+                const buf = Buffer.isBuffer(attr.value_bytes)
+                    ? attr.value_bytes
+                    : Buffer.from((attr.value_bytes as { data: number[] }).data);
+                parts.push(`bytes=${buf.toString('hex')}`);
+            }
+
+            lines.push(parts.join(', '));
+        }
+
+        this.bot.sendMessage(steamID, lines.join('\n'));
     }
 
     private async withdrawMptfCommand(steamID: SteamID, message: string): Promise<void> {
