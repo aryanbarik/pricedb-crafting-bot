@@ -74,6 +74,30 @@ The `@tf2autobot/tf2` library does not expose `FulfillDynamicRecipeComponent`. T
 
 See `CLAUDE.md` for full upgrade/maintenance instructions.
 
+### How the Bot Talks to the GC (mechanics)
+
+`this.bot.tf2` is a `node-tf2` client sitting on the bot's single persistent GC session (the same session stock tf2autobot already uses for smelt/combine/use jobs). Fabricator crafting is just two more job types (`craftFabricator`, `applyKSKit`) added to the existing serial job queue in `src/classes/TF2GC.ts` — nothing new was built for connecting or authenticating to the GC.
+
+Round trip for `craftFabricator` (`TF2GC.ts` `handleCraftFabricatorJob`):
+
+1. `handleJobQueue()` calls `connectToGC()` (a `listenForEvent` wait) before running any job, in case the queue starts before the GC handshake finishes.
+2. Read `this.bot.tf2.backpack` — an in-memory mirror of the bot's GC-side inventory that `node-tf2` keeps in sync via Steam's `SO_Create`/`SO_Update` cache-subscription messages. Find the fabricator by asset ID, falling back to a defindex search since asset IDs get reissued across trades.
+3. Decode the fabricator's recipe locally (`decodeFabricatorSlots` — protobuf `CAttribute_DynamicRecipeComponent` in attrs 2000–2006) and build the `consumption_components` array (`{ subject_item_id, attribute_index }` per input item).
+4. Call the patched `this.bot.tf2.fulfillDynamicRecipeComponent(fabricator.id, components)` — sends GC message 1085 over the existing Steam GC channel via the library's normal low-level `_send()` (same path used for craft/use/delete).
+5. There's no synchronous response. The patch's message-1086 handler just emits a `'dynamicRecipeFulfilled'` event with a raw result code — logged for diagnostics but not the actual success signal.
+6. Success/failure is inferred by racing GC-pushed cache events against a manual 30s timeout (the generic `listenForEvent` helper is hardcoded to 10s, too short here):
+   - `itemAcquired` of a KS-kit defindex → full craft succeeded
+   - `itemChanged` on the same fabricator ID → partial fill, GC updated the fab in place
+   - `itemAcquired` of a *new* fabricator-defindex item → partial fill, GC reissued the fab under a new ID instead of updating it in place (reverse-engineered quirk)
+   - `disconnectedFromGC` → hard failure
+   - timeout with no matching event → re-diff `backpack` snapshots taken before/after to guess what happened
+
+In short: fire message 1085 into the GC pipe, then watch the async item-cache event stream Steam pushes back, reconciling with before/after `backpack` snapshots since asset IDs and item identity can shift underneath you mid-craft.
+
+Two protocol quirks worth remembering (see also `CLAUDE.md`):
+- `value_bytes` on GC attributes is **float32 LE**, not uint32 — killstreak tier 2 is bytes `[0,0,0,64]`, not `[2,0,0,0]`.
+- GC item IDs are 64-bit and come back as **strings** — never compare with `===` against a number literal.
+
 ---
 
 ## New Code Added
