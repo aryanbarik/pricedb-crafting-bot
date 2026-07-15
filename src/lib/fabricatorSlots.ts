@@ -6,7 +6,6 @@ const Schema = require('../../node_modules/@tf2autobot/tf2/protobufs/generated/_
 export const FABRICATOR_DEFINDEXES = [20002, 20003]; // Specialized, Professional
 
 // Attribute def_index constants for recipe slots
-const SLOT_OUTPUT = 2006;
 const ATTR_KILLSTREAK_TIER = 2025;
 // KS Kit defindexes — when a slot's itemDefIndex is one of these, it's an output specification, not an input
 // 6523 = Specialized KS Kit (Spec KS Fabricator output), 6526 = Professional KS Kit (Pro KS Fabricator output)
@@ -103,7 +102,7 @@ export function validateFabricatorTrade(
     }
 
     const unfilledSlots = slots.filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
+        s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
     if (unfilledSlots.length === 0) {
         return { valid: false, reason: 'fabricator is already fully filled' };
@@ -155,7 +154,7 @@ export function buildCraftComponents(
     componentItems: GCBackpackItem[]
 ): { subject_item_id: string; attribute_index: number }[] {
     const slots = decodeFabricatorSlots(fabricator).filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
+        s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
 
     const result: { subject_item_id: string; attribute_index: number }[] = [];
@@ -199,7 +198,7 @@ export function findBotComponents(
     botBackpack: GCBackpackItem[]
 ): BotComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
+        s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
 
     const components: { subject_item_id: string; attribute_index: number }[] = [];
@@ -290,7 +289,7 @@ export function findPartnerComponents(
     lookupSku: (sku: string, tradableOnly?: boolean) => string[]
 ): PartnerComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
-        s => s.attributeIndex !== SLOT_OUTPUT && !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
+        s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
 
     const assetIds: string[] = [];

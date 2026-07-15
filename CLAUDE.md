@@ -109,9 +109,11 @@ The crafting code touches:
 | Basic KS Kit | 6528 |
 | Mann Co. Supply Crate Key | SKU `5021;6` / market name `Mann Co. Supply Crate Key` |
 
-Recipe slot attribute def_indexes: 2000 (weapon), 2001–2005 (robot parts/other inputs), 2005–2006 (output spec — skip if `itemDefIndex` ∈ `KS_KIT_DEFINDEXES`).
+Recipe slot attribute def_indexes: 2000 (weapon), 2001+ (robot parts/other inputs, count varies per weapon — some recipes have 5, some have 6+), followed by one output-spec slot at whatever the next free index is.
 
-**Output spec slots**: Slots whose `itemDefIndex` ∈ `[6523, 6526, 6527, 6528]` encode the fabricator's OUTPUT product, not an input. Filter these out in `decodeFabricatorSlots` consumers. `KS_KIT_DEFINDEXES` is exported from `src/lib/fabricatorSlots.ts` as the single source of truth.
+**Output spec slots**: Slots whose `itemDefIndex` ∈ `[6523, 6526, 6527, 6528]` encode the fabricator's OUTPUT product, not an input. Filter these out in `decodeFabricatorSlots` consumers **using the itemDefIndex check only** — `KS_KIT_DEFINDEXES` is exported from `src/lib/fabricatorSlots.ts` as the single source of truth.
+
+**Do NOT hardcode which attribute_index the output slot lands on.** A bug shipped where `SLOT_OUTPUT = 2006` was hardcoded and every consumer filtered `attributeIndex !== 2006` in addition to the itemDefIndex check. This worked for 5-ingredient recipes (output lands at 2006) but silently ate the 6th ingredient for recipes that need one (e.g. Specialized Killstreak Bat Kit Fabricator needs a Reinforced Robot Bomb Stabilizer at attr 2006, pushing the real output slot to 2007) — the bot never requested that ingredient from the customer and returned a partially-filled fabricator. Fixed 2026-07-06 by dropping the attribute-index check everywhere and relying solely on the itemDefIndex/`KS_KIT_DEFINDEXES` check, which is correct regardless of recipe length.
 
 GC message IDs: 1085 (`FulfillDynamicRecipeComponent`), 1086 (`FulfillDynamicRecipeComponentResponse`).
 
