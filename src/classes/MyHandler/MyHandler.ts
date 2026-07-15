@@ -192,6 +192,11 @@ export default class MyHandler extends Handler {
 
     private resetSentSummaryTimeout: NodeJS.Timeout;
 
+    // fabricator assetid -> partner steamID64, for fabricators stuck at the intake step
+    // after exhausting inventory-fetch retries. Populated in handleCraftingIntake, consumed
+    // by retryHeldIntake (wired to the admin-only !retryintake command).
+    private heldIntakeFabricators = new Map<string, string>();
+
     private paths: Paths;
 
     get getPaths(): Paths {
@@ -2463,7 +2468,7 @@ export default class MyHandler extends Handler {
                                     );
                                     return;
                                 }
-                                void this.handleCraftingIntake(offer, newFabsFromDiff[0]);
+                                void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0]);
                                 return;
                             }
 
@@ -2822,8 +2827,9 @@ export default class MyHandler extends Handler {
      * and sends a follow-up offer requesting whatever subset they have (partial fulfillment is
      * fine; the existing craft pipeline already tolerates unfilled slots).
      */
-    private async handleCraftingIntake(offer: TradeOffer, fab: any): Promise<void> {
-        const partnerSteamID64 = offer.partner.getSteamID64();
+    private async handleCraftingIntake(partner: SteamID, fab: any): Promise<void> {
+        const partnerSteamID64 = partner.getSteamID64();
+        this.heldIntakeFabricators.delete(String(fab.id));
         try {
             const fabSchemaItem = (this.bot.schema as any).getItemByDefindex?.(fab.def_index);
             const targetWeaponName = fabSchemaItem ? extractTargetWeaponName(fabSchemaItem.item_name) : null;
@@ -2844,13 +2850,28 @@ export default class MyHandler extends Handler {
                 if (tier !== undefined) kitDefindexByTier[tier] = defindex;
             }
 
-            const theirInventory = new Inventory(offer.partner, this.bot, 'their', this.bot.boundInventoryGetter);
-            try {
-                await theirInventory.fetch();
-            } catch (err) {
-                log.warn(`[craftingService] Intake: failed to load ${partnerSteamID64}'s inventory: ${(err as Error).message}`);
+            const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+            let fetchErr: Error | undefined;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    await theirInventory.fetch();
+                    fetchErr = undefined;
+                    break;
+                } catch (err) {
+                    fetchErr = err as Error;
+                    log.warn(
+                        `[craftingService] Intake: attempt ${attempt}/3 to load ${partnerSteamID64}'s inventory failed: ${fetchErr.message}`
+                    );
+                    if (attempt < 3) {
+                        await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
+                    }
+                }
+            }
+            if (fetchErr) {
+                log.warn(`[craftingService] Intake: giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
+                this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
                 this.bot.sendMessage(
-                    offer.partner,
+                    partner,
                     `⚠️ Failed to load your inventory — Steam might be down, or your inventory is private. ` +
                         `Please set it to public and contact the bot owner to retry; your fabricator is being held.`
                 );
@@ -2866,7 +2887,7 @@ export default class MyHandler extends Handler {
 
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
-                const returnOffer = this.bot.manager.createOffer(offer.partner);
+                const returnOffer = this.bot.manager.createOffer(partner);
                 returnOffer.data('dict', craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
@@ -2886,7 +2907,7 @@ export default class MyHandler extends Handler {
             }
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-            const componentOffer = this.bot.manager.createOffer(offer.partner);
+            const componentOffer = this.bot.manager.createOffer(partner);
             componentOffer.data('dict', craftingDict([], result.assetIds));
             result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
             componentOffer.data('craftingService', {
@@ -2920,14 +2941,33 @@ export default class MyHandler extends Handler {
                             return;
                         }
                         log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${sendErr.message}`);
-                        this.bot.sendMessage(offer.partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner.`);
+                        this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner.`);
                     });
             };
             attemptSend(3);
         } catch (err) {
             log.error(`[craftingService] Intake: unexpected error handling fabricator ${fab.id}:`, err);
-            this.bot.sendMessage(offer.partner, `⚠️ Something went wrong processing your fabricator — please contact the bot owner.`);
+            this.bot.sendMessage(partner, `⚠️ Something went wrong processing your fabricator — please contact the bot owner.`);
         }
+    }
+
+    /**
+     * Re-runs the intake step for a fabricator that got stuck after exhausting inventory-fetch
+     * retries (see heldIntakeFabricators). Wired to the admin-only !retryintake command.
+     */
+    async retryHeldIntake(fabAssetId: string): Promise<string> {
+        const partnerSteamID64 = this.heldIntakeFabricators.get(fabAssetId);
+        if (!partnerSteamID64) {
+            return `❌ No held fabricator found with assetid ${fabAssetId}.`;
+        }
+
+        const fab = (((this.bot.tf2 as any).backpack as any[]) ?? []).find((i: any) => String(i.id) === fabAssetId);
+        if (!fab) {
+            return `❌ Fabricator ${fabAssetId} is no longer in the bot's backpack (already processed or traded away?).`;
+        }
+
+        void this.handleCraftingIntake(new SteamID(partnerSteamID64), fab);
+        return `🔄 Retrying intake for fabricator ${fabAssetId} (partner ${partnerSteamID64})...`;
     }
 
     onOfferAction(

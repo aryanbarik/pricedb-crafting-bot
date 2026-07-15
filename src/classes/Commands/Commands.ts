@@ -206,6 +206,8 @@ export default class Commands {
                 void this.withdrawMptfCommand(steamID, message);
             } else if (command === 'dumpattrs' && isAdmin) {
                 void this.dumpAttrsCommand(steamID, message);
+            } else if (command === 'retryintake' && isAdmin) {
+                void this.retryIntakeCommand(steamID, message);
             } else if (command === 'withdrawall' && isAdmin) {
                 void this.withdrawAllCommand(steamID, message);
             } else if (command === 'add' && isAdmin) {
@@ -1171,6 +1173,26 @@ export default class Commands {
         }
 
         this.bot.sendMessage(steamID, lines.join('\n'));
+    }
+
+    // Manually re-runs the crafting-service intake step for a fabricator that got stuck after
+    // exhausting inventory-fetch retries (e.g. transient Steam 429s).
+    // Usage: !retryintake assetid=<fabricator assetid>
+    private async retryIntakeCommand(steamID: SteamID, message: string): Promise<void> {
+        const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
+        const assetid =
+            typeof params.assetid === 'string'
+                ? params.assetid
+                : typeof params.assetid === 'number'
+                ? String(params.assetid)
+                : undefined;
+
+        if (!assetid) {
+            return this.bot.sendMessage(steamID, '❌ Usage: !retryintake assetid=<fabricator assetid>');
+        }
+
+        const result = await this.bot.handler.retryHeldIntake(assetid);
+        this.bot.sendMessage(steamID, result);
     }
 
     private async withdrawMptfCommand(steamID: SteamID, message: string): Promise<void> {
