@@ -1,8 +1,8 @@
 diff --git a/node_modules/@tf2autobot/tf2/handlers.js b/node_modules/@tf2autobot/tf2/handlers.js
-index 9f942d8..77c8857 100644
+index e83dafd..f56727d 100644
 --- a/node_modules/@tf2autobot/tf2/handlers.js
 +++ b/node_modules/@tf2autobot/tf2/handlers.js
-@@ -287,6 +287,36 @@ handlers[Language.CraftResponse] = function(body) {
+@@ -290,6 +290,36 @@ handlers[Language.CraftResponse] = function(body) {
  	this.emit('craftingComplete', blueprint, idList);
  };
  
