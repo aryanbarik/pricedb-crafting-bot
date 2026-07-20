@@ -197,6 +197,12 @@ export default class MyHandler extends Handler {
     // by retryHeldIntake (wired to the admin-only !retryintake command).
     private heldIntakeFabricators = new Map<string, string>();
 
+    // partner steamID64 -> asset IDs sitting in the bot's backpack awaiting return, for any
+    // outgoing crafting-service offer (components request, refund, or final results) that
+    // exhausted its send retries. Populated wherever such a send permanently fails, consumed by
+    // retryHeldReturn (wired to the admin-only !retryreturn command).
+    private heldReturnItems = new Map<string, string[]>();
+
     private paths: Paths;
 
     get getPaths(): Paths {
@@ -2480,6 +2486,7 @@ export default class MyHandler extends Handler {
                                                 return;
                                             }
                                             log.warn(`[craftingService] Refund send failed permanently to ${partnerSteamID64}: ${sendErr.message}`);
+                                            this.holdReturnItems(partnerSteamID64, refundIds);
                                             this.bot.sendMessage(
                                                 offer.partner,
                                                 `⚠️ Crafting failed and I couldn't return your items automatically. Please contact the bot owner. Item IDs: ${refundIds.join(', ')}`
@@ -2578,6 +2585,7 @@ export default class MyHandler extends Handler {
                                                     return;
                                                 }
                                                 log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${sendErr.message}`);
+                                                this.holdReturnItems(partnerSteamID64, returnIds);
                                                 this.bot.sendMessage(
                                                     offer.partner,
                                                     `⚠️ Crafting complete but couldn't send results automatically. Contact the bot owner. Kit IDs: ${resultKitIds.join(', ')}`
@@ -2674,13 +2682,26 @@ export default class MyHandler extends Handler {
                                         returnOffer.data('dict', craftingDict(resultWeaponIds, []));
                                         resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
-                                        this.bot.trades.sendOffer(returnOffer)
-                                            .then(status => {
-                                                if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                                            })
-                                            .catch((sendErr: Error) => {
-                                                log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${sendErr.message}`);
-                                            });
+                                        const attemptSend = (retriesLeft: number): void => {
+                                            this.bot.trades.sendOffer(returnOffer)
+                                                .then(status => {
+                                                    if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                                })
+                                                .catch((sendErr: Error) => {
+                                                    if (retriesLeft > 0) {
+                                                        log.warn(`[craftingService] Failed to send KS weapon (${sendErr.message}), retrying in 15s (${retriesLeft} left)`);
+                                                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                                                        return;
+                                                    }
+                                                    log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${sendErr.message}`);
+                                                    this.holdReturnItems(partnerSteamID64, resultWeaponIds);
+                                                    this.bot.sendMessage(
+                                                        offer.partner,
+                                                        `⚠️ Crafting complete but couldn't send your weapon automatically. Please contact the bot owner.`
+                                                    );
+                                                });
+                                        };
+                                        attemptSend(3);
                                         return;
                                     }
 
@@ -2926,6 +2947,11 @@ export default class MyHandler extends Handler {
                     })
                     .catch((sendErr: Error) => {
                         log.warn(`[craftingService] Intake: failed to return fabricator to ${partnerSteamID64}: ${sendErr.message}`);
+                        this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
+                        this.bot.sendMessage(
+                            partner,
+                            `⚠️ Couldn't return your fabricator automatically. Please contact the bot owner — your fabricator is being held.`
+                        );
                     });
                 return;
             }
@@ -2965,7 +2991,8 @@ export default class MyHandler extends Handler {
                             return;
                         }
                         log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${sendErr.message}`);
-                        this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner.`);
+                        this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
+                        this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner. Your fabricator is being held.`);
                     });
             };
             attemptSend(3);
@@ -2992,6 +3019,50 @@ export default class MyHandler extends Handler {
 
         void this.handleCraftingIntake(new SteamID(partnerSteamID64), fab);
         return `🔄 Retrying intake for fabricator ${fabAssetId} (partner ${partnerSteamID64})...`;
+    }
+
+    private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {
+        const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
+        this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
+    }
+
+    /**
+     * Re-sends a batch of items stuck in the bot's backpack after a return-offer send
+     * permanently failed (see heldReturnItems). Wired to the admin-only !retryreturn command.
+     */
+    async retryHeldReturn(partnerSteamID64: string): Promise<string> {
+        const heldIds = this.heldReturnItems.get(partnerSteamID64);
+        if (!heldIds || heldIds.length === 0) {
+            return `❌ No held return items found for steamID ${partnerSteamID64}.`;
+        }
+
+        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        const stillOwned = heldIds.filter(id => backpack.some((i: any) => String(i.id) === id));
+        const missing = heldIds.filter(id => !stillOwned.includes(id));
+
+        if (stillOwned.length === 0) {
+            this.heldReturnItems.delete(partnerSteamID64);
+            return `❌ None of the held items (${heldIds.join(', ')}) are still in the bot's backpack — already sent or traded away? Cleared the hold.`;
+        }
+
+        const partner = new SteamID(partnerSteamID64);
+        const returnOffer = this.bot.manager.createOffer(partner);
+        returnOffer.data('dict', craftingDict(stillOwned, []));
+        stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+        returnOffer.setMessage(`Here are your item(s) from the crafting service.`);
+
+        try {
+            const status = await this.bot.trades.sendOffer(returnOffer);
+            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+            this.heldReturnItems.delete(partnerSteamID64);
+            return (
+                `🔄 Retried return offer to ${partnerSteamID64} with ${stillOwned.length} item(s)` +
+                (missing.length > 0 ? ` (skipped ${missing.length} no-longer-owned item(s): ${missing.join(', ')})` : '') +
+                `.`
+            );
+        } catch (err) {
+            return `❌ Retry failed: ${(err as Error).message}. Items remain held.`;
+        }
     }
 
     onOfferAction(

@@ -208,6 +208,8 @@ export default class Commands {
                 void this.dumpAttrsCommand(steamID, message);
             } else if (command === 'retryintake' && isAdmin) {
                 void this.retryIntakeCommand(steamID, message);
+            } else if (command === 'retryreturn' && isAdmin) {
+                void this.retryReturnCommand(steamID, message);
             } else if (command === 'mcosell' && isAdmin) {
                 void this.manncoListCommand(steamID, message);
             } else if (command === 'mcobuy' && isAdmin) {
@@ -1561,6 +1563,26 @@ export default class Commands {
         }
 
         const result = await this.bot.handler.retryHeldIntake(assetid);
+        this.bot.sendMessage(steamID, result);
+    }
+
+    // Manually re-sends a batch of items stuck in the bot's backpack after a crafting-service
+    // return offer permanently failed to send (e.g. transient Steam send errors).
+    // Usage: !retryreturn steamid=<customer steamID64>
+    private async retryReturnCommand(steamID: SteamID, message: string): Promise<void> {
+        const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
+        const partnerSteamID64 =
+            typeof params.steamid === 'string'
+                ? params.steamid
+                : typeof params.steamid === 'number'
+                ? String(params.steamid)
+                : undefined;
+
+        if (!partnerSteamID64) {
+            return this.bot.sendMessage(steamID, '❌ Usage: !retryreturn steamid=<customer steamID64>');
+        }
+
+        const result = await this.bot.handler.retryHeldReturn(partnerSteamID64);
         this.bot.sendMessage(steamID, result);
     }
 
