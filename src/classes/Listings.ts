@@ -13,6 +13,7 @@ import { PaintedNames } from './Options';
 import ListingManager from '@tf2autobot/bptf-listings';
 import getAttachmentName from '../lib/tools/getAttachmentName';
 import filterAxiosError from '@tf2autobot/filter-axios-error';
+import { FABRICATOR_DEFINDEXES } from '../lib/fabricatorSlots';
 
 /**
  * used when remove all listings has failed once
@@ -85,6 +86,17 @@ export default class Listings {
         } else {
             sku = priceKey;
         }
+
+        if (sku && FABRICATOR_DEFINDEXES.includes(parseInt(sku.split(';')[0], 10))) {
+            // Fabricators are always mid-transit through the crafting service (received, crafted,
+            // returned) — never auto-list them for sale. If this bot ever needs to buy/sell
+            // fabricators as regular stock, that should be a separate bot/pricelist, not this one.
+            if (showLogs) {
+                log.debug(`Skipping listing check for ${priceKey} — fabricators are not auto-listed.`);
+            }
+            return;
+        }
+
         if (!this.isCreateListing) {
             return;
         }
