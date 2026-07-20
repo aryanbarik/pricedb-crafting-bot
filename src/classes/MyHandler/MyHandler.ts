@@ -2877,6 +2877,12 @@ export default class MyHandler extends Handler {
                 const results: string[] = [];
                 for (const sku of Object.keys(theirInventory.getItems)) {
                     const parts = sku.split(';');
+                    const skuDefindex = parseInt(parts[0], 10);
+                    // Fabricators and unapplied Kits also carry a "kt-N" segment in their own SKU
+                    // (their output tier) — exclude them, only actual weapons are valid here.
+                    if (FABRICATOR_DEFINDEXES.includes(skuDefindex) || KS_KIT_DEFINDEXES.includes(skuDefindex)) {
+                        continue;
+                    }
                     if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
                     results.push(...theirInventory.findBySKU(sku, tradableOnly));
                 }
