@@ -2797,6 +2797,10 @@ export default class MyHandler extends Handler {
                 log.warn(
                     `[craftingService] Intake: could not resolve target weapon defindex for fabricator ${fab.id} (def=${fab.def_index}) — will only attempt robot-part slots`
                 );
+            } else {
+                log.debug(
+                    `[craftingService] Intake: resolved target weapon "${targetWeaponName}" -> defindex ${targetWeaponDefindex}`
+                );
             }
 
             const kitDefindexByTier: Partial<Record<number, number>> = {};
@@ -2858,6 +2862,18 @@ export default class MyHandler extends Handler {
                 kitDefindexByTier,
                 (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly)
             );
+
+            if (targetWeaponDefindex !== null && result.missing.some(m => m.includes('weapon'))) {
+                const ownedSkusForDefindex = Object.keys(theirInventory.getItems).filter(
+                    sku => sku.split(';')[0] === String(targetWeaponDefindex)
+                );
+                log.debug(
+                    `[craftingService] Intake: weapon slot unmatched — searched defindex ${targetWeaponDefindex}, ` +
+                        `partner's inventory SKUs for that defindex: ${
+                            ownedSkusForDefindex.length > 0 ? ownedSkusForDefindex.join(', ') : '(none)'
+                        }`
+                );
+            }
 
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
