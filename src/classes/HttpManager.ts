@@ -311,7 +311,7 @@ export default class HttpManager {
                 // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
                 offer.data('craftingService', {
                     phase: 'intake',
-                    fabricatorAssetId,
+                    fabricatorAssetIds: [fabricatorAssetId],
                     preTradeIds
                 });
                 offer.setMessage(

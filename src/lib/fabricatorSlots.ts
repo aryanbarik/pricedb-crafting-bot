@@ -281,13 +281,18 @@ export interface PartnerComponentResult {
  * For the weapon slot, tries a premade killstreak weapon of the right tier first, then falls back
  * to an unapplied KS Kit of the right tier + a matching plain weapon (both items are requested;
  * the existing accepted-offer pipeline already knows how to apply a kit it receives before craft).
+ *
+ * Pass a shared `usedIds` Set when matching multiple fabricators against the same partner
+ * inventory in one batch, so the same physical item can't get claimed for two different
+ * fabricators' slots. Defaults to a fresh Set for single-fabricator callers.
  */
 export function findPartnerComponents(
     fabricator: GCBackpackItem,
     targetWeaponDefindex: number | null,
     kitDefindexByTier: Partial<Record<number, number>>,
     lookupSku: (sku: string, tradableOnly?: boolean) => string[],
-    lookupKillstreakWeapon: (killstreakTier: number, tradableOnly?: boolean) => string[]
+    lookupKillstreakWeapon: (killstreakTier: number, tradableOnly?: boolean) => string[],
+    usedIds: Set<string> = new Set()
 ): PartnerComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
         s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
@@ -295,7 +300,6 @@ export function findPartnerComponents(
 
     const assetIds: string[] = [];
     const missing: string[] = [];
-    const usedIds = new Set<string>();
 
     const takeFromSku = (sku: string): string | undefined => {
         const found = lookupSku(sku, true).find(id => !usedIds.has(id));

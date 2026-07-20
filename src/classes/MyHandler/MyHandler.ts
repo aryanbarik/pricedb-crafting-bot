@@ -860,17 +860,18 @@ export default class MyHandler extends Handler {
                     offer.data('craftingService', { fabricatorAssetIds, componentAssetIds: [], preTradeIds });
                     offer.log('info', `[Mode B] crafting service — ${fabricatorAssetIds.length} fabricator(s) + ${keyCount} key(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
-                } else if (fabricatorAssetIds.length === 1) {
-                    // Lone fabricator, no components, <2 keys: we can't build a craft plan without
-                    // knowing the real recipe, and the GC won't tell us that until we own the item.
-                    // Accept it, then decode the recipe and request matching parts back — same
-                    // two-phase flow as the website's bot-initiated /api/crafting/request-offer.
+                } else if (fabricatorAssetIds.length > 0) {
+                    // Bare fabricator(s), no components, <2 keys: we can't build a craft plan
+                    // without knowing the real recipe, and the GC won't tell us that until we own
+                    // the item(s). Accept, then decode each real recipe and request matching parts
+                    // back in one combined offer — same two-phase flow as the website's
+                    // bot-initiated /api/crafting/request-offer, generalized to N fabricators.
                     const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-                    offer.data('craftingService', { phase: 'intake', fabricatorAssetId: fabricatorAssetIds[0], preTradeIds });
-                    offer.log('info', `[Intake] lone fabricator ${fabricatorAssetIds[0]} — accepting to read real recipe`);
+                    offer.data('craftingService', { phase: 'intake', fabricatorAssetIds, preTradeIds });
+                    offer.log('info', `[Intake] ${fabricatorAssetIds.length} bare fabricator(s) [${fabricatorAssetIds.join(', ')}] — accepting to read real recipe(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 }
-                // Multiple lone fabricators with no components, or non-whitelisted with components: fall through
+                // Non-whitelisted with components: fall through
             } else {
                 // No fabricator in offer — check for kit-only trade (kit + weapon, whitelisted)
                 const allItems = offer.itemsToReceive as any[];
@@ -2401,7 +2402,7 @@ export default class MyHandler extends Handler {
 
                     // Crafting service: trigger fabricator craft after backpack sync
                     const craftingService = offer.data('craftingService') as
-                        | { phase: 'intake'; fabricatorAssetId: string; preTradeIds?: string[] }
+                        | { phase: 'intake'; fabricatorAssetIds: string[]; preTradeIds?: string[] }
                         | { phase: 'components'; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
                         | { phase?: undefined; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
                         | undefined;
@@ -2429,19 +2430,25 @@ export default class MyHandler extends Handler {
                                 .sort((a: any, b: any) => a.def_index - b.def_index);
 
                             if (craftingService.phase === 'intake') {
-                                // Website sent us a lone fabricator — read its real recipe now that we
-                                // own it, then send a follow-up offer requesting matching components.
-                                if (newFabsFromDiff.length !== 1) {
-                                    log.warn(`[craftingService] Intake: expected exactly 1 new fabricator, found ${newFabsFromDiff.length}`);
+                                // Received one or more bare fabricators — read each one's real recipe
+                                // now that we own them, then send a (combined, if more than one)
+                                // follow-up offer requesting matching components.
+                                const expectedCount = craftingService.fabricatorAssetIds.length;
+                                if (newFabsFromDiff.length !== expectedCount) {
+                                    log.warn(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length}`);
                                     this.bot.sendMessage(
                                         offer.partner,
                                         newFabsFromDiff.length === 0
-                                            ? `⚠️ Something went wrong receiving your fabricator — please contact the bot owner.`
+                                            ? `⚠️ Something went wrong receiving your fabricator(s) — please contact the bot owner.`
                                             : `⚠️ Ambiguous fabricator match — please contact the bot owner.`
                                     );
                                     return;
                                 }
-                                void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0]);
+                                if (newFabsFromDiff.length === 1) {
+                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0]);
+                                } else {
+                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff);
+                                }
                                 return;
                             }
 
@@ -3010,6 +3017,204 @@ export default class MyHandler extends Handler {
         } catch (err) {
             log.error(`[craftingService] Intake: unexpected error handling fabricator ${fab.id}:`, err);
             this.bot.sendMessage(partner, `⚠️ Something went wrong processing your fabricator — please contact the bot owner.`);
+        }
+    }
+
+    /**
+     * Same intake flow as handleCraftingIntake, generalized to N bare fabricators received in one
+     * trade: fetches the partner's inventory once (not once per fabricator), resolves each
+     * fabricator's own target weapon, and matches components for all of them against one shared
+     * usedIds Set so the same owned item can't be requested for two different fabricators' slots.
+     * Sends one combined follow-up offer instead of one per fabricator.
+     */
+    private async handleCraftingIntakeBatch(partner: SteamID, fabs: any[]): Promise<void> {
+        const partnerSteamID64 = partner.getSteamID64();
+        const fabIds = fabs.map(fab => String(fab.id));
+        fabIds.forEach(id => this.heldIntakeFabricators.delete(id));
+        try {
+            const kitDefindexByTier: Partial<Record<number, number>> = {};
+            for (const defindex of KS_KIT_DEFINDEXES) {
+                const kitSchemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
+                const tier = kitSchemaItem ? ksKitTierFromName(kitSchemaItem.item_name) : undefined;
+                if (tier !== undefined) kitDefindexByTier[tier] = defindex;
+            }
+
+            const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+            let fetchErr: Error | undefined;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    await theirInventory.fetch();
+                    fetchErr = undefined;
+                    break;
+                } catch (err) {
+                    fetchErr = err as Error;
+                    log.warn(
+                        `[craftingService] Intake (batch): attempt ${attempt}/3 to load ${partnerSteamID64}'s inventory failed: ${fetchErr.message}`
+                    );
+                    if (attempt < 3) {
+                        await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
+                    }
+                }
+            }
+            if (fetchErr) {
+                log.warn(`[craftingService] Intake (batch): giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
+                const returnOffer = this.bot.manager.createOffer(partner);
+                returnOffer.data('dict', craftingDict(fabIds, []));
+                fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                returnOffer.setMessage(
+                    `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory ` +
+                        `is private. Your fabricators are being returned; please make sure your inventory is ` +
+                        `public and try trading them in again.`
+                );
+                this.bot.trades
+                    .sendOffer(returnOffer)
+                    .then(status => {
+                        if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                    })
+                    .catch((sendErr: Error) => {
+                        log.warn(
+                            `[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64} after inventory-fetch failure: ${sendErr.message}`
+                        );
+                        fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                        this.bot.sendMessage(
+                            partner,
+                            `⚠️ Failed to load your inventory, and returning your fabricators also failed. ` +
+                                `Please contact the bot owner — your fabricators are being held.`
+                        );
+                    });
+                return;
+            }
+
+            const lookupKillstreakWeapon = (killstreakTier: number, tradableOnly = true): string[] => {
+                const results: string[] = [];
+                for (const sku of Object.keys(theirInventory.getItems)) {
+                    const parts = sku.split(';');
+                    const skuDefindex = parseInt(parts[0], 10);
+                    if (FABRICATOR_DEFINDEXES.includes(skuDefindex) || KS_KIT_DEFINDEXES.includes(skuDefindex)) {
+                        continue;
+                    }
+                    if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+                    results.push(...theirInventory.findBySKU(sku, tradableOnly));
+                }
+                return results;
+            };
+
+            // Shared across every fabricator in the batch so the same owned item can't be
+            // claimed for two different fabricators' slots.
+            const usedIds = new Set<string>();
+            const masterAssetIds: string[] = [];
+            const missingByFab: { fabId: string; missing: string[] }[] = [];
+
+            for (const fab of fabs) {
+                const fabSku = this.bot.inventoryManager.getInventory.findByAssetid(String(fab.id));
+                const tdMatch = fabSku?.match(/;td-(\d+)/);
+                let targetWeaponDefindex = tdMatch ? parseInt(tdMatch[1], 10) : null;
+
+                if (targetWeaponDefindex === null) {
+                    const fabSchemaItem = (this.bot.schema as any).getItemByDefindex?.(fab.def_index);
+                    const targetWeaponName = fabSchemaItem ? extractTargetWeaponName(fabSchemaItem.item_name) : null;
+                    targetWeaponDefindex = targetWeaponName
+                        ? ((this.bot.schema as any).getItemByItemName?.(targetWeaponName)?.defindex ?? null)
+                        : null;
+                }
+
+                log.debug(
+                    targetWeaponDefindex === null
+                        ? `[craftingService] Intake (batch): could not resolve target weapon defindex for fabricator ${fab.id} (def=${fab.def_index}, sku=${fabSku ?? 'unknown'}) — will only attempt robot-part slots`
+                        : `[craftingService] Intake (batch): resolved target weapon defindex ${targetWeaponDefindex} for fabricator ${fab.id} (sku=${fabSku ?? 'unknown'})`
+                );
+
+                const result = findPartnerComponents(
+                    fab as any,
+                    targetWeaponDefindex,
+                    kitDefindexByTier,
+                    (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly),
+                    lookupKillstreakWeapon,
+                    usedIds
+                );
+
+                masterAssetIds.push(...result.assetIds);
+                if (result.missing.length > 0) {
+                    missingByFab.push({ fabId: String(fab.id), missing: result.missing });
+                }
+            }
+
+            if (masterAssetIds.length === 0) {
+                log.info(`[craftingService] Intake (batch): no matching components found for ${partnerSteamID64} — returning ${fabIds.length} fabricator(s)`);
+                const returnOffer = this.bot.manager.createOffer(partner);
+                returnOffer.data('dict', craftingDict(fabIds, []));
+                fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                returnOffer.setMessage(
+                    `You don't currently own any of the parts needed for these fabricators. ` +
+                        `Your fabricators are being returned — trade them back once you've picked up the parts!`
+                );
+                this.bot.trades
+                    .sendOffer(returnOffer)
+                    .then(status => {
+                        if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                    })
+                    .catch((sendErr: Error) => {
+                        log.warn(`[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64}: ${sendErr.message}`);
+                        fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                        this.bot.sendMessage(
+                            partner,
+                            `⚠️ Couldn't return your fabricators automatically. Please contact the bot owner — they're being held.`
+                        );
+                    });
+                return;
+            }
+
+            const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+            const componentOffer = this.bot.manager.createOffer(partner);
+            componentOffer.data('dict', craftingDict([], masterAssetIds));
+            masterAssetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
+            componentOffer.data('craftingService', {
+                phase: 'components',
+                fabricatorAssetIds: fabIds,
+                componentAssetIds: [],
+                preTradeIds
+            });
+
+            const missingMsg =
+                missingByFab.length > 0
+                    ? ` Note: ${missingByFab
+                          .map(m => `fabricator ${m.fabId} is missing ${m.missing.join(', ')}`)
+                          .join('; ')}, so some fabricators may only be partially filled.`
+                    : '';
+            componentOffer.setMessage(
+                `Thanks! I read your ${fabIds.length} fabricators' recipes and found these parts in your ` +
+                    `inventory — please accept to continue crafting.${missingMsg}`
+            );
+
+            const attemptSend = (retriesLeft: number): void => {
+                this.bot.trades
+                    .sendOffer(componentOffer)
+                    .then(status => {
+                        if (status === 'pending') void this.bot.trades.acceptConfirmation(componentOffer);
+                        log.info(
+                            `[craftingService] Intake (batch): sent components offer ${componentOffer.id} to ${partnerSteamID64} for ${fabIds.length} fabricator(s) (${masterAssetIds.length} item(s))`
+                        );
+                    })
+                    .catch((sendErr: Error) => {
+                        if (retriesLeft > 0) {
+                            log.warn(
+                                `[craftingService] Intake (batch): failed to send components offer (${sendErr.message}), retrying in 15s (${retriesLeft} left)`
+                            );
+                            setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                            return;
+                        }
+                        log.warn(`[craftingService] Intake (batch): failed to send components offer to ${partnerSteamID64}: ${sendErr.message}`);
+                        fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                        this.bot.sendMessage(
+                            partner,
+                            `⚠️ Failed to send the follow-up parts request — please contact the bot owner. Your fabricators are being held.`
+                        );
+                    });
+            };
+            attemptSend(3);
+        } catch (err) {
+            log.error(`[craftingService] Intake (batch): unexpected error handling fabricators [${fabIds.join(', ')}]:`, err);
+            this.bot.sendMessage(partner, `⚠️ Something went wrong processing your fabricators — please contact the bot owner.`);
         }
     }
 
