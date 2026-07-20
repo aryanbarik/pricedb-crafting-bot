@@ -2787,19 +2787,32 @@ export default class MyHandler extends Handler {
         const partnerSteamID64 = partner.getSteamID64();
         this.heldIntakeFabricators.delete(String(fab.id));
         try {
-            const fabSchemaItem = (this.bot.schema as any).getItemByDefindex?.(fab.def_index);
-            const targetWeaponName = fabSchemaItem ? extractTargetWeaponName(fabSchemaItem.item_name) : null;
-            const targetWeaponDefindex = targetWeaponName
-                ? ((this.bot.schema as any).getItemByItemName?.(targetWeaponName)?.defindex ?? null)
-                : null;
+            // defindex 20002/20003 covers every fabricator regardless of target weapon — the
+            // schema's item_name for that base defindex is generic (e.g. "... Kit Fabricator"),
+            // not weapon-specific, so name-based resolution always resolves to the fabricator
+            // itself. The actual target weapon is only known per-instance, already decoded into
+            // the bot's own SKU for this item (the "td-<defindex>" segment, e.g. "20002;6;kt-2;
+            // td-172;od-6523;oq-6") via the standard Steam-description-based SKU pipeline.
+            const fabSku = this.bot.inventoryManager.getInventory.findByAssetid(String(fab.id));
+            const tdMatch = fabSku?.match(/;td-(\d+)/);
+            let targetWeaponDefindex = tdMatch ? parseInt(tdMatch[1], 10) : null;
+
+            if (targetWeaponDefindex === null) {
+                // Fallback in case the bot's own inventory hasn't synced this item's SKU yet.
+                const fabSchemaItem = (this.bot.schema as any).getItemByDefindex?.(fab.def_index);
+                const targetWeaponName = fabSchemaItem ? extractTargetWeaponName(fabSchemaItem.item_name) : null;
+                targetWeaponDefindex = targetWeaponName
+                    ? ((this.bot.schema as any).getItemByItemName?.(targetWeaponName)?.defindex ?? null)
+                    : null;
+            }
 
             if (targetWeaponDefindex === null) {
                 log.warn(
-                    `[craftingService] Intake: could not resolve target weapon defindex for fabricator ${fab.id} (def=${fab.def_index}) — will only attempt robot-part slots`
+                    `[craftingService] Intake: could not resolve target weapon defindex for fabricator ${fab.id} (def=${fab.def_index}, sku=${fabSku ?? 'unknown'}) — will only attempt robot-part slots`
                 );
             } else {
                 log.debug(
-                    `[craftingService] Intake: resolved target weapon "${targetWeaponName}" -> defindex ${targetWeaponDefindex}`
+                    `[craftingService] Intake: resolved target weapon defindex ${targetWeaponDefindex} for fabricator ${fab.id} (sku=${fabSku ?? 'unknown'})`
                 );
             }
 
