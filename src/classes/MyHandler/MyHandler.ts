@@ -225,6 +225,10 @@ export default class MyHandler extends Handler {
 
     private pollDataInterval: NodeJS.Timeout;
 
+    private heldItemsRetryInterval: NodeJS.Timeout;
+
+    private retryingHeldItems = false;
+
     constructor(public bot: Bot, private priceSource: IPricer) {
         super(bot);
 
@@ -316,6 +320,13 @@ export default class MyHandler extends Handler {
         }, 5 * 60 * 1000);
 
         this.pollDataInterval = setInterval(this.refreshPollDataPath.bind(this), 24 * 60 * 60 * 1000);
+
+        // Automatically retry any held crafting-service items (stuck intake fabricators, stuck
+        // return offers) every few minutes, so transient Steam failures resolve themselves
+        // without needing an admin to run !retryintake/!retryreturn manually.
+        this.heldItemsRetryInterval = setInterval(() => {
+            void this.retryAllHeldItems();
+        }, 3 * 60 * 1000);
 
         // Send notification to admin/Discord Webhook if there's any item failed to go through updateOldPrices
         const failedToUpdateOldPrices = this.bot.pricelist.failedUpdateOldPrices;
@@ -3062,6 +3073,28 @@ export default class MyHandler extends Handler {
             );
         } catch (err) {
             return `❌ Retry failed: ${(err as Error).message}. Items remain held.`;
+        }
+    }
+
+    /**
+     * Automatically sweeps both held-item maps and retries them via the same logic as
+     * !retryintake/!retryreturn, so transient failures resolve on their own without needing an
+     * admin to notice and run the command manually. Wired to a periodic interval in onReady().
+     */
+    private async retryAllHeldItems(): Promise<void> {
+        if (this.retryingHeldItems) return;
+        this.retryingHeldItems = true;
+        try {
+            for (const fabAssetId of Array.from(this.heldIntakeFabricators.keys())) {
+                const result = await this.retryHeldIntake(fabAssetId);
+                log.debug(`[craftingService] Auto-retry (intake): ${result}`);
+            }
+            for (const partnerSteamID64 of Array.from(this.heldReturnItems.keys())) {
+                const result = await this.retryHeldReturn(partnerSteamID64);
+                log.debug(`[craftingService] Auto-retry (return): ${result}`);
+            }
+        } finally {
+            this.retryingHeldItems = false;
         }
     }
 
