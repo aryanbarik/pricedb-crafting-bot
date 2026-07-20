@@ -286,7 +286,8 @@ export function findPartnerComponents(
     fabricator: GCBackpackItem,
     targetWeaponDefindex: number | null,
     kitDefindexByTier: Partial<Record<number, number>>,
-    lookupSku: (sku: string, tradableOnly?: boolean) => string[]
+    lookupSku: (sku: string, tradableOnly?: boolean) => string[],
+    lookupKillstreakWeapon: (killstreakTier: number, tradableOnly?: boolean) => string[]
 ): PartnerComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
         s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
@@ -306,19 +307,20 @@ export function findPartnerComponents(
         const needed = slot.numRequired - slot.numFulfilled;
 
         if (slot.itemDefIndex === 0) {
-            // Weapon slot
+            // Weapon slot — itemDefIndex is 0 because the real recipe accepts ANY weapon with a
+            // matching killstreak tier, not just the fabricator's own target weapon type.
             const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
             let foundForSlot = 0;
             for (let k = 0; k < needed; k++) {
-                if (targetWeaponDefindex === null) break;
-
-                const premadeSku = SKU.fromObject({ defindex: targetWeaponDefindex, quality: 6, killstreak: requiredTier });
-                const premadeId = takeFromSku(premadeSku);
+                const premadeId = lookupKillstreakWeapon(requiredTier, true).find(id => !usedIds.has(id));
                 if (premadeId) {
+                    usedIds.add(premadeId);
                     assetIds.push(premadeId);
                     foundForSlot++;
                     continue;
                 }
+
+                if (targetWeaponDefindex === null) continue;
 
                 const kitDefindex = kitDefindexByTier[requiredTier];
                 if (kitDefindex === undefined) continue;

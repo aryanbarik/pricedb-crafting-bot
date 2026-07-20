@@ -2869,11 +2869,26 @@ export default class MyHandler extends Handler {
                 return;
             }
 
+            // Any Unique-quality (6) weapon with a matching killstreak tier satisfies the weapon
+            // slot — the real recipe has no weapon-type restriction (see decodeFabricatorSlots:
+            // weapon slots always decode with itemDefIndex=0). Strange-quality weapons are
+            // intentionally excluded even though the base game allows them, per business rule.
+            const lookupKillstreakWeapon = (killstreakTier: number, tradableOnly = true): string[] => {
+                const results: string[] = [];
+                for (const sku of Object.keys(theirInventory.getItems)) {
+                    const parts = sku.split(';');
+                    if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+                    results.push(...theirInventory.findBySKU(sku, tradableOnly));
+                }
+                return results;
+            };
+
             const result = findPartnerComponents(
                 fab as any,
                 targetWeaponDefindex,
                 kitDefindexByTier,
-                (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly)
+                (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly),
+                lookupKillstreakWeapon
             );
 
             if (targetWeaponDefindex !== null && result.missing.some(m => m.includes('weapon'))) {
