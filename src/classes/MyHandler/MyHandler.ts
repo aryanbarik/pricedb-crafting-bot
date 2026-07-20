@@ -2825,12 +2825,30 @@ export default class MyHandler extends Handler {
             }
             if (fetchErr) {
                 log.warn(`[craftingService] Intake: giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
-                this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
-                this.bot.sendMessage(
-                    partner,
-                    `⚠️ Failed to load your inventory — Steam might be down, or your inventory is private. ` +
-                        `Please set it to public and contact the bot owner to retry; your fabricator is being held.`
+                const returnOffer = this.bot.manager.createOffer(partner);
+                returnOffer.data('dict', craftingDict([String(fab.id)], []));
+                returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
+                returnOffer.setMessage(
+                    `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory ` +
+                        `is private. Your fabricator is being returned; please make sure your inventory is public ` +
+                        `and try trading it in again.`
                 );
+                this.bot.trades
+                    .sendOffer(returnOffer)
+                    .then(status => {
+                        if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                    })
+                    .catch((sendErr: Error) => {
+                        log.warn(
+                            `[craftingService] Intake: failed to return fabricator to ${partnerSteamID64} after inventory-fetch failure: ${sendErr.message}`
+                        );
+                        this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
+                        this.bot.sendMessage(
+                            partner,
+                            `⚠️ Failed to load your inventory, and returning your fabricator also failed. ` +
+                                `Please contact the bot owner — your fabricator is being held.`
+                        );
+                    });
                 return;
             }
 
