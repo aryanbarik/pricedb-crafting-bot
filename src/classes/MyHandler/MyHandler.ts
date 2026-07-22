@@ -7,7 +7,8 @@ import TradeOfferManager, {
     Meta,
     WrongAboutOffer,
     Prices,
-    Items
+    Items,
+    CustomError
 } from '@tf2autobot/tradeoffer-manager';
 
 import pluralize from 'pluralize';
@@ -2499,18 +2500,18 @@ export default class MyHandler extends Handler {
                                         })
                                         .catch((sendErr: Error) => {
                                             if (retriesLeft > 0) {
-                                                log.warn(`[craftingService] Refund send failed (${sendErr.message}), retrying in 15s (${retriesLeft} left)`);
+                                                log.warn(`[craftingService] Refund send failed (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
                                                 setTimeout(() => attemptSend(retriesLeft - 1), 15000);
                                                 return;
                                             }
-                                            log.warn(`[craftingService] Refund send failed permanently to ${partnerSteamID64}: ${sendErr.message}`);
+                                            log.warn(`[craftingService] Refund send failed permanently to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                                             this.holdReturnItems(partnerSteamID64, refundIds);
                                             this.bot.sendMessage(
                                                 offer.partner,
                                                 `⚠️ Crafting failed and I couldn't return your items automatically. Please contact the bot owner. Item IDs: ${refundIds.join(', ')}`
                                             );
                                             this.bot.messageAdmins(
-                                                `⚠️ [craftingService] Refund to ${partnerSteamID64} failed after 3 attempts (${sendErr.message}). ` +
+                                                `⚠️ [craftingService] Refund to ${partnerSteamID64} failed after 3 attempts (${this.describeSendError(sendErr)}). ` +
                                                     `Manual return needed — item IDs: ${refundIds.join(', ')}`,
                                                 []
                                             );
@@ -2598,15 +2599,20 @@ export default class MyHandler extends Handler {
                                             })
                                             .catch((sendErr: Error) => {
                                                 if (retriesLeft > 0) {
-                                                    log.warn(`[craftingService] Failed to send return offer (${sendErr.message}), retrying in 15s (${retriesLeft} left)`);
+                                                    log.warn(`[craftingService] Failed to send return offer (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
                                                     setTimeout(() => attemptSend(retriesLeft - 1), 15000);
                                                     return;
                                                 }
-                                                log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${sendErr.message}`);
+                                                log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                                                 this.holdReturnItems(partnerSteamID64, returnIds);
                                                 this.bot.sendMessage(
                                                     offer.partner,
                                                     `⚠️ Crafting complete but couldn't send results automatically. Contact the bot owner. Kit IDs: ${resultKitIds.join(', ')}`
+                                                );
+                                                this.bot.messageAdmins(
+                                                    `⚠️ [craftingService] Return offer to ${partnerSteamID64} failed after 3 attempts (${this.describeSendError(sendErr)}). ` +
+                                                        `Items held — item IDs: ${returnIds.join(', ')}`,
+                                                    []
                                                 );
                                             });
                                     };
@@ -2707,11 +2713,11 @@ export default class MyHandler extends Handler {
                                                 })
                                                 .catch((sendErr: Error) => {
                                                     if (retriesLeft > 0) {
-                                                        log.warn(`[craftingService] Failed to send KS weapon (${sendErr.message}), retrying in 15s (${retriesLeft} left)`);
+                                                        log.warn(`[craftingService] Failed to send KS weapon (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
                                                         setTimeout(() => attemptSend(retriesLeft - 1), 15000);
                                                         return;
                                                     }
-                                                    log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${sendErr.message}`);
+                                                    log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                                                     this.holdReturnItems(partnerSteamID64, resultWeaponIds);
                                                     this.bot.sendMessage(
                                                         offer.partner,
@@ -2896,7 +2902,7 @@ export default class MyHandler extends Handler {
                     })
                     .catch((sendErr: Error) => {
                         log.warn(
-                            `[craftingService] Intake: failed to return fabricator to ${partnerSteamID64} after inventory-fetch failure: ${sendErr.message}`
+                            `[craftingService] Intake: failed to return fabricator to ${partnerSteamID64} after inventory-fetch failure: ${this.describeSendError(sendErr)}`
                         );
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
                         this.bot.sendMessage(
@@ -2964,7 +2970,7 @@ export default class MyHandler extends Handler {
                         if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
                     })
                     .catch((sendErr: Error) => {
-                        log.warn(`[craftingService] Intake: failed to return fabricator to ${partnerSteamID64}: ${sendErr.message}`);
+                        log.warn(`[craftingService] Intake: failed to return fabricator to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
                         this.bot.sendMessage(
                             partner,
@@ -3003,12 +3009,12 @@ export default class MyHandler extends Handler {
                     .catch((sendErr: Error) => {
                         if (retriesLeft > 0) {
                             log.warn(
-                                `[craftingService] Intake: failed to send components offer (${sendErr.message}), retrying in 15s (${retriesLeft} left)`
+                                `[craftingService] Intake: failed to send components offer (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`
                             );
                             setTimeout(() => attemptSend(retriesLeft - 1), 15000);
                             return;
                         }
-                        log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${sendErr.message}`);
+                        log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
                         this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner. Your fabricator is being held.`);
                     });
@@ -3073,7 +3079,7 @@ export default class MyHandler extends Handler {
                     })
                     .catch((sendErr: Error) => {
                         log.warn(
-                            `[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64} after inventory-fetch failure: ${sendErr.message}`
+                            `[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64} after inventory-fetch failure: ${this.describeSendError(sendErr)}`
                         );
                         fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
                         this.bot.sendMessage(
@@ -3154,7 +3160,7 @@ export default class MyHandler extends Handler {
                         if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
                     })
                     .catch((sendErr: Error) => {
-                        log.warn(`[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64}: ${sendErr.message}`);
+                        log.warn(`[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
                         this.bot.sendMessage(
                             partner,
@@ -3209,6 +3215,8 @@ export default class MyHandler extends Handler {
                         `[craftingService] Intake (batch): sent components offer ${offer.id} to ${partnerSteamID64} for ${chunkFabIds.length} fabricator(s) (${chunkAssetIds.length} item(s))`
                     );
                 } catch (sendErr) {
+                    // Capacity-check uses the raw message (the snippet only ever appears there);
+                    // logging uses the decoded eresult/cause version for diagnosability.
                     const message = (sendErr as Error).message;
                     if (message.includes(CAPACITY_ERROR_SNIPPET) && group.length > 1) {
                         const mid = Math.ceil(group.length / 2);
@@ -3221,14 +3229,14 @@ export default class MyHandler extends Handler {
                     }
                     if (retriesLeft > 0) {
                         log.warn(
-                            `[craftingService] Intake (batch): failed to send components offer for ${chunkFabIds.length} fabricator(s) (${message}), retrying in 15s (${retriesLeft} left)`
+                            `[craftingService] Intake (batch): failed to send components offer for ${chunkFabIds.length} fabricator(s) (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`
                         );
                         await new Promise(resolve => setTimeout(resolve, 15000));
                         await sendChunk(group, retriesLeft - 1);
                         return;
                     }
                     log.warn(
-                        `[craftingService] Intake (batch): failed to send components offer for fabricator(s) [${chunkFabIds.join(', ')}] to ${partnerSteamID64}: ${message}`
+                        `[craftingService] Intake (batch): failed to send components offer for fabricator(s) [${chunkFabIds.join(', ')}] to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`
                     );
                     chunkFabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
                     this.bot.sendMessage(
@@ -3269,6 +3277,27 @@ export default class MyHandler extends Handler {
     }
 
     /**
+     * Trade offer send failures from node-tradeoffer-manager carry a numeric Steam `eresult` (and
+     * sometimes a `cause`) on top of the generic `.message` — e.g. the "(26)" seen in send-failure
+     * messages is EResult.Revoked, meaning Steam considered one of the offer's items to no longer
+     * match its expected inventory state. The crafting/strangify-service logs only ever surfaced
+     * the bare message, which isn't enough to diagnose a recurrence — this decodes the eresult name
+     * and links steamerrors.com for it, matching the pattern Trades.ts already uses elsewhere.
+     */
+    private describeSendError(err: unknown): string {
+        const e = err as CustomError;
+        const parts = [e?.message ?? String(err)];
+        if (e?.eresult !== undefined) {
+            const name = (TradeOfferManager.EResult as unknown as Record<number, string>)[e.eresult];
+            parts.push(`eresult=${e.eresult}${name ? ` (${name})` : ''} — https://steamerrors.com/${e.eresult}`);
+        }
+        if (e?.cause) {
+            parts.push(`cause=${e.cause}`);
+        }
+        return parts.join(' | ');
+    }
+
+    /**
      * Re-sends a batch of items stuck in the bot's backpack after a return-offer send
      * permanently failed (see heldReturnItems). Wired to the admin-only !retryreturn command.
      */
@@ -3303,7 +3332,7 @@ export default class MyHandler extends Handler {
                 `.`
             );
         } catch (err) {
-            return `❌ Retry failed: ${(err as Error).message}. Items remain held.`;
+            return `❌ Retry failed: ${this.describeSendError(err)}. Items remain held.`;
         }
     }
 
