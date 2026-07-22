@@ -2402,6 +2402,16 @@ export default class MyHandler extends Handler {
                     highValue.items = result.items;
 
                     // Crafting service: trigger fabricator craft after backpack sync
+                    const strangifyService = offer.data('strangifyService') as
+                        | { pairs: { strangifierId: string; weaponId: string }[]; preTradeIds?: string[] }
+                        | undefined;
+                    if (strangifyService) {
+                        log.info(`[strangifyService] Trade ${offer.id} accepted — scheduling ${strangifyService.pairs.length} pair(s) in 5s`);
+                        setTimeout(() => {
+                            void this.handleStrangifyAccepted(offer.partner, strangifyService.pairs);
+                        }, 5000);
+                    }
+
                     const craftingService = offer.data('craftingService') as
                         | { phase: 'intake'; fabricatorAssetIds: string[]; preTradeIds?: string[] }
                         | { phase: 'components'; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
@@ -3250,6 +3260,212 @@ export default class MyHandler extends Handler {
             log.error(`[craftingService] Intake (batch): unexpected error handling fabricators [${fabIds.join(', ')}]:`, err);
             this.bot.sendMessage(partner, `⚠️ Something went wrong processing your fabricators — please contact the bot owner.`);
         }
+    }
+
+    /**
+     * Customer-facing !strangify command: scans the customer's own inventory for Strangifiers,
+     * pairs each with a matching Unique-quality plain weapon also in their inventory, and sends
+     * one combined bot-initiated offer requesting all matched pairs — so the customer doesn't
+     * have to manually select potentially 100+ items in Steam's trade UI.
+     *
+     * Strangifier target-weapon resolution reuses the exact same mechanism as fabricators: the
+     * standard SKU pipeline (getSKU.ts) already resolves each Strangifier's target weapon into a
+     * "td-<defindex>" SKU segment (via a static schema attribute for some Strangifiers, a
+     * name-parsing fallback for others — both already handled internally before the item is ever
+     * stored in the inventory dict), so a simple regex on the SKU works for every Strangifier type.
+     */
+    async handleStrangifyCommand(partner: SteamID): Promise<void> {
+        const partnerSteamID64 = partner.getSteamID64();
+        this.bot.sendMessage(partner, `🔍 Scanning your inventory for Strangifiers, one moment...`);
+
+        const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+        let fetchErr: Error | undefined;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                await theirInventory.fetch();
+                fetchErr = undefined;
+                break;
+            } catch (err) {
+                fetchErr = err as Error;
+                log.warn(`[strangifyService] attempt ${attempt}/3 to load ${partnerSteamID64}'s inventory failed: ${fetchErr.message}`);
+                if (attempt < 3) {
+                    await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
+                }
+            }
+        }
+        if (fetchErr) {
+            this.bot.sendMessage(
+                partner,
+                `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory is ` +
+                    `private. Please make sure it's public and try !strangify again.`
+            );
+            return;
+        }
+
+        const usedIds = new Set<string>();
+        const pairs: { strangifierId: string; weaponId: string }[] = [];
+        const unmatched: string[] = [];
+
+        for (const sku of Object.keys(theirInventory.getItems)) {
+            const defindex = parseInt(sku.split(';')[0], 10);
+            const schemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
+            if (!schemaItem || schemaItem.item_name !== 'Strangifier') continue;
+
+            const tdMatch = sku.match(/;td-(\d+)/);
+            const targetDefindex = tdMatch ? parseInt(tdMatch[1], 10) : null;
+            if (targetDefindex === null) {
+                log.warn(`[strangifyService] Could not resolve target weapon for strangifier SKU ${sku} (${partnerSteamID64})`);
+                continue;
+            }
+
+            // Unique (6) and Genuine (1) are both valid strangify inputs.
+            const weaponSkus = [6, 1].map(quality => SKU.fromObject({ defindex: targetDefindex, quality }));
+            const strangifierIds = theirInventory.findBySKU(sku, true).filter(id => !usedIds.has(id));
+
+            for (const strangifierId of strangifierIds) {
+                let weaponId: string | undefined;
+                for (const weaponSku of weaponSkus) {
+                    weaponId = theirInventory.findBySKU(weaponSku, true).find(id => !usedIds.has(id));
+                    if (weaponId) break;
+                }
+                if (!weaponId) {
+                    const weaponName =
+                        (this.bot.schema as any).getItemByDefindex?.(targetDefindex)?.item_name ?? `defindex ${targetDefindex}`;
+                    unmatched.push(weaponName);
+                    continue;
+                }
+                usedIds.add(strangifierId);
+                usedIds.add(weaponId);
+                pairs.push({ strangifierId, weaponId });
+            }
+        }
+
+        const uniqueUnmatched = [...new Set(unmatched)];
+
+        if (pairs.length === 0 && uniqueUnmatched.length === 0) {
+            this.bot.sendMessage(partner, `You don't have any Strangifiers in your inventory.`);
+            return;
+        }
+        if (pairs.length === 0) {
+            this.bot.sendMessage(
+                partner,
+                `Found Strangifier(s) but no matching Unique-quality weapon(s) owned for: ${uniqueUnmatched.join(', ')}. Nothing to request.`
+            );
+            return;
+        }
+
+        const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+        const requestOffer = this.bot.manager.createOffer(partner);
+        const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
+        requestOffer.data('dict', craftingDict([], requestedIds));
+        requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
+        requestOffer.data('strangifyService', { pairs, preTradeIds });
+        requestOffer.setMessage(
+            `Found ${pairs.length} Strangifier+weapon pair(s) — please accept to apply them!` +
+                (uniqueUnmatched.length > 0
+                    ? ` (No matching Unique-quality weapon owned for: ${uniqueUnmatched.join(', ')}, skipped.)`
+                    : '')
+        );
+
+        const attemptSend = (retriesLeft: number): void => {
+            this.bot.trades
+                .sendOffer(requestOffer)
+                .then(status => {
+                    if (status === 'pending') void this.bot.trades.acceptConfirmation(requestOffer);
+                    log.info(`[strangifyService] Sent request offer ${requestOffer.id} to ${partnerSteamID64} for ${pairs.length} pair(s)`);
+                })
+                .catch((sendErr: Error) => {
+                    if (retriesLeft > 0) {
+                        log.warn(
+                            `[strangifyService] Failed to send request offer (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`
+                        );
+                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                        return;
+                    }
+                    log.warn(`[strangifyService] Failed to send request offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
+                    this.bot.sendMessage(partner, `⚠️ Failed to send the strangify request offer — please try !strangify again in a bit.`);
+                });
+        };
+        attemptSend(3);
+    }
+
+    /**
+     * Applies each accepted strangifier+weapon pair sequentially (one applyStrangifier GC job at
+     * a time, matching the sequential craftNext pattern used for fabricators) and returns the
+     * resulting Strange weapon(s) — plus any pair that failed to apply, unchanged — in one
+     * combined offer. Reuses the existing heldReturnItems tracking/auto-retry for send failures.
+     */
+    private async handleStrangifyAccepted(
+        partner: SteamID,
+        pairs: { strangifierId: string; weaponId: string }[]
+    ): Promise<void> {
+        const partnerSteamID64 = partner.getSteamID64();
+        const resultWeaponIds: string[] = [];
+        const failedPairIds: string[] = [];
+
+        const applyNext = (index: number): void => {
+            if (index >= pairs.length) {
+                const returnIds = [...resultWeaponIds, ...failedPairIds];
+                if (returnIds.length === 0) {
+                    log.warn(`[strangifyService] Nothing to return to ${partnerSteamID64}`);
+                    return;
+                }
+                const returnOffer = this.bot.manager.createOffer(partner);
+                returnOffer.data('dict', craftingDict(returnIds, []));
+                returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                returnOffer.setMessage(
+                    failedPairIds.length > 0
+                        ? `Here are your ${resultWeaponIds.length} Strange weapon(s)! ${
+                              failedPairIds.length / 2
+                          } pair(s) couldn't be applied and are returned unchanged — contact the bot owner if this persists.`
+                        : `Here are your ${resultWeaponIds.length} Strange weapon(s)! Thanks for using the strangifier service.`
+                );
+
+                const attemptSend = (retriesLeft: number): void => {
+                    this.bot.trades
+                        .sendOffer(returnOffer)
+                        .then(status => {
+                            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                            log.info(`[strangifyService] Sent return offer ${returnOffer.id} to ${partnerSteamID64}: ${returnIds.length} item(s)`);
+                        })
+                        .catch((sendErr: Error) => {
+                            if (retriesLeft > 0) {
+                                log.warn(
+                                    `[strangifyService] Failed to send return offer (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`
+                                );
+                                setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                                return;
+                            }
+                            log.warn(`[strangifyService] Failed to send return offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
+                            this.holdReturnItems(partnerSteamID64, returnIds);
+                            this.bot.sendMessage(
+                                partner,
+                                `⚠️ Strangifying complete but couldn't send results automatically. Contact the bot owner.`
+                            );
+                        });
+                };
+                attemptSend(3);
+                return;
+            }
+
+            const { strangifierId, weaponId } = pairs[index];
+            this.bot.tf2gc.applyStrangifier(strangifierId, weaponId, (err, resultWeaponId) => {
+                if (err || !resultWeaponId) {
+                    log.warn(
+                        `[strangifyService] Failed to apply strangifier ${strangifierId} to weapon ${weaponId} for ${partnerSteamID64}: ${
+                            err?.message ?? 'no result'
+                        }`
+                    );
+                    failedPairIds.push(strangifierId, weaponId);
+                } else {
+                    log.info(`[strangifyService] Applied strangifier ${strangifierId} to weapon ${weaponId} -> ${resultWeaponId}`);
+                    resultWeaponIds.push(resultWeaponId);
+                }
+                applyNext(index + 1);
+            });
+        };
+
+        applyNext(0);
     }
 
     /**

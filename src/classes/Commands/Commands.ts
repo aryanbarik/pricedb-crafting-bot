@@ -198,6 +198,8 @@ export default class Commands {
                         ? 'uncraftweapon'
                         : (command as CraftUncraft)
                 );
+            } else if (command === 'strangify') {
+                void this.bot.handler.handleStrangifyCommand(steamID);
             } else if (['deposit', 'd'].includes(command) && isAdmin) {
                 void this.depositCommand(steamID, message, prefix);
             } else if (['withdraw', 'w'].includes(command) && isAdmin) {

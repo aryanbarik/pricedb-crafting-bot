@@ -39,7 +39,8 @@ type Job = {
         | 'removeAttributes'
         | 'craftToken'
         | 'craftFabricator'
-        | 'applyKSKit';
+        | 'applyKSKit'
+        | 'applyStrangifier';
     defindex?: number;
     sku?: string;
     skus?: string[];
@@ -49,6 +50,7 @@ type Job = {
     componentIds?: string[];
     kitId?: string;
     weaponId?: string;
+    strangifierId?: string;
     tokenType?: TokenType;
     subTokenType?: SubTokenType;
     sortType?: number;
@@ -56,6 +58,7 @@ type Job = {
     callback?: (err?: Error) => void;
     fabricatorCallback?: (err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void;
     kitCallback?: (err: Error | null, resultWeaponId?: string) => void;
+    strangifyCallback?: (err: Error | null, resultWeaponId?: string) => void;
 };
 
 type ListenForEvent =
@@ -181,6 +184,11 @@ export default class TF2GC {
         this.newJob({ type: 'applyKSKit', kitId, weaponId, kitCallback: cb });
     }
 
+    applyStrangifier(strangifierId: string, weaponId: string, cb: (err: Error | null, resultWeaponId?: string) => void): void {
+        log.debug(`Enqueueing applyStrangifier job: strangifier ${strangifierId} → weapon ${weaponId}`);
+        this.newJob({ type: 'applyStrangifier', strangifierId, weaponId, strangifyCallback: cb });
+    }
+
     private newJob(job: Job): void {
         this.jobs.push(job);
         this.handleJobQueue();
@@ -237,6 +245,8 @@ export default class TF2GC {
                     func = this.handleCraftFabricatorJob.bind(this, job);
                 } else if (job.type === 'applyKSKit') {
                     func = this.handleApplyKSKitJob.bind(this, job);
+                } else if (job.type === 'applyStrangifier') {
+                    func = this.handleApplyStrangifierJob.bind(this, job);
                 }
 
                 if (func) {
@@ -664,6 +674,118 @@ export default class TF2GC {
                 const err = new Error(`applyKSKit: timed out waiting for kit application on weapon ${originalWeaponId}`);
                 log.warn(err.message);
                 if (job.kitCallback) job.kitCallback(err);
+                this.finishedProcessingJob(err);
+            }
+        }, 30000);
+
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('itemAcquired', onItemAcquired);
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('itemChanged', onItemChanged);
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
+    }
+
+    private handleApplyStrangifierJob(job: Job): void {
+        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
+
+        const strangifier = backpack?.find(i => i.id === job.strangifierId);
+        if (!strangifier) {
+            const err = new Error(`applyStrangifier: strangifier ${job.strangifierId} not found in backpack`);
+            log.warn(err.message);
+            if (job.strangifyCallback) job.strangifyCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+        const weapon = backpack?.find(i => i.id === job.weaponId);
+        if (!weapon) {
+            const err = new Error(`applyStrangifier: weapon ${job.weaponId} not found in backpack`);
+            log.warn(err.message);
+            if (job.strangifyCallback) job.strangifyCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+
+        let settled = false;
+        const originalWeaponId = String(weapon.id);
+
+        const cleanup = (): void => {
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            // @ts-ignore
+            this.bot.tf2.removeListener('itemChanged', onItemChanged);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            // @ts-ignore
+            this.bot.tf2.removeListener('applyXifierResponse', onXifierResponse);
+        };
+
+        // Log the GC response code — 0 typically means accepted
+        const onXifierResponse = (result: number): void => {
+            log.debug(`applyStrangifier: applyXifierResponse result=${result} (strangifier ${strangifier.id})`);
+        };
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.once('applyXifierResponse', onXifierResponse);
+
+        log.debug(`applyStrangifier: applying strangifier ${strangifier.id} to weapon ${weapon.id} via ApplyXifier`);
+        (this.bot.tf2 as any).applyStrangifierOrUnusualifier(weapon.id, strangifier.id);
+
+        // Strangifying makes the weapon Strange quality (11) — either a new GC item is spawned
+        // (strangifier consumed + new weapon issued) or the same item is updated in-place.
+        const isStrange = (item: TF2GCItem): boolean => (item as unknown as { quality?: number }).quality === 11;
+
+        // Catches weapon created as a new GC item (strangifier consumed + new weapon spawned)
+        const onItemAcquired = (item: TF2GCItem): void => {
+            if (!isStrange(item)) return;
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            cleanup();
+            log.debug(`applyStrangifier: new Strange weapon acquired ${item.id} (defidx ${item.def_index})`);
+            if (job.strangifyCallback) job.strangifyCallback(null, String(item.id));
+            this.finishedProcessingJob();
+        };
+
+        // Catches weapon modified in-place via SO_Update (same ID, quality changed to Strange)
+        const onItemChanged = (oldItem: TF2GCItem, newItem: TF2GCItem): void => {
+            if (String(newItem.id) !== originalWeaponId) return;
+            if (!isStrange(newItem)) return;
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            cleanup();
+            log.debug(`applyStrangifier: weapon ${originalWeaponId} modified in-place to Strange quality`);
+            if (job.strangifyCallback) job.strangifyCallback(null, originalWeaponId);
+            this.finishedProcessingJob();
+        };
+
+        const onDisconnected = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            cleanup();
+            const err = new Error('Disconnected from TF2 GC during strangifier application');
+            if (job.strangifyCallback) job.strangifyCallback(err);
+            this.finishedProcessingJob(err);
+        };
+
+        const applyTimeout = setTimeout(() => {
+            if (settled) return;
+            // Last-chance check: weapon modified in-place but event was missed
+            const updatedWeapon = ((this.bot.tf2 as any).backpack as TF2GCItem[])?.find(i => i.id === originalWeaponId);
+            const strange = updatedWeapon ? isStrange(updatedWeapon) : false;
+            settled = true;
+            cleanup();
+            if (strange) {
+                log.debug(`applyStrangifier: weapon ${originalWeaponId} modified in place (caught at timeout)`);
+                if (job.strangifyCallback) job.strangifyCallback(null, originalWeaponId);
+                this.finishedProcessingJob();
+            } else {
+                const err = new Error(`applyStrangifier: timed out waiting for strangifier application on weapon ${originalWeaponId}`);
+                log.warn(err.message);
+                if (job.strangifyCallback) job.strangifyCallback(err);
                 this.finishedProcessingJob(err);
             }
         }, 30000);
