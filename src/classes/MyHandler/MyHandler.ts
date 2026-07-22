@@ -3100,10 +3100,12 @@ export default class MyHandler extends Handler {
             };
 
             // Shared across every fabricator in the batch so the same owned item can't be
-            // claimed for two different fabricators' slots.
+            // claimed for two different fabricators' slots. Results are kept grouped by
+            // fabricator (rather than flattened into one list) so a too-large batch can be split
+            // into multiple offers below without ever re-matching against inventory — each
+            // group's asset IDs are already mutually exclusive by the time this loop finishes.
             const usedIds = new Set<string>();
-            const masterAssetIds: string[] = [];
-            const missingByFab: { fabId: string; missing: string[] }[] = [];
+            const fabGroups: { fabId: string; assetIds: string[]; missing: string[] }[] = [];
 
             for (const fab of fabs) {
                 const fabSku = this.bot.inventoryManager.getInventory.findByAssetid(String(fab.id));
@@ -3133,12 +3135,10 @@ export default class MyHandler extends Handler {
                     usedIds
                 );
 
-                masterAssetIds.push(...result.assetIds);
-                if (result.missing.length > 0) {
-                    missingByFab.push({ fabId: String(fab.id), missing: result.missing });
-                }
+                fabGroups.push({ fabId: String(fab.id), assetIds: result.assetIds, missing: result.missing });
             }
 
+            const masterAssetIds = fabGroups.flatMap(g => g.assetIds);
             if (masterAssetIds.length === 0) {
                 log.info(`[craftingService] Intake (batch): no matching components found for ${partnerSteamID64} — returning ${fabIds.length} fabricator(s)`);
                 const returnOffer = this.bot.manager.createOffer(partner);
@@ -3165,53 +3165,79 @@ export default class MyHandler extends Handler {
             }
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-            const componentOffer = this.bot.manager.createOffer(partner);
-            componentOffer.data('dict', craftingDict([], masterAssetIds));
-            masterAssetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
-            componentOffer.data('craftingService', {
-                phase: 'components',
-                fabricatorAssetIds: fabIds,
-                componentAssetIds: [],
-                preTradeIds
-            });
 
-            const missingMsg =
-                missingByFab.length > 0
-                    ? ` Note: ${missingByFab
-                          .map(m => `fabricator ${m.fabId} is missing ${m.missing.join(', ')}`)
-                          .join('; ')}, so some fabricators may only be partially filled.`
-                    : '';
-            componentOffer.setMessage(
-                `Thanks! I read your ${fabIds.length} fabricators' recipes and found these parts in your ` +
-                    `inventory — please accept to continue crafting.${missingMsg}`
-            );
+            // Sends one components offer per chunk of fabricator-groups. Chunks are only ever
+            // produced by splitting fabGroups (never by re-matching against inventory), so two
+            // chunks can never claim the same item. Splitting happens only in response to Steam's
+            // "would exceed inventory capacity" error — halving the chunk and retrying each half
+            // — since we don't know the bot's available headroom up front. Chunks are sent
+            // sequentially (each half awaited before the next starts) to avoid stacking up
+            // multiple outstanding offers to the same partner at once, which trips a separate
+            // Steam rate limit.
+            const CAPACITY_ERROR_SNIPPET = 'exceed the maximum number of items allowed';
 
-            const attemptSend = (retriesLeft: number): void => {
-                this.bot.trades
-                    .sendOffer(componentOffer)
-                    .then(status => {
-                        if (status === 'pending') void this.bot.trades.acceptConfirmation(componentOffer);
-                        log.info(
-                            `[craftingService] Intake (batch): sent components offer ${componentOffer.id} to ${partnerSteamID64} for ${fabIds.length} fabricator(s) (${masterAssetIds.length} item(s))`
+            const sendChunk = async (group: typeof fabGroups, retriesLeft = 3): Promise<void> => {
+                const chunkFabIds = group.map(g => g.fabId);
+                const chunkAssetIds = group.flatMap(g => g.assetIds);
+                const chunkMissing = group.filter(g => g.missing.length > 0);
+
+                const offer = this.bot.manager.createOffer(partner);
+                offer.data('dict', craftingDict([], chunkAssetIds));
+                chunkAssetIds.forEach(assetid => offer.addTheirItem({ appid: 440, contextid: '2', assetid }));
+                offer.data('craftingService', {
+                    phase: 'components',
+                    fabricatorAssetIds: chunkFabIds,
+                    componentAssetIds: [],
+                    preTradeIds
+                });
+
+                const missingMsg =
+                    chunkMissing.length > 0
+                        ? ` Note: ${chunkMissing
+                              .map(m => `fabricator ${m.fabId} is missing ${m.missing.join(', ')}`)
+                              .join('; ')}, so some fabricators may only be partially filled.`
+                        : '';
+                offer.setMessage(
+                    `Thanks! I read your ${chunkFabIds.length} fabricators' recipes and found these parts in ` +
+                        `your inventory — please accept to continue crafting.${missingMsg}`
+                );
+
+                try {
+                    const status = await this.bot.trades.sendOffer(offer);
+                    if (status === 'pending') void this.bot.trades.acceptConfirmation(offer);
+                    log.info(
+                        `[craftingService] Intake (batch): sent components offer ${offer.id} to ${partnerSteamID64} for ${chunkFabIds.length} fabricator(s) (${chunkAssetIds.length} item(s))`
+                    );
+                } catch (sendErr) {
+                    const message = (sendErr as Error).message;
+                    if (message.includes(CAPACITY_ERROR_SNIPPET) && group.length > 1) {
+                        const mid = Math.ceil(group.length / 2);
+                        log.warn(
+                            `[craftingService] Intake (batch): chunk of ${group.length} fabricator(s) exceeded inventory capacity — splitting into ${mid}/${group.length - mid} and retrying`
                         );
-                    })
-                    .catch((sendErr: Error) => {
-                        if (retriesLeft > 0) {
-                            log.warn(
-                                `[craftingService] Intake (batch): failed to send components offer (${sendErr.message}), retrying in 15s (${retriesLeft} left)`
-                            );
-                            setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                            return;
-                        }
-                        log.warn(`[craftingService] Intake (batch): failed to send components offer to ${partnerSteamID64}: ${sendErr.message}`);
-                        fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
-                        this.bot.sendMessage(
-                            partner,
-                            `⚠️ Failed to send the follow-up parts request — please contact the bot owner. Your fabricators are being held.`
+                        await sendChunk(group.slice(0, mid));
+                        await sendChunk(group.slice(mid));
+                        return;
+                    }
+                    if (retriesLeft > 0) {
+                        log.warn(
+                            `[craftingService] Intake (batch): failed to send components offer for ${chunkFabIds.length} fabricator(s) (${message}), retrying in 15s (${retriesLeft} left)`
                         );
-                    });
+                        await new Promise(resolve => setTimeout(resolve, 15000));
+                        await sendChunk(group, retriesLeft - 1);
+                        return;
+                    }
+                    log.warn(
+                        `[craftingService] Intake (batch): failed to send components offer for fabricator(s) [${chunkFabIds.join(', ')}] to ${partnerSteamID64}: ${message}`
+                    );
+                    chunkFabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                    this.bot.sendMessage(
+                        partner,
+                        `⚠️ Failed to send the follow-up parts request for ${chunkFabIds.length} fabricator(s) — please contact the bot owner. They're being held.`
+                    );
+                }
             };
-            attemptSend(3);
+            void sendChunk(fabGroups);
         } catch (err) {
             log.error(`[craftingService] Intake (batch): unexpected error handling fabricators [${fabIds.join(', ')}]:`, err);
             this.bot.sendMessage(partner, `⚠️ Something went wrong processing your fabricators — please contact the bot owner.`);
