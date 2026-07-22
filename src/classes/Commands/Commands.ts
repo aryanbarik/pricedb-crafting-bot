@@ -1569,14 +1569,14 @@ export default class Commands {
     // Manually re-sends a batch of items stuck in the bot's backpack after a crafting-service
     // return offer permanently failed to send (e.g. transient Steam send errors).
     // Usage: !retryreturn steamid=<customer steamID64>
+    //
+    // Deliberately bypasses CommandParser.parseParams: it auto-coerces any numeric-looking value
+    // (any key besides "sku") into a JS number via parseInt, and a SteamID64 is a 17-digit
+    // integer — one digit past Number.MAX_SAFE_INTEGER (16 digits) — so it silently loses
+    // precision and round-trips back to a different, wrong ID (e.g. ...692 becomes ...690).
     private async retryReturnCommand(steamID: SteamID, message: string): Promise<void> {
-        const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
-        const partnerSteamID64 =
-            typeof params.steamid === 'string'
-                ? params.steamid
-                : typeof params.steamid === 'number'
-                ? String(params.steamid)
-                : undefined;
+        const match = removeLinkProtocol(message).match(/steamid=(\d+)/i);
+        const partnerSteamID64 = match?.[1];
 
         if (!partnerSteamID64) {
             return this.bot.sendMessage(steamID, '❌ Usage: !retryreturn steamid=<customer steamID64>');
