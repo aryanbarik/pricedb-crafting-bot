@@ -3282,17 +3282,47 @@ export default class MyHandler extends Handler {
     }
 
     /**
-     * Automatically sweeps both held-item maps and retries them via the same logic as
-     * !retryintake/!retryreturn, so transient failures resolve on their own without needing an
-     * admin to notice and run the command manually. Wired to a periodic interval in onReady().
+     * Automatically sweeps both held-item maps and retries them, so transient failures resolve
+     * on their own without needing an admin to notice and run the command manually. Wired to a
+     * periodic interval in onReady().
+     *
+     * Held fabricators are grouped by partner before retrying (rather than looping through
+     * retryHeldIntake per assetid, which always re-invokes the single-fabricator flow) so a
+     * batch of fabricators that got held together goes back out as one combined offer instead of
+     * one offer per fabricator.
      */
     private async retryAllHeldItems(): Promise<void> {
         if (this.retryingHeldItems) return;
         this.retryingHeldItems = true;
         try {
-            for (const fabAssetId of Array.from(this.heldIntakeFabricators.keys())) {
-                const result = await this.retryHeldIntake(fabAssetId);
-                log.debug(`[craftingService] Auto-retry (intake): ${result}`);
+            const heldByPartner = new Map<string, string[]>();
+            for (const [fabAssetId, partnerSteamID64] of this.heldIntakeFabricators) {
+                const list = heldByPartner.get(partnerSteamID64) ?? [];
+                list.push(fabAssetId);
+                heldByPartner.set(partnerSteamID64, list);
+            }
+
+            for (const [partnerSteamID64, fabAssetIds] of heldByPartner) {
+                const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+                const fabs = fabAssetIds
+                    .map(id => backpack.find((i: any) => String(i.id) === id))
+                    .filter((f): f is any => !!f);
+
+                fabAssetIds
+                    .filter(id => !fabs.some((f: any) => String(f.id) === id))
+                    .forEach(id => this.heldIntakeFabricators.delete(id));
+
+                if (fabs.length === 0) continue;
+
+                if (fabs.length === 1) {
+                    log.debug(`[craftingService] Auto-retry (intake): retrying held fabricator ${fabs[0].id} for ${partnerSteamID64}`);
+                    void this.handleCraftingIntake(new SteamID(partnerSteamID64), fabs[0]);
+                } else {
+                    log.debug(
+                        `[craftingService] Auto-retry (intake): retrying ${fabs.length} held fabricators as one combined offer for ${partnerSteamID64}`
+                    );
+                    void this.handleCraftingIntakeBatch(new SteamID(partnerSteamID64), fabs);
+                }
             }
             for (const partnerSteamID64 of Array.from(this.heldReturnItems.keys())) {
                 const result = await this.retryHeldReturn(partnerSteamID64);
