@@ -2402,13 +2402,11 @@ export default class MyHandler extends Handler {
                     highValue.items = result.items;
 
                     // Crafting service: trigger fabricator craft after backpack sync
-                    const strangifyService = offer.data('strangifyService') as
-                        | { pairs: { strangifierId: string; weaponId: string }[]; preTradeIds?: string[] }
-                        | undefined;
+                    const strangifyService = offer.data('strangifyService') as { preTradeIds?: string[] } | undefined;
                     if (strangifyService) {
-                        log.info(`[strangifyService] Trade ${offer.id} accepted — scheduling ${strangifyService.pairs.length} pair(s) in 5s`);
+                        log.info(`[strangifyService] Trade ${offer.id} accepted — scheduling apply in 5s`);
                         setTimeout(() => {
-                            void this.handleStrangifyAccepted(offer.partner, strangifyService.pairs);
+                            void this.handleStrangifyAccepted(offer.partner, strangifyService.preTradeIds ?? []);
                         }, 5000);
                     }
 
@@ -3359,7 +3357,11 @@ export default class MyHandler extends Handler {
         const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
         requestOffer.data('dict', craftingDict([], requestedIds));
         requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
-        requestOffer.data('strangifyService', { pairs, preTradeIds });
+        // Only preTradeIds is kept — `pairs` was computed against the customer's PRE-trade asset
+        // IDs, which Steam always reassigns once the items land in the bot's own backpack. Storing
+        // it here would tempt a future reader into reusing stale IDs post-accept, so it's dropped;
+        // handleStrangifyAccepted re-derives the real pairing from the post-accept backpack diff.
+        requestOffer.data('strangifyService', { preTradeIds });
         requestOffer.setMessage(
             `Found ${pairs.length} Strangifier+weapon pair(s) — please accept to apply them!` +
                 (uniqueUnmatched.length > 0
@@ -3394,14 +3396,68 @@ export default class MyHandler extends Handler {
      * a time, matching the sequential craftNext pattern used for fabricators) and returns the
      * resulting Strange weapon(s) — plus any pair that failed to apply, unchanged — in one
      * combined offer. Reuses the existing heldReturnItems tracking/auto-retry for send failures.
+     *
+     * The pairing computed by handleStrangifyCommand used the customer's PRE-trade asset IDs —
+     * Steam always assigns new asset IDs to items once they change owner via trade, so those IDs
+     * don't exist in the bot's own backpack. Re-derives the real pairing here from the post-accept
+     * backpack diff (same preTradeIds-snapshot technique the crafting service uses), instead of
+     * trusting the stale IDs — using stale IDs was the original bug: applyStrangifier failed with
+     * "not found in backpack", and the return offer then failed with Steam EResult 26 (Revoked)
+     * because it tried to give back items that never existed under those IDs in the first place.
      */
-    private async handleStrangifyAccepted(
-        partner: SteamID,
-        pairs: { strangifierId: string; weaponId: string }[]
-    ): Promise<void> {
+    private async handleStrangifyAccepted(partner: SteamID, preTradeIds: string[]): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
         const resultWeaponIds: string[] = [];
         const failedPairIds: string[] = [];
+
+        const knownIds = new Set<string>(preTradeIds);
+        const newItems: any[] = ((this.bot.tf2 as any).backpack as any[] ?? []).filter(
+            (i: any) => !knownIds.has(String(i.id))
+        );
+        log.debug(
+            `[strangifyService] Backpack diff: ${newItems.length} new item(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`
+        );
+
+        const usedIds = new Set<string>();
+        const pairs: { strangifierId: string; weaponId: string }[] = [];
+        for (const item of newItems) {
+            const itemId = String(item.id);
+            if (usedIds.has(itemId)) continue;
+
+            const sku = this.bot.inventoryManager.getInventory.findByAssetid(itemId);
+            const defindex = sku ? parseInt(sku.split(';')[0], 10) : item.def_index;
+            const schemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
+            if (!schemaItem || schemaItem.item_name !== 'Strangifier') continue;
+
+            const tdMatch = sku?.match(/;td-(\d+)/);
+            const targetDefindex = tdMatch ? parseInt(tdMatch[1], 10) : null;
+            if (targetDefindex === null) {
+                log.warn(`[strangifyService] Could not resolve target weapon for strangifier ${itemId} (sku=${sku ?? 'unknown'})`);
+                continue;
+            }
+
+            const weaponMatch = newItems.find((w: any) => {
+                const wId = String(w.id);
+                if (wId === itemId || usedIds.has(wId) || w.def_index !== targetDefindex) return false;
+                const wSku = this.bot.inventoryManager.getInventory.findByAssetid(wId);
+                const wQuality = wSku ? parseInt(wSku.split(';')[1], 10) : null;
+                return wQuality === 6 || wQuality === 1; // Unique or Genuine
+            });
+
+            if (!weaponMatch) {
+                log.warn(`[strangifyService] Received strangifier ${itemId} but no matching weapon (defindex ${targetDefindex}) found in backpack diff`);
+                continue;
+            }
+
+            usedIds.add(itemId);
+            usedIds.add(String(weaponMatch.id));
+            pairs.push({ strangifierId: itemId, weaponId: String(weaponMatch.id) });
+        }
+
+        if (pairs.length === 0) {
+            log.warn(`[strangifyService] No strangifier+weapon pairs resolved from backpack diff for ${partnerSteamID64} — nothing to apply`);
+            return;
+        }
 
         const applyNext = (index: number): void => {
             if (index >= pairs.length) {
