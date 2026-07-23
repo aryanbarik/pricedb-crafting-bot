@@ -2889,7 +2889,7 @@ export default class MyHandler extends Handler {
                         `[craftingService] Intake: attempt ${attempt}/3 to load ${partnerSteamID64}'s inventory failed: ${fetchErr.message}`
                     );
                     if (attempt < 3) {
-                        await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
+                        await new Promise(resolve => setTimeout(resolve, this.inventoryFetchRetryDelay(fetchErr, attempt)));
                     }
                 }
             }
@@ -3066,7 +3066,7 @@ export default class MyHandler extends Handler {
                         `[craftingService] Intake (batch): attempt ${attempt}/3 to load ${partnerSteamID64}'s inventory failed: ${fetchErr.message}`
                     );
                     if (attempt < 3) {
-                        await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
+                        await new Promise(resolve => setTimeout(resolve, this.inventoryFetchRetryDelay(fetchErr, attempt)));
                     }
                 }
             }
@@ -3287,7 +3287,7 @@ export default class MyHandler extends Handler {
                 fetchErr = err as Error;
                 log.warn(`[strangifyService] attempt ${attempt}/3 to load ${partnerSteamID64}'s inventory failed: ${fetchErr.message}`);
                 if (attempt < 3) {
-                    await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
+                    await new Promise(resolve => setTimeout(resolve, this.inventoryFetchRetryDelay(fetchErr, attempt)));
                 }
             }
         }
@@ -3546,6 +3546,18 @@ export default class MyHandler extends Handler {
     private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {
         const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
         this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
+    }
+
+    /**
+     * A live customer trade showed Steam rate-limiting (HTTP 429) an inventory fetch 3 times in a
+     * row within ~20s using a flat 5s/10s backoff — nowhere near long enough to clear an actual
+     * Steam rate-limit window (typically 30-60s+), so all 3 attempts were effectively doomed
+     * together as soon as the first one got limited. A 429 needs a much longer cooldown than a
+     * generic transient failure; other errors (network blips, timeouts) keep the original short
+     * backoff since those usually clear on their own quickly.
+     */
+    private inventoryFetchRetryDelay(err: Error, attempt: number): number {
+        return err.message.includes('429') ? 30000 * attempt : 5000 * attempt;
     }
 
     /**
