@@ -37,6 +37,7 @@ import { Paths } from '../../resources/paths';
 import log from '../../lib/logger';
 import * as files from '../../lib/files';
 import { exponentialBackoff } from '../../lib/helpers';
+import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
 
 import { noiseMakers } from '../../lib/data';
 import { sendAlert } from '../DiscordWebhook/export';
@@ -2876,7 +2877,7 @@ export default class MyHandler extends Handler {
                 if (tier !== undefined) kitDefindexByTier[tier] = defindex;
             }
 
-            const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+            let theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
             let fetchErr: Error | undefined;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
@@ -2891,6 +2892,17 @@ export default class MyHandler extends Handler {
                     if (attempt < 3) {
                         await new Promise(resolve => setTimeout(resolve, this.inventoryFetchRetryDelay(fetchErr, attempt)));
                     }
+                }
+            }
+            if (fetchErr) {
+                log.warn(
+                    `[craftingService] Intake: native fetch failed after 3 attempts, trying ExpressLoad fallback for ${partnerSteamID64}`
+                );
+                const expressLoadItems = await fetchInventoryViaExpressLoad(partner, 440, '2');
+                if (expressLoadItems) {
+                    theirInventory = Inventory.fromItems(partner, expressLoadItems, this.bot, 'their', this.bot.boundInventoryGetter);
+                    fetchErr = undefined;
+                    log.debug(`[craftingService] Intake: ExpressLoad fallback succeeded for ${partnerSteamID64}`);
                 }
             }
             if (fetchErr) {
@@ -3053,7 +3065,7 @@ export default class MyHandler extends Handler {
                 if (tier !== undefined) kitDefindexByTier[tier] = defindex;
             }
 
-            const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+            let theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
             let fetchErr: Error | undefined;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
@@ -3068,6 +3080,17 @@ export default class MyHandler extends Handler {
                     if (attempt < 3) {
                         await new Promise(resolve => setTimeout(resolve, this.inventoryFetchRetryDelay(fetchErr, attempt)));
                     }
+                }
+            }
+            if (fetchErr) {
+                log.warn(
+                    `[craftingService] Intake (batch): native fetch failed after 3 attempts, trying ExpressLoad fallback for ${partnerSteamID64}`
+                );
+                const expressLoadItems = await fetchInventoryViaExpressLoad(partner, 440, '2');
+                if (expressLoadItems) {
+                    theirInventory = Inventory.fromItems(partner, expressLoadItems, this.bot, 'their', this.bot.boundInventoryGetter);
+                    fetchErr = undefined;
+                    log.debug(`[craftingService] Intake (batch): ExpressLoad fallback succeeded for ${partnerSteamID64}`);
                 }
             }
             if (fetchErr) {
