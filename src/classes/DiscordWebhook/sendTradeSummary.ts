@@ -14,8 +14,9 @@ export default async function sendTradeSummary(
     bot: Bot,
     timeTakenToComplete: number,
     timeTakenToProcessOrConstruct: number,
-    timeTakenToCounterOffer: number | undefined,
-    isOfferSent: boolean | undefined
+    timeTakenToCounterOffer: number,
+    isOfferSent: boolean,
+    isAcceptedWithEscrow: boolean
 ): Promise<void> {
     const optBot = bot.options;
     const optDW = optBot.discordWebhook;
@@ -44,7 +45,16 @@ export default async function sendTradeSummary(
 
     const keyPrices = bot.pricelist.getKeyPrices;
     const value = t.valueDiff(offer);
-    const summary = t.summarizeToChat(offer, bot, 'summary-accepted', true, value, false, isOfferSent);
+    const summary = t.summarizeToChat(
+        offer,
+        bot,
+        'summary-accepted',
+        true,
+        value,
+        false,
+        isOfferSent,
+        isAcceptedWithEscrow
+    );
 
     // Mention owner on the sku(s) specified in discordWebhook.tradeSummary.mentionOwner.itemSkus
     const enableMentionOnSpecificSKU = optDW.tradeSummary.mentionOwner.enable;
@@ -261,7 +271,8 @@ export default async function sendTradeSummary(
                 isOfferSent,
                 timeTakenToComplete,
                 timeTakenToProcessOrConstruct,
-                timeTakenToCounterOffer
+                timeTakenToCounterOffer,
+                isAcceptedWithEscrow
             );
         });
     });

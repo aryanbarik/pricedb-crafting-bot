@@ -8,7 +8,8 @@ import TradeOfferManager, {
     WrongAboutOffer,
     Prices,
     Items,
-    CustomError
+    CustomError,
+    ActionType
 } from '@tf2autobot/tradeoffer-manager';
 
 import pluralize from 'pluralize';
@@ -363,8 +364,8 @@ export default class MyHandler extends Handler {
             const dw = this.opt.discordWebhook.sendAlert;
             const isDwEnabled = dw.enable && (dw.url.main !== '' || dw.url.partialPriceUpdate !== '');
 
-            const msg = `All items below has been updated with partial price:\n\n• ${bulkUpdatedPartiallyPriced.join(
-                '\n --- '
+            const msg = `All items below has been updated with partial price:\n\n- ${bulkUpdatedPartiallyPriced.join(
+                '\n- '
             )}`;
 
             if (this.opt.sendAlert.enable && this.opt.sendAlert.partialPrice.onBulkUpdatePartialPriced) {
@@ -981,6 +982,18 @@ export default class MyHandler extends Handler {
             return;
         }
 
+        // Check if there are any missing items in both sides
+        const isMissingItemsToGive = offer.itemsToGive.some(item => item.missing);
+        const isMissingItemsToReceive = offer.itemsToReceive.some(item => item.missing);
+
+        if (isMissingItemsToGive || isMissingItemsToReceive) {
+            // Ignore the trade, let polling offer automatically change offer state to 8 (InvalidItems)
+            return {
+                action: 'ignore',
+                reason: 'CONTAINS_MISSING_ITEMS'
+            };
+        }
+
         const manualReviewEnabled = opt.manualReview.enable;
         const isIgnoreHalted = opt.offerReceived.halted.ignoreHalted;
 
@@ -996,7 +1009,10 @@ export default class MyHandler extends Handler {
             } else if (isIgnoreHalted) {
                 // do nothing
                 offer.log('info', 'bot is halted, review disabled & set to ignore -> Do nothing');
-                return;
+                return {
+                    action: 'ignore',
+                    reason: '⬜_HALTED'
+                };
             } else {
                 offer.log('info', 'bot is halted, review disabled -> declining');
                 return {
@@ -2150,11 +2166,17 @@ export default class MyHandler extends Handler {
             } else if (isIgnoreEscrowCheckFailed && isOnlyEscrowCheckFailed) {
                 // If only ⬜_ESCROW_CHECK_FAILED (and with 🟥_INVALID_VALUE)
                 // and always ignore enabled, will do nothing.
-                return;
+                return {
+                    action: 'ignore',
+                    reason: '⬜_ESCROW_CHECK_FAILED'
+                };
             } else if (isIgnoreBannedCheckFailed && isOnlyBannedCheckFailed) {
                 // If only ⬜_BANNED_CHECK_FAILED  (and with 🟥_INVALID_VALUE)
                 // and always ignore enabled, will do nothing.
-                return;
+                return {
+                    action: 'ignore',
+                    reason: '⬜_BANNED_CHECK_FAILED'
+                };
             } else if (manualReviewEnabled) {
                 offer.log('info', `offer needs review (${uniqueReasons.join(', ')}), skipping...`);
 
@@ -2164,7 +2186,7 @@ export default class MyHandler extends Handler {
                     meta: meta
                 };
             } else {
-                // hhhmmmmm should we combine this?
+                // manual review disabled, decline any offer with any reason
                 if (hasOverstocked) {
                     offer.log('info', 'is offering too many, declining...');
 
@@ -2213,6 +2235,34 @@ export default class MyHandler extends Handler {
                         reason: '🟪_DUPE_CHECK_FAILED',
                         meta: meta
                     };
+                } else if (hasEscrowCheckFailed) {
+                    if (isIgnoreEscrowCheckFailed) {
+                        // Valid offer but failed to escrow check and manual review disabled
+                        // and options.offerReceived.escrowCheckFailed.ignoreFailed=true
+                        return {
+                            action: 'ignore',
+                            reason: '⬜_ESCROW_CHECK_FAILED'
+                        };
+                    } // else decline
+                    return {
+                        action: 'decline',
+                        reason: '⬜_ESCROW_CHECK_FAILED',
+                        meta: meta
+                    };
+                } else if (hasBannedCheckFailed) {
+                    if (isIgnoreBannedCheckFailed) {
+                        // Valid offer but failed to ban check and manual review disabled
+                        // and options.offerReceived.bannedCheckFailed.ignoreFailed=true
+                        return {
+                            action: 'ignore',
+                            reason: '⬜_BANNED_CHECK_FAILED'
+                        };
+                    } // else decline
+                    return {
+                        action: 'decline',
+                        reason: '⬜_BANNED_CHECK_FAILED',
+                        meta: meta
+                    };
                 } else if (hasInvalidValue) {
                     // We are offering more than them, decline the offer
                     offer.log('info', 'is not offering enough, declining...');
@@ -2225,7 +2275,7 @@ export default class MyHandler extends Handler {
                 }
             }
         }
-
+        // else nothing wrong, process accept offer
         offer.log(
             'trade',
             `accepting. Summary:\n${JSON.stringify(summarize(offer, this.bot, 'summary-accepting', false), null, 4)}`
@@ -2383,20 +2433,26 @@ export default class MyHandler extends Handler {
                     }
                 }
 
-                if (offer.state === TradeOfferManager.ETradeOfferState['Accepted'] && !this.sentSummary[offer.id]) {
+                if (
+                    [TradeOfferManager.ETradeOfferState['Accepted'], TradeOfferManager.ETradeOfferState['InEscrow']].includes(
+                        offer.state
+                    ) &&
+                    !this.sentSummary[offer.id]
+                ) {
                     // Only run this if the bot handled the offer and do not send again if already sent once
 
                     clearTimeout(this.resetSentSummaryTimeout);
                     this.sentSummary[offer.id] = true;
 
-                    offer.data('isAccepted', true);
-                    offer.log('trade', 'has been accepted.');
+                    const isAcceptedWithEscrow = offer.state === TradeOfferManager.ETradeOfferState['InEscrow'];
+                    offer.data(`isAccepted${isAcceptedWithEscrow ? '_withEscrow' : ''}`, true);
+                    offer.log('trade', `has been accepted${isAcceptedWithEscrow ? ' with trade hold' : ''}.`);
 
                     // Auto sell and buy keys if ref < minimum
 
                     this.autokeys.check();
 
-                    const result = await processAccepted(offer, this.bot, timeTakenToComplete);
+                    const result = await processAccepted(offer, this.bot, timeTakenToComplete, isAcceptedWithEscrow);
 
                     highValue.isDisableSKU = result.isDisableSKU;
                     highValue.theirItems = result.theirHighValuedItems;
@@ -3695,12 +3751,7 @@ export default class MyHandler extends Handler {
         }
     }
 
-    onOfferAction(
-        offer: TradeOffer,
-        action: 'accept' | 'decline' | 'skip' | 'counter',
-        reason: string,
-        meta: Meta
-    ): void {
+    onOfferAction(offer: TradeOffer, action: ActionType, reason: string, meta: Meta): void {
         if (offer.data('notify') !== true) {
             return;
         }
@@ -4174,7 +4225,7 @@ export default class MyHandler extends Handler {
 }
 
 interface OnNewTradeOffer {
-    action: 'accept' | 'decline' | 'skip' | 'counter';
+    action: ActionType;
     reason: string;
     meta?: Meta;
 }

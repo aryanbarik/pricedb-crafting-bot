@@ -1,6 +1,6 @@
 {
     "name": "tf2autobot-pricedb-io",
-    "version": "5.17.0",
+    "version": "5.17.1",
     "description": "Fully automated TF2 trading bot advertising on www.backpack.tf using prices from www.pricedb.io, Originally made by Nicklason.",
     "main": "dist/app.js",
     "scripts": {
@@ -26,8 +26,8 @@
     "bugs": {
         "url": "https://github.com/TF2-Price-DB/tf2autobot-pricedb/issues"
     },
-    "updaterepo": true,
-    "updateMessage": "New version may require changes to your options.json! Please check the readme for details!",
+    "updaterepo": false,
+    "updateMessage": "Automatic updates are disabled for this release. Follow the update notes in the README.",
     "homepage": "https://github.com/TF2-Price-DB/tf2autobot-pricedb#readme",
     "dependencies": {
         "@tf2autobot/bptf-listings": "github:Hexenum/node-bptf-listings",
@@ -39,12 +39,11 @@
         "@tf2autobot/tf2-currencies": "^2.0.1",
         "@tf2autobot/tf2-schema": "github:TF2-Price-DB/pricedb-tf2-schema",
         "@tf2autobot/tf2-sku": "^2.0.4",
-        "@tf2autobot/tradeoffer-manager": "^2.20.2",
+        "@tf2autobot/tradeoffer-manager": "^2.20.6",
         "async": "^3.2.6",
         "axios": "^1.18.1",
         "bluebird": "^3.7.2",
         "bluebird-global": "^1.0.1",
-        "body-parser": "^2.3.0",
         "callback-queue": "^3.0.0",
         "change-case": "^4.1.2",
         "cheerio": "^1.0.0",
@@ -73,7 +72,6 @@
         "steam-totp": "^2.1.2",
         "steam-user": "^5.3.0",
         "steamid": "^2.1.0",
-        "url": "^0.11.4",
         "valid-url": "^1.0.9",
         "winston": "^3.17.0",
         "winston-daily-rotate-file": "^5.0.0",

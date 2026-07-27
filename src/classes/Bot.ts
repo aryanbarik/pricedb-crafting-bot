@@ -205,6 +205,8 @@ export default class Bot {
 
     public autoRefreshListingsInterval: NodeJS.Timeout;
 
+    public lastTimeCallingDoPoll: Date;
+
     /**
      * Resets the reconnection state and clears any pending reconnection timeout
      */
@@ -1500,9 +1502,10 @@ export default class Bot {
                         return;
                     }
 
-                    this.manager.pollInterval = 5 * 1000;
+                    this.manager.pollInterval = 10 * 1000;
                     this.setReady = true;
                     this.handler.onReady();
+                    this.lastTimeCallingDoPoll = dayjs().toDate();
                     this.manager.doPoll();
                     this.startVersionChecker();
                     this.initResetCacheInterval();
