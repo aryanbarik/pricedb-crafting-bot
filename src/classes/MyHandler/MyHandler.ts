@@ -61,7 +61,9 @@ import {
     extractTargetWeaponName,
     ksKitTierFromName,
     KS_KIT_DEFINDEXES,
-    FABRICATOR_DEFINDEXES
+    FABRICATOR_DEFINDEXES,
+    ATTR_TOOL_TARGET_ITEM,
+    getItemAttrValue
 } from '../../lib/fabricatorSlots';
 
 const filterReasons = (reasons: string[]) => {
@@ -2739,14 +2741,29 @@ export default class MyHandler extends Handler {
                                 !hasKsAttr(i)
                             );
 
-                            // Match each kit to an unused plain weapon in order.
-                            // NC KS Kit recipe slots have defidx=0 (any weapon), so ordering is fine.
+                            // Match each kit to an unused weapon whose defindex equals the kit's own
+                            // "tool target item" attribute (2012) — every Killstreak Kit is bound to one
+                            // specific weapon (e.g. an Air Strike Kit only ever applies to an Air Strike),
+                            // unlike a Fabricator's weapon *slot* which really is defidx=0/any-weapon.
+                            // Pairing blind on array order previously mismatched kits to the wrong weapon,
+                            // which the GC silently ignores (no response), producing a 30s
+                            // "timed out waiting for kit application" failure and a full refund.
                             const kitPairs: { kitId: string; weaponId: string }[] = [];
                             const usedWeaponIds = new Set<string>();
                             for (const kit of unappliedKits) {
-                                const match = plainWeapons.find((w: any) => !usedWeaponIds.has(String(w.id)));
+                                const targetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
+                                log.debug(
+                                    `[craftingService] Kit ${kit.id} (def=${(kit as any).def_index}) target defindex=${targetDefindex}, attrs=${JSON.stringify(((kit as any).attribute ?? []).map((a: any) => ({ d: a.def_index, v: a.value, vb: a.value_bytes })))}`
+                                );
+                                if (targetDefindex === null) {
+                                    doRefund(`Could not determine target weapon for kit ${kit.id}`);
+                                    return;
+                                }
+                                const match = plainWeapons.find(
+                                    (w: any) => !usedWeaponIds.has(String(w.id)) && w.def_index === Math.round(targetDefindex)
+                                );
                                 if (!match) {
-                                    doRefund(`No weapon available for kit ${kit.id}`);
+                                    doRefund(`No matching weapon (defindex ${Math.round(targetDefindex)}) in your trade for kit ${kit.id}`);
                                     return;
                                 }
                                 usedWeaponIds.add(String(match.id));

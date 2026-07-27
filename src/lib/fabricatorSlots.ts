@@ -7,6 +7,13 @@ export const FABRICATOR_DEFINDEXES = [20002, 20003]; // Specialized, Professiona
 
 // Attribute def_index constants for recipe slots
 const ATTR_KILLSTREAK_TIER = 2025;
+// Every Killstreak Kit (all 4 tiers/defindexes below) is bound to one specific weapon defindex via
+// this attribute ("tool_target_item" in items_game.txt, attribute index 2012) — unlike a
+// Fabricator's own weapon *slot* (defidx=0, any weapon), a Kit itself is never weapon-agnostic.
+// Applying a kit to a weapon whose defindex doesn't match this value is silently ignored by the GC
+// (no response, no state change), which is what caused the "timed out waiting for kit application"
+// failures — the pairing logic must match on this, not just take the next available weapon.
+export const ATTR_TOOL_TARGET_ITEM = 2012;
 // KS Kit defindexes — when a slot's itemDefIndex is one of these, it's an output specification, not an input
 // 6523 = Specialized KS Kit (Spec KS Fabricator output), 6526 = Professional KS Kit (Pro KS Fabricator output)
 export const KS_KIT_DEFINDEXES = [6523, 6526, 6527, 6528];
@@ -74,7 +81,7 @@ function parseRequiredAttrValue(conditionsStr: string, attrDefIndex: number): nu
     return null;
 }
 
-function getItemAttrValue(item: GCBackpackItem, attrDefIndex: number): number | null {
+export function getItemAttrValue(item: GCBackpackItem, attrDefIndex: number): number | null {
     const attr = (item.attribute ?? []).find(a => a.def_index === attrDefIndex);
     if (!attr) return null;
     if (attr.value !== null && attr.value !== undefined) return Number(attr.value);
