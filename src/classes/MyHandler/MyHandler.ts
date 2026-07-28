@@ -2478,6 +2478,9 @@ export default class MyHandler extends Handler {
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
+                        // See fetchTradeUrlToken on handleCraftingIntake below — every offer sent
+                        // from this block (refund, partial-fill/results return) is bot-initiated.
+                        const token = await fetchTradeUrlToken(partnerSteamID64);
                         const preTradeIds = craftingService.preTradeIds;
                         log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
 
@@ -2598,7 +2601,7 @@ export default class MyHandler extends Handler {
                                 const refundIds = allNewIds.length > 0
                                     ? allNewIds
                                     : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
-                                const refundOffer = this.bot.manager.createOffer(offer.partner);
+                                const refundOffer = this.bot.manager.createOffer(offer.partner, token);
                                 refundOffer.data('dict', this.craftingDict(refundIds, []));
                                 refundIds.forEach(id =>
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
@@ -2681,7 +2684,7 @@ export default class MyHandler extends Handler {
                                         log.warn(`[craftingService] Nothing to return for offer ${offer.id}`);
                                         return;
                                     }
-                                    const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                    const returnOffer = this.bot.manager.createOffer(offer.partner, token);
                                     returnOffer.data('dict', this.craftingDict(returnIds, []));
                                     returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
 
@@ -2751,6 +2754,25 @@ export default class MyHandler extends Handler {
                                         } else if (result.partialFabId) {
                                             log.info(`[craftingService] Partial fill for fab ${fabId} — returning partially filled fab`);
                                             partialFabIds.push(result.partialFabId);
+                                            // A genuine partial fill (GC actually attached some components) consumes
+                                            // them — they cease to exist as separate backpack items. But the timeout
+                                            // path in TF2GC.craftFabricator can ALSO report partialFabId just because
+                                            // the original fabricator is still present and unchanged, which is equally
+                                            // consistent with the craft never having progressed at all — leaving these
+                                            // componentIds untouched in the backpack. Checking which of them are still
+                                            // actually there (rather than assuming either way) is the only way to tell,
+                                            // and avoids stranding a customer's components with no return and no
+                                            // tracking — the exact bug that caused a live stuck-parts incident.
+                                            const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+                                            const unconsumedComponentIds = componentIds.filter(id =>
+                                                backpack.some((i: any) => String(i.id) === id)
+                                            );
+                                            if (unconsumedComponentIds.length > 0) {
+                                                log.warn(
+                                                    `[craftingService] Partial fill for fab ${fabId} left ${unconsumedComponentIds.length} component(s) unconsumed — returning them too: ${unconsumedComponentIds.join(', ')}`
+                                                );
+                                                leftoverIds.push(...unconsumedComponentIds);
+                                            }
                                         }
                                         craftNext();
                                     });
@@ -2832,7 +2854,7 @@ export default class MyHandler extends Handler {
                                     if (newFabs.length === 0) {
                                         // Kit-only trade — return the resulting KS weapons directly
                                         log.info(`[craftingService] Kit-only trade — returning ${resultWeaponIds.length} KS weapon(s)`);
-                                        const returnOffer = this.bot.manager.createOffer(offer.partner);
+                                        const returnOffer = this.bot.manager.createOffer(offer.partner, token);
                                         returnOffer.data('dict', this.craftingDict(resultWeaponIds, []));
                                         resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
@@ -3853,6 +3875,41 @@ export default class MyHandler extends Handler {
             );
         } catch (err) {
             return `❌ Retry failed: ${this.describeSendError(err)}. Items remain held.`;
+        }
+    }
+
+    // Force-returns arbitrary asset IDs to a partner, with no map lookup at all — for items that
+    // never went through heldReturnItems in the first place (nothing ever attempted to send them,
+    // so nothing ever failed and got tracked as held). Concretely: a craft that times out can be
+    // wrongly treated as a "partial fill" that already consumed its components, when they're
+    // actually still sitting untouched in the backpack — leaving them permanently untracked and
+    // unreturned until manually recovered here. Wired to the admin-only !returnitems command.
+    async forceReturnItems(partnerSteamID64: string, assetIds: string[]): Promise<string> {
+        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        const stillOwned = assetIds.filter(id => backpack.some((i: any) => String(i.id) === id));
+        const missing = assetIds.filter(id => !stillOwned.includes(id));
+
+        if (stillOwned.length === 0) {
+            return `❌ None of the given item(s) (${assetIds.join(', ')}) are in the bot's backpack.`;
+        }
+
+        const partner = new SteamID(partnerSteamID64);
+        const token = await fetchTradeUrlToken(partnerSteamID64);
+        const returnOffer = this.bot.manager.createOffer(partner, token);
+        returnOffer.data('dict', this.craftingDict(stillOwned, []));
+        stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+        returnOffer.setMessage(`Here are your item(s) from the crafting service — sorry for the delay!`);
+
+        try {
+            const status = await this.bot.trades.sendOffer(returnOffer);
+            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+            return (
+                `✅ Returned ${stillOwned.length} item(s) to ${partnerSteamID64}` +
+                (missing.length > 0 ? ` (skipped ${missing.length} not in backpack: ${missing.join(', ')})` : '') +
+                `.`
+            );
+        } catch (err) {
+            return `❌ Failed to return item(s) to ${partnerSteamID64}: ${this.describeSendError(err)}.`;
         }
     }
 

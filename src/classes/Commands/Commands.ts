@@ -214,6 +214,8 @@ export default class Commands {
                 void this.retryReturnCommand(steamID, message);
             } else if (command === 'returnfab' && isAdmin) {
                 void this.returnFabCommand(steamID, message);
+            } else if (command === 'returnitems' && isAdmin) {
+                void this.returnItemsCommand(steamID, message);
             } else if (command === 'mcosell' && isAdmin) {
                 void this.manncoListCommand(steamID, message);
             } else if (command === 'mcobuy' && isAdmin) {
@@ -1612,6 +1614,26 @@ export default class Commands {
         }
 
         const result = await this.bot.handler.forceReturnHeldIntake(assetid, steamid64Override);
+        this.bot.sendMessage(steamID, result);
+    }
+
+    // Force-returns arbitrary asset IDs to a partner, with no hold-map lookup — for items that
+    // never went through the normal held-item tracking at all (e.g. crafting components left
+    // behind by a mis-detected "partial fill"). Usage: !returnitems steamid=<64> assetids=<id,id,...>
+    private async returnItemsCommand(steamID: SteamID, message: string): Promise<void> {
+        const cleaned = removeLinkProtocol(message);
+        const steamid = cleaned.match(/steamid=(\d+)/i)?.[1];
+        const assetidsRaw = cleaned.match(/assetids=([\d,]+)/i)?.[1];
+
+        if (!steamid || !assetidsRaw) {
+            return this.bot.sendMessage(
+                steamID,
+                '❌ Usage: !returnitems steamid=<customer steamID64> assetids=<id1,id2,...>'
+            );
+        }
+
+        const assetIds = assetidsRaw.split(',').filter(Boolean);
+        const result = await this.bot.handler.forceReturnItems(steamid, assetIds);
         this.bot.sendMessage(steamID, result);
     }
 
