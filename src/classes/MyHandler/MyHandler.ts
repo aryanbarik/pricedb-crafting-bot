@@ -2527,6 +2527,10 @@ export default class MyHandler extends Handler {
                                         // them stuck in the bot's backpack with no way to recover them.
                                         newFabsFromDiff.forEach((i: any) => this.heldIntakeFabricators.set(String(i.id), partnerSteamID64));
                                         log.warn(`[craftingService] Intake: holding ${newFabsFromDiff.length} ambiguous fabricator(s) for ${partnerSteamID64}: ${newFabsFromDiff.map((i: any) => i.id).join(', ')}`);
+                                        this.bot.messageAdmins(
+                                            `⚠️ Held ${newFabsFromDiff.length} ambiguous fabricator(s) for ${partnerSteamID64}: ${newFabsFromDiff.map((i: any) => i.id).join(', ')}. Use !retryintake assetid=<id> or !returnfab assetid=<id>.`,
+                                            []
+                                        );
                                         this.bot.sendMessage(
                                             offer.partner,
                                             `⚠️ Ambiguous fabricator match — I'll retry automatically shortly, no action needed on your end.`
@@ -3039,6 +3043,7 @@ export default class MyHandler extends Handler {
                             `[craftingService] Intake: failed to return fabricator to ${partnerSteamID64} after inventory-fetch failure: ${this.describeSendError(sendErr)}`
                         );
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
+                        this.alertHeldFabricators([String(fab.id)], partnerSteamID64, this.describeSendError(sendErr));
                         this.bot.sendMessage(
                             partner,
                             `⚠️ Failed to load your inventory, and returning your fabricator also failed just now. ` +
@@ -3106,6 +3111,7 @@ export default class MyHandler extends Handler {
                     .catch((sendErr: Error) => {
                         log.warn(`[craftingService] Intake: failed to return fabricator to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
+                        this.alertHeldFabricators([String(fab.id)], partnerSteamID64, this.describeSendError(sendErr));
                         this.bot.sendMessage(
                             partner,
                             `⚠️ Couldn't return your fabricator automatically just now — I'll retry shortly, no action needed on your end.`
@@ -3150,6 +3156,7 @@ export default class MyHandler extends Handler {
                         }
                         log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
+                        this.alertHeldFabricators([String(fab.id)], partnerSteamID64, this.describeSendError(sendErr));
                         this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request just now — I'll retry automatically shortly, no action needed.`);
                     });
             };
@@ -3225,6 +3232,7 @@ export default class MyHandler extends Handler {
                             `[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64} after inventory-fetch failure: ${this.describeSendError(sendErr)}`
                         );
                         fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                        this.alertHeldFabricators(fabIds, partnerSteamID64, this.describeSendError(sendErr));
                         this.bot.sendMessage(
                             partner,
                             `⚠️ Failed to load your inventory, and returning your fabricators also failed just now. ` +
@@ -3304,6 +3312,7 @@ export default class MyHandler extends Handler {
                     .catch((sendErr: Error) => {
                         log.warn(`[craftingService] Intake (batch): failed to return fabricators to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                        this.alertHeldFabricators(fabIds, partnerSteamID64, this.describeSendError(sendErr));
                         this.bot.sendMessage(
                             partner,
                             `⚠️ Couldn't return your fabricators automatically just now — I'll retry shortly, no action needed on your end.`
@@ -3380,6 +3389,7 @@ export default class MyHandler extends Handler {
                         `[craftingService] Intake (batch): failed to send components offer for fabricator(s) [${chunkFabIds.join(', ')}] to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`
                     );
                     chunkFabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
+                    this.alertHeldFabricators(chunkFabIds, partnerSteamID64, this.describeSendError(sendErr));
                     this.bot.sendMessage(
                         partner,
                         `⚠️ Failed to send the follow-up parts request for ${chunkFabIds.length} fabricator(s) just now — I'll retry automatically shortly, no action needed.`
@@ -3676,6 +3686,42 @@ export default class MyHandler extends Handler {
         return `🔄 Retrying intake for fabricator ${fabAssetId} (partner ${partnerSteamID64})...`;
     }
 
+    // Force-returns a fabricator stuck in heldIntakeFabricators as-is, bypassing the
+    // parts-matching/request flow entirely (unlike retryHeldIntake, which re-runs that same flow
+    // and will hit the same error again if the failure isn't transient, e.g. a partner-side
+    // AccessDenied on sending them a new offer). Wired to the admin-only !returnfab command.
+    async forceReturnHeldIntake(fabAssetId: string): Promise<string> {
+        const partnerSteamID64 = this.heldIntakeFabricators.get(fabAssetId);
+        if (!partnerSteamID64) {
+            return `❌ No held fabricator found with assetid ${fabAssetId}.`;
+        }
+
+        const fab = (((this.bot.tf2 as any).backpack as any[]) ?? []).find((i: any) => String(i.id) === fabAssetId);
+        if (!fab) {
+            this.heldIntakeFabricators.delete(fabAssetId);
+            return `❌ Fabricator ${fabAssetId} is no longer in the bot's backpack (already processed or traded away?). Cleared the hold.`;
+        }
+
+        const partner = new SteamID(partnerSteamID64);
+        const returnOffer = this.bot.manager.createOffer(partner);
+        returnOffer.data('dict', this.craftingDict([fabAssetId], []));
+        returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: fabAssetId });
+        returnOffer.setMessage(`Here's your fabricator back — we weren't able to process it automatically.`);
+
+        try {
+            const status = await this.bot.trades.sendOffer(returnOffer);
+            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+            this.heldIntakeFabricators.delete(fabAssetId);
+            this.bot.sendMessage(
+                partner,
+                `Your fabricator has been returned — sorry for the delay! Feel free to re-send it if you'd like to try again.`
+            );
+            return `✅ Returned fabricator ${fabAssetId} to ${partnerSteamID64}.`;
+        } catch (err) {
+            return `❌ Failed to return fabricator ${fabAssetId} to ${partnerSteamID64}: ${this.describeSendError(err)}. Still held — try again.`;
+        }
+    }
+
     // summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's never set.
     // It's normally set by the Cart classes or by onNewTradeOffer's own evaluation — neither of
     // which runs for offers the crafting service creates directly via manager.createOffer(). Keys
@@ -3702,6 +3748,21 @@ export default class MyHandler extends Handler {
     private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {
         const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
         this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
+        this.bot.messageAdmins(
+            `⚠️ Held ${assetIds.length} item(s) for ${partnerSteamID64} after a return send failed: ${assetIds.join(', ')}. Use !retryreturn steamid=${partnerSteamID64}.`,
+            []
+        );
+    }
+
+    // Alerts admins (Steam + Discord) whenever a fabricator gets stuck at the intake step —
+    // these previously only messaged the customer, so a repeatedly-failing send (e.g. a
+    // partner-side AccessDenied that auto-retry can't fix) went unnoticed indefinitely.
+    private alertHeldFabricators(fabAssetIds: string[], partnerSteamID64: string, reason: string): void {
+        this.bot.messageAdmins(
+            `⚠️ Held ${fabAssetIds.length} fabricator(s) for ${partnerSteamID64} (${reason}): ${fabAssetIds.join(', ')}. ` +
+                `Use !retryintake assetid=<id> or !returnfab assetid=<id>.`,
+            []
+        );
     }
 
     /**

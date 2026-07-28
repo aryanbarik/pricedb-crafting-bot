@@ -8,7 +8,8 @@ import {
     Snowflake,
     ActivityType,
     ApplicationCommandType,
-    TextChannel
+    TextChannel,
+    DMChannel
 } from 'discord.js';
 import log from '../lib/logger';
 import Options from './Options';
@@ -22,6 +23,10 @@ export default class DiscordBot {
     private prefix = '!';
 
     private MAX_MESSAGE_LENGTH = 2000 - 2; // some characters are reserved
+
+    // Cached DM channels for admin.messageAdmins()-style proactive alerts (as opposed to
+    // sendAnswer, which replies within an existing incoming Discord message's channel).
+    private dmChannels = new Map<Snowflake, DMChannel>();
 
     constructor(private options: Options, private bot: Bot) {
         this.client = new Client({
@@ -197,10 +202,53 @@ export default class DiscordBot {
                 log.error('Failed to fetch admin by id:', err);
             });
             if (adminUser && !adminUser.bot) {
-                this.client.users.createDM(adminUser).catch(err => {
-                    log.error('Failed to fetch DM channel with admin:', err);
-                });
+                await this.client.users
+                    .createDM(adminUser)
+                    .then(dmChannel => this.dmChannels.set(admin.discordID, dmChannel))
+                    .catch(err => {
+                        log.error('Failed to fetch DM channel with admin:', err);
+                    });
             }
+        }
+    }
+
+    /**
+     * Proactively DMs an admin outside of any reply flow — used to relay messageAdmins() alerts
+     * (crafting-service failures, price/version warnings, etc.) to Discord in addition to Steam.
+     */
+    notifyAdmin(discordID: Snowflake, message: string): void {
+        void this.getDmChannel(discordID).then(channel => {
+            if (!channel) return;
+            message = message.trim();
+            const lines = message.split('\n');
+            let partial = '';
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (partial.length + 1 + line.length <= this.MAX_MESSAGE_LENGTH) {
+                    partial += i === 0 ? line : '\n' + line;
+                } else {
+                    channel.send(partial).catch(err => log.error('Failed to send admin alert to Discord:', err));
+                    partial = line;
+                }
+            }
+            if (partial) {
+                channel.send(partial).catch(err => log.error('Failed to send admin alert to Discord:', err));
+            }
+        });
+    }
+
+    private async getDmChannel(discordID: Snowflake): Promise<DMChannel | undefined> {
+        const cached = this.dmChannels.get(discordID);
+        if (cached) return cached;
+
+        try {
+            const user = await this.client.users.fetch(discordID);
+            const channel = await this.client.users.createDM(user);
+            this.dmChannels.set(discordID, channel);
+            return channel;
+        } catch (err) {
+            log.error(`Failed to open DM channel with Discord admin ${discordID}:`, err);
+            return undefined;
         }
     }
 

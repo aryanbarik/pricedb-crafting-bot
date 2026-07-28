@@ -478,7 +478,12 @@ export default class Bot {
 
         this.admins
             .filter(steamID => !exclude.includes(steamID.toString()))
-            .forEach(steamID => this.sendMessage(steamID, message));
+            .forEach(steamID => {
+                this.sendMessage(steamID, message);
+                if (steamID.discordID && this.discordBot) {
+                    this.discordBot.notifyAdmin(steamID.discordID, message);
+                }
+            });
     }
 
     getPrefix(steamID?: SteamID): string {

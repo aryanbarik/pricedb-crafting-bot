@@ -212,6 +212,8 @@ export default class Commands {
                 void this.retryIntakeCommand(steamID, message);
             } else if (command === 'retryreturn' && isAdmin) {
                 void this.retryReturnCommand(steamID, message);
+            } else if (command === 'returnfab' && isAdmin) {
+                void this.returnFabCommand(steamID, message);
             } else if (command === 'mcosell' && isAdmin) {
                 void this.manncoListCommand(steamID, message);
             } else if (command === 'mcobuy' && isAdmin) {
@@ -1585,6 +1587,27 @@ export default class Commands {
         }
 
         const result = await this.bot.handler.retryHeldReturn(partnerSteamID64);
+        this.bot.sendMessage(steamID, result);
+    }
+
+    // Force-returns a fabricator held at the intake step as-is, bypassing the parts-request flow
+    // entirely — for when that flow itself is what's stuck failing (e.g. AccessDenied sending a
+    // new offer to the partner), so !retryintake would just hit the same error again.
+    // Usage: !returnfab assetid=<fabricator assetid>
+    private async returnFabCommand(steamID: SteamID, message: string): Promise<void> {
+        const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
+        const assetid =
+            typeof params.assetid === 'string'
+                ? params.assetid
+                : typeof params.assetid === 'number'
+                ? String(params.assetid)
+                : undefined;
+
+        if (!assetid) {
+            return this.bot.sendMessage(steamID, '❌ Usage: !returnfab assetid=<fabricator assetid>');
+        }
+
+        const result = await this.bot.handler.forceReturnHeldIntake(assetid);
         this.bot.sendMessage(steamID, result);
     }
 
