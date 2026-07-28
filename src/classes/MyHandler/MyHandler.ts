@@ -3690,10 +3690,14 @@ export default class MyHandler extends Handler {
     // parts-matching/request flow entirely (unlike retryHeldIntake, which re-runs that same flow
     // and will hit the same error again if the failure isn't transient, e.g. a partner-side
     // AccessDenied on sending them a new offer). Wired to the admin-only !returnfab command.
-    async forceReturnHeldIntake(fabAssetId: string): Promise<string> {
-        const partnerSteamID64 = this.heldIntakeFabricators.get(fabAssetId);
+    //
+    // heldIntakeFabricators is in-memory only, so a bot restart between a fabricator getting held
+    // and an admin acting on it wipes the map entry even though the item is still physically in
+    // the backpack — steamID64Override lets the command work anyway by skipping the lookup.
+    async forceReturnHeldIntake(fabAssetId: string, steamID64Override?: string): Promise<string> {
+        const partnerSteamID64 = this.heldIntakeFabricators.get(fabAssetId) ?? steamID64Override;
         if (!partnerSteamID64) {
-            return `❌ No held fabricator found with assetid ${fabAssetId}.`;
+            return `❌ No held fabricator found with assetid ${fabAssetId}. If it's stuck from before a restart, pass steamid=<64>.`;
         }
 
         const fab = (((this.bot.tf2 as any).backpack as any[]) ?? []).find((i: any) => String(i.id) === fabAssetId);

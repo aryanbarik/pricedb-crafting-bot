@@ -1593,21 +1593,25 @@ export default class Commands {
     // Force-returns a fabricator held at the intake step as-is, bypassing the parts-request flow
     // entirely — for when that flow itself is what's stuck failing (e.g. AccessDenied sending a
     // new offer to the partner), so !retryintake would just hit the same error again.
-    // Usage: !returnfab assetid=<fabricator assetid>
+    // Usage: !returnfab assetid=<fabricator assetid> [steamid=<customer steamID64>]
+    //
+    // steamid= is an optional override for a fabricator that got held before a bot restart wiped
+    // the in-memory hold map — see forceReturnHeldIntake. Parsed via regex rather than
+    // CommandParser.parseParams, which auto-coerces any numeric-looking value into a JS number
+    // and silently loses precision on a 17-digit steamID64 (see retryReturnCommand above).
     private async returnFabCommand(steamID: SteamID, message: string): Promise<void> {
-        const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
-        const assetid =
-            typeof params.assetid === 'string'
-                ? params.assetid
-                : typeof params.assetid === 'number'
-                ? String(params.assetid)
-                : undefined;
+        const cleaned = removeLinkProtocol(message);
+        const assetid = cleaned.match(/assetid=(\d+)/i)?.[1];
+        const steamid64Override = cleaned.match(/steamid=(\d+)/i)?.[1];
 
         if (!assetid) {
-            return this.bot.sendMessage(steamID, '❌ Usage: !returnfab assetid=<fabricator assetid>');
+            return this.bot.sendMessage(
+                steamID,
+                '❌ Usage: !returnfab assetid=<fabricator assetid> [steamid=<customer steamID64>]'
+            );
         }
 
-        const result = await this.bot.handler.forceReturnHeldIntake(assetid);
+        const result = await this.bot.handler.forceReturnHeldIntake(assetid, steamid64Override);
         this.bot.sendMessage(steamID, result);
     }
 
