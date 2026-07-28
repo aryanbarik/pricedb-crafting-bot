@@ -265,10 +265,14 @@ export default class HttpManager {
             }
         });
 
-        // Website crafting endpoint: bot requests a single fabricator from the user.
-        // Once accepted, the bot reads the fabricator's real recipe (it can only do this once it
-        // owns the item) and sends a SECOND offer requesting whatever matching components the user
-        // owns — see onTradeOfferChanged's `phase === 'intake'` handling in MyHandler.ts.
+        // Website crafting endpoint: bot requests one or more bare fabricators from the user in a
+        // SINGLE combined offer (previously the website called this once per fabricator, producing
+        // one Steam trade offer per item — annoying for customers with multi-item orders and the
+        // reason for the BOT_REQUEST_SPACING_MS rate-limit dance on the website side). Once accepted,
+        // the bot reads each fabricator's real recipe (it can only do this once it owns the items) and
+        // sends follow-up offers requesting whatever matching components the user owns — see
+        // onTradeOfferChanged's `phase === 'intake'` handling in MyHandler.ts, which already batches
+        // via handleCraftingIntakeBatch when more than one new fabricator shows up in the diff.
         this.app.post('/api/crafting/request-offer', this.validateApiKey.bind(this), async (req, res) => {
             try {
                 if (!this.bot) {
@@ -276,10 +280,10 @@ export default class HttpManager {
                     return;
                 }
 
-                const { steamId, tradeUrl, fabricatorAssetId } = req.body as {
+                const { steamId, tradeUrl, fabricatorAssetIds } = req.body as {
                     steamId?: string;
                     tradeUrl?: string;
-                    fabricatorAssetId?: string;
+                    fabricatorAssetIds?: string[];
                 };
 
                 if (!steamId || typeof steamId !== 'string') {
@@ -290,8 +294,25 @@ export default class HttpManager {
                     res.status(400).json({ success: false, error: 'Missing or invalid tradeUrl' });
                     return;
                 }
-                if (!fabricatorAssetId || typeof fabricatorAssetId !== 'string') {
-                    res.status(400).json({ success: false, error: 'Missing fabricatorAssetId' });
+                if (
+                    !fabricatorAssetIds ||
+                    !Array.isArray(fabricatorAssetIds) ||
+                    fabricatorAssetIds.length === 0 ||
+                    fabricatorAssetIds.some(id => typeof id !== 'string')
+                ) {
+                    res.status(400).json({ success: false, error: 'Missing fabricatorAssetIds' });
+                    return;
+                }
+                // Steam trade offers are capped at 255 items per side, but nothing in this crafting
+                // service flow legitimately produces an order anywhere near that — treat a large batch
+                // as a bad request rather than silently truncating or chunking into multiple offers
+                // (which would defeat the point of combining them into one).
+                const MAX_FABRICATORS_PER_OFFER = 50;
+                if (fabricatorAssetIds.length > MAX_FABRICATORS_PER_OFFER) {
+                    res.status(400).json({
+                        success: false,
+                        error: `Too many fabricators in one request (${fabricatorAssetIds.length} > ${MAX_FABRICATORS_PER_OFFER})`
+                    });
                     return;
                 }
 
@@ -307,22 +328,27 @@ export default class HttpManager {
                 // and pulling just the token out of the trade URL ourselves.
                 const token = new URL(tradeUrl).searchParams.get('token') ?? undefined;
                 const offer = this.bot.manager.createOffer(steamId, token);
-                offer.addTheirItem({ appid: 440, contextid: '2', assetid: fabricatorAssetId });
+                const theirDict: Record<string, number> = {};
+                for (const assetId of fabricatorAssetIds) {
+                    offer.addTheirItem({ appid: 440, contextid: '2', assetid: assetId });
+                    theirDict[assetId] = 1;
+                }
 
                 // summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's
                 // never set. It's normally set by the Cart classes or onNewTradeOffer's own evaluation —
                 // neither of which runs for offers created directly via manager.createOffer().
-                offer.data('dict', { our: {}, their: { [fabricatorAssetId]: 1 } });
+                offer.data('dict', { our: {}, their: theirDict });
 
                 // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
                 offer.data('craftingService', {
                     phase: 'intake',
-                    fabricatorAssetIds: [fabricatorAssetId],
+                    fabricatorAssetIds,
                     preTradeIds
                 });
                 offer.setMessage(
-                    'Please accept this offer to send me your fabricator — ' +
-                        "I'll read its recipe and send you a follow-up offer requesting the parts I need!"
+                    fabricatorAssetIds.length > 1
+                        ? `Please accept this offer to send your ${fabricatorAssetIds.length} fabricators — I'll read their recipes and follow up with the parts needed!`
+                        : "Please accept this offer to send your fabricator — I'll read its recipe and follow up with the parts needed!"
                 );
 
                 const status = await this.bot.trades.sendOffer(offer);
@@ -332,7 +358,9 @@ export default class HttpManager {
                     });
                 }
 
-                log.info(`[craftingService] Sent intake request-offer ${offer.id} to ${steamId} for fabricator ${fabricatorAssetId}`);
+                log.info(
+                    `[craftingService] Sent intake request-offer ${offer.id} to ${steamId} for ${fabricatorAssetIds.length} fabricator(s) [${fabricatorAssetIds.join(', ')}]`
+                );
                 res.json({ success: true, offerId: offer.id });
             } catch (error) {
                 log.error('Error in /api/crafting/request-offer:', error);
