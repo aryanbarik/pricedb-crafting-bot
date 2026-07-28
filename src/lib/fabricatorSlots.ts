@@ -71,14 +71,35 @@ export function decodeFabricatorSlots(item: GCBackpackItem): RecipeSlot[] {
     return slots;
 }
 
+// Separator is pipe + [0x01,0x02,0x01,0x03] + pipe (binary sequence appearing twice between key and value)
+const RECIPE_CONDITION_SEP = '|||';
+
 function parseRequiredAttrValue(conditionsStr: string, attrDefIndex: number): number | null {
-    // Separator is pipe + [0x01,0x02,0x01,0x03] + pipe (binary sequence appearing twice between key and value)
-    const SEP = '|||';
-    const parts = conditionsStr.split(SEP);
+    const parts = conditionsStr.split(RECIPE_CONDITION_SEP);
     for (let i = 0; i + 1 < parts.length; i += 2) {
         if (Number(parts[i]) === attrDefIndex) return Number(parts[i + 1]);
     }
     return null;
+}
+
+/**
+ * Checks EVERY attribute condition encoded in a recipe slot's conditionsStr against a candidate
+ * item, not just killstreak tier -- e.g. a slot can require a specific "loot rarity" (attribute
+ * 2022) value on top of matching defindex, which a defindex-only check would silently accept the
+ * wrong variant for. Steam's GC doesn't error on an invalid combination like that; it just never
+ * responds, which is indistinguishable from a hung connection until the client-side timeout fires.
+ * Confirmed via a live incident: a Professional Killstreak Fabricator's recipe required attribute
+ * 2022 == 1 on two specific robot-part slots, which nothing in this file checked for.
+ */
+function itemSatisfiesConditions(item: GCBackpackItem, conditionsStr: string): boolean {
+    if (!conditionsStr) return true;
+    const parts = conditionsStr.split(RECIPE_CONDITION_SEP);
+    for (let i = 0; i + 1 < parts.length; i += 2) {
+        const attrDefIndex = Number(parts[i]);
+        const requiredValue = Number(parts[i + 1]);
+        if (getItemAttrValue(item, attrDefIndex) !== requiredValue) return false;
+    }
+    return true;
 }
 
 export function getItemAttrValue(item: GCBackpackItem, attrDefIndex: number): number | null {
@@ -174,12 +195,8 @@ export function buildCraftComponents(
         const slot = slots.find(s => {
             const assigned = slotCounts.get(s.attributeIndex) ?? 0;
             if (assigned >= s.numRequired - s.numFulfilled) return false;
-            if (s.itemDefIndex === 0) {
-                // Weapon slot — match by killstreak tier in conditionsStr
-                const requiredTier = parseRequiredAttrValue(s.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
-                return getItemAttrValue(item, ATTR_KILLSTREAK_TIER) === requiredTier;
-            }
-            return item.def_index === s.itemDefIndex;
+            if (s.itemDefIndex !== 0 && item.def_index !== s.itemDefIndex) return false;
+            return itemSatisfiesConditions(item, s.conditionsStr);
         });
 
         if (slot) {
@@ -217,11 +234,11 @@ export function findBotComponents(
 
         if (slot.itemDefIndex === 0) {
             // Weapon slot
-            const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && getItemAttrValue(i, ATTR_KILLSTREAK_TIER) === requiredTier
+                i => !usedIds.has(i.id) && itemSatisfiesConditions(i, slot.conditionsStr)
             );
             if (candidates.length < needed) {
+                const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
                 missing.push(`${needed - candidates.length}× kt-${requiredTier} killstreak weapon`);
                 continue;
             }
@@ -230,9 +247,9 @@ export function findBotComponents(
                 usedIds.add(candidates[k].id);
             }
         } else {
-            // Robot part slot
+            // Robot part slot — defindex plus any additional condition (e.g. loot rarity)
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && i.def_index === slot.itemDefIndex
+                i => !usedIds.has(i.id) && i.def_index === slot.itemDefIndex && itemSatisfiesConditions(i, slot.conditionsStr)
             );
             if (candidates.length < needed) {
                 missing.push(`${needed - candidates.length}× defindex ${slot.itemDefIndex}`);
