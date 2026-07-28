@@ -2523,12 +2523,23 @@ export default class MyHandler extends Handler {
                                         return;
                                     }
                                     log.warn(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length} after ${attempt} attempts`);
-                                    this.bot.sendMessage(
-                                        offer.partner,
-                                        newFabsFromDiff.length === 0
-                                            ? `⚠️ Something went wrong receiving your fabricator(s) — please contact the bot owner.`
-                                            : `⚠️ Ambiguous fabricator match — please contact the bot owner.`
-                                    );
+                                    if (newFabsFromDiff.length === 0) {
+                                        this.bot.sendMessage(
+                                            offer.partner,
+                                            `⚠️ Something went wrong receiving your fabricator(s) — please contact the bot owner.`
+                                        );
+                                    } else {
+                                        // Found candidate fabricator(s), just couldn't tell which one(s)
+                                        // belong to this specific offer — hold all of them so
+                                        // !retryintake can resolve each individually instead of leaving
+                                        // them stuck in the bot's backpack with no way to recover them.
+                                        newFabsFromDiff.forEach((i: any) => this.heldIntakeFabricators.set(String(i.id), partnerSteamID64));
+                                        log.warn(`[craftingService] Intake: holding ${newFabsFromDiff.length} ambiguous fabricator(s) for ${partnerSteamID64}: ${newFabsFromDiff.map((i: any) => i.id).join(', ')}`);
+                                        this.bot.sendMessage(
+                                            offer.partner,
+                                            `⚠️ Ambiguous fabricator match — please contact the bot owner.`
+                                        );
+                                    }
                                     return;
                                 }
 
