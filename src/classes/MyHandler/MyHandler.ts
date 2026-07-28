@@ -202,6 +202,15 @@ export default class MyHandler extends Handler {
     // by retryHeldIntake (wired to the admin-only !retryintake command).
     private heldIntakeFabricators = new Map<string, string>();
 
+    // Backpack IDs of fabricators already claimed by an intake trade's backpack-diff resolution.
+    // When a customer sends several single-fabricator intake offers close together, each offer's
+    // preTradeIds snapshot is taken at OFFER CREATION time — if a sibling offer's fabricator lands
+    // in the backpack before this offer's own 5s-later diff check runs, that sibling's item shows
+    // up as an extra "new" fabricator too, tripping the expectedCount mismatch below ("Ambiguous
+    // fabricator match") even though nothing is actually wrong. Excluding already-claimed IDs here
+    // prevents one offer's diff from re-matching another's fabricator.
+    private claimedIntakeFabricatorIds = new Set<string>();
+
     // partner steamID64 -> asset IDs sitting in the bot's backpack awaiting return, for any
     // outgoing crafting-service offer (components request, refund, or final results) that
     // exhausted its send retries. Populated wherever such a send permanently fails, consumed by
@@ -2485,6 +2494,57 @@ export default class MyHandler extends Handler {
                         // any ID not in the snapshot is from this trade.
                         const knownIds = new Set<string>(preTradeIds ?? []);
 
+                        if (craftingService.phase === 'intake') {
+                            // Received one or more bare fabricators — read each one's real recipe
+                            // now that we own them, then send a (combined, if more than one)
+                            // follow-up offer requesting matching components.
+                            const expectedCount = craftingService.fabricatorAssetIds.length;
+
+                            const attemptIntakeDiff = (attempt: number): void => {
+                                const currentBackpack: any[] = (this.bot.tf2 as any).backpack ?? [];
+                                const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
+
+                                // Exclude fabricators another (sibling) intake offer's own diff already
+                                // claimed — see claimedIntakeFabricatorIds' comment for why this happens.
+                                const newFabsFromDiff = newItems
+                                    .filter(
+                                        (i: any) =>
+                                            FABRICATOR_DEFINDEXES.includes(i.def_index) &&
+                                            !this.claimedIntakeFabricatorIds.has(String(i.id))
+                                    )
+                                    .sort((a: any, b: any) => a.def_index - b.def_index);
+
+                                log.debug(`[craftingService] Intake backpack diff (attempt ${attempt}): ${newItems.length} new item(s), ${newFabsFromDiff.length} unclaimed fabricator(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
+
+                                if (newFabsFromDiff.length !== expectedCount) {
+                                    if (attempt < 3) {
+                                        log.debug(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length} — retrying in 5s (attempt ${attempt + 1}/3)`);
+                                        setTimeout(() => attemptIntakeDiff(attempt + 1), 5000);
+                                        return;
+                                    }
+                                    log.warn(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length} after ${attempt} attempts`);
+                                    this.bot.sendMessage(
+                                        offer.partner,
+                                        newFabsFromDiff.length === 0
+                                            ? `⚠️ Something went wrong receiving your fabricator(s) — please contact the bot owner.`
+                                            : `⚠️ Ambiguous fabricator match — please contact the bot owner.`
+                                    );
+                                    return;
+                                }
+
+                                newFabsFromDiff.forEach((i: any) => this.claimedIntakeFabricatorIds.add(String(i.id)));
+
+                                if (newFabsFromDiff.length === 1) {
+                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0]);
+                                } else {
+                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff);
+                                }
+                            };
+
+                            setTimeout(() => attemptIntakeDiff(1), 5000);
+                            return;
+                        }
+
                         setTimeout(() => {
                             const currentBackpack: any[] = (this.bot.tf2 as any).backpack ?? [];
                             const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
@@ -2496,29 +2556,6 @@ export default class MyHandler extends Handler {
                             const newFabsFromDiff = newItems
                                 .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
                                 .sort((a: any, b: any) => a.def_index - b.def_index);
-
-                            if (craftingService.phase === 'intake') {
-                                // Received one or more bare fabricators — read each one's real recipe
-                                // now that we own them, then send a (combined, if more than one)
-                                // follow-up offer requesting matching components.
-                                const expectedCount = craftingService.fabricatorAssetIds.length;
-                                if (newFabsFromDiff.length !== expectedCount) {
-                                    log.warn(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length}`);
-                                    this.bot.sendMessage(
-                                        offer.partner,
-                                        newFabsFromDiff.length === 0
-                                            ? `⚠️ Something went wrong receiving your fabricator(s) — please contact the bot owner.`
-                                            : `⚠️ Ambiguous fabricator match — please contact the bot owner.`
-                                    );
-                                    return;
-                                }
-                                if (newFabsFromDiff.length === 1) {
-                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0]);
-                                } else {
-                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff);
-                                }
-                                return;
-                            }
 
                             const { fabricatorAssetIds, componentAssetIds, kitAssetIds } = craftingService as {
                                 fabricatorAssetIds: string[];
