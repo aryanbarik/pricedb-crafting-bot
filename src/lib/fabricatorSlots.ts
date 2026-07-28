@@ -1,4 +1,5 @@
 import SKU from '@tf2autobot/tf2-sku';
+import log from './logger';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Schema = require('../../node_modules/@tf2autobot/tf2/protobufs/generated/_load.js');
@@ -191,6 +192,14 @@ export function buildCraftComponents(
     for (const item of componentItems) {
         if (item.id === fabricator.id) continue;
 
+        // Non-Craftable items can never be used as crafting ingredients in TF2 — Steam's GC
+        // would reject the whole recipe fulfillment if one were included, the same silent-hang
+        // failure mode as an unmet attribute condition.
+        if (item.flag_cannot_craft) {
+            log.debug(`[craftFabricator] Excluding Non-Craftable item ${item.id} (defindex ${item.def_index}) from component matching`);
+            continue;
+        }
+
         // Find the matching slot for this item
         const slot = slots.find(s => {
             const assigned = slotCounts.get(s.attributeIndex) ?? 0;
@@ -233,9 +242,9 @@ export function findBotComponents(
         const needed = slot.numRequired - slot.numFulfilled;
 
         if (slot.itemDefIndex === 0) {
-            // Weapon slot
+            // Weapon slot — Non-Craftable items can never be used as crafting ingredients in TF2
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && itemSatisfiesConditions(i, slot.conditionsStr)
+                i => !usedIds.has(i.id) && !i.flag_cannot_craft && itemSatisfiesConditions(i, slot.conditionsStr)
             );
             if (candidates.length < needed) {
                 const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
@@ -247,9 +256,10 @@ export function findBotComponents(
                 usedIds.add(candidates[k].id);
             }
         } else {
-            // Robot part slot — defindex plus any additional condition (e.g. loot rarity)
+            // Robot part slot — defindex plus any additional condition (e.g. loot rarity), and
+            // also excluding Non-Craftable items (see weapon slot above).
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && i.def_index === slot.itemDefIndex && itemSatisfiesConditions(i, slot.conditionsStr)
+                i => !usedIds.has(i.id) && !i.flag_cannot_craft && i.def_index === slot.itemDefIndex && itemSatisfiesConditions(i, slot.conditionsStr)
             );
             if (candidates.length < needed) {
                 missing.push(`${needed - candidates.length}× defindex ${slot.itemDefIndex}`);

@@ -3095,6 +3095,12 @@ export default class MyHandler extends Handler {
                         continue;
                     }
                     if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+                    // Non-Craftable items can't be used as crafting ingredients in TF2 at all —
+                    // Steam's GC would reject the whole recipe fulfillment if one were included.
+                    if (parts.includes('uncraftable')) {
+                        log.debug(`[craftingService] Intake: excluding uncraftable weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        continue;
+                    }
                     results.push(...theirInventory.findBySKU(sku, tradableOnly));
                 }
                 return results;
@@ -3280,6 +3286,12 @@ export default class MyHandler extends Handler {
                         continue;
                     }
                     if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+                    // Non-Craftable items can't be used as crafting ingredients in TF2 at all —
+                    // Steam's GC would reject the whole recipe fulfillment if one were included.
+                    if (parts.includes('uncraftable')) {
+                        log.debug(`[craftingService] Intake: excluding uncraftable weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        continue;
+                    }
                     results.push(...theirInventory.findBySKU(sku, tradableOnly));
                 }
                 return results;
