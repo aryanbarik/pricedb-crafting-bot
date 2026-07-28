@@ -2529,7 +2529,7 @@ export default class MyHandler extends Handler {
                                         log.warn(`[craftingService] Intake: holding ${newFabsFromDiff.length} ambiguous fabricator(s) for ${partnerSteamID64}: ${newFabsFromDiff.map((i: any) => i.id).join(', ')}`);
                                         this.bot.sendMessage(
                                             offer.partner,
-                                            `⚠️ Ambiguous fabricator match — please contact the bot owner.`
+                                            `⚠️ Ambiguous fabricator match — I'll retry automatically shortly, no action needed on your end.`
                                         );
                                     }
                                     return;
@@ -2598,7 +2598,10 @@ export default class MyHandler extends Handler {
                                 refundIds.forEach(id =>
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                 );
-                                refundOffer.setMessage(`Refund — crafting failed: ${reason}`);
+                                // reason can embed an unbounded err.message (see kit-application
+                                // failure callsite below) — slice defensively so we never exceed
+                                // Steam's 128-char setMessage limit; full reason is already logged above.
+                                refundOffer.setMessage(`Refund — crafting failed: ${reason}`.slice(0, 128));
 
                                 const attemptSend = (retriesLeft: number): void => {
                                     this.bot.trades.sendOffer(refundOffer)
@@ -2615,7 +2618,7 @@ export default class MyHandler extends Handler {
                                             this.holdReturnItems(partnerSteamID64, refundIds);
                                             this.bot.sendMessage(
                                                 offer.partner,
-                                                `⚠️ Crafting failed and I couldn't return your items automatically. Please contact the bot owner. Item IDs: ${refundIds.join(', ')}`
+                                                `⚠️ Crafting failed and I couldn't return your items just now — I'll retry automatically shortly, no action needed unless it doesn't resolve.`
                                             );
                                             this.bot.messageAdmins(
                                                 `⚠️ [craftingService] Refund to ${partnerSteamID64} failed after 3 attempts (${this.describeSendError(sendErr)}). ` +
@@ -2691,13 +2694,13 @@ export default class MyHandler extends Handler {
                                     } else {
                                         const parts: string[] = [];
                                         if (resultKitIds.length > 0) parts.push(`${resultKitIds.length} kit(s) crafted`);
-                                        if (partialFabIds.length > 0) parts.push(`${partialFabIds.length} fabricator(s) partially filled and returned`);
-                                        if (failedFabIds.length > 0) parts.push(`${failedFabIds.length} fabricator(s) could not be crafted (returned)`);
-                                        if (leftoverIds.length > 0) parts.push(`${leftoverIds.length} leftover component(s) returned`);
-                                        msg = parts.join(', ') + '. Thanks for using the crafting service.';
+                                        if (partialFabIds.length > 0) parts.push(`${partialFabIds.length} fab(s) partial`);
+                                        if (failedFabIds.length > 0) parts.push(`${failedFabIds.length} fab(s) failed`);
+                                        if (leftoverIds.length > 0) parts.push(`${leftoverIds.length} part(s) leftover`);
+                                        msg = parts.join(', ') + '. Thanks!';
                                     }
 
-                                    returnOffer.setMessage(msg);
+                                    returnOffer.setMessage(msg.slice(0, 128));
                                     log.info(`[craftingService] Sending return offer to ${partnerSteamID64}: ${returnIds.length} item(s)`);
                                     const attemptSend = (retriesLeft: number): void => {
                                         this.bot.trades.sendOffer(returnOffer)
@@ -2843,7 +2846,7 @@ export default class MyHandler extends Handler {
                                                     this.holdReturnItems(partnerSteamID64, resultWeaponIds);
                                                     this.bot.sendMessage(
                                                         offer.partner,
-                                                        `⚠️ Crafting complete but couldn't send your weapon automatically. Please contact the bot owner.`
+                                                        `⚠️ Crafting complete but I couldn't send your weapon just now — I'll retry automatically shortly, no action needed.`
                                                     );
                                                 });
                                         };
@@ -3024,9 +3027,7 @@ export default class MyHandler extends Handler {
                 returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
-                    `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory ` +
-                        `is private. Your fabricator is being returned; please make sure your inventory is public ` +
-                        `and try trading it in again.`
+                    `⚠️ Failed to load your inventory 3x — Steam may be down, or it's private. Fabricator returned; make it public and re-send.`
                 );
                 this.bot.trades
                     .sendOffer(returnOffer)
@@ -3040,8 +3041,8 @@ export default class MyHandler extends Handler {
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
                         this.bot.sendMessage(
                             partner,
-                            `⚠️ Failed to load your inventory, and returning your fabricator also failed. ` +
-                                `Please contact the bot owner — your fabricator is being held.`
+                            `⚠️ Failed to load your inventory, and returning your fabricator also failed just now. ` +
+                                `I'll retry automatically shortly — no action needed unless it doesn't resolve.`
                         );
                     });
                 return;
@@ -3092,10 +3093,10 @@ export default class MyHandler extends Handler {
                 const returnOffer = this.bot.manager.createOffer(partner);
                 returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
+                // result.missing can list several unbounded slot descriptions — kept out of the
+                // customer-facing message (still logged above) so this can't exceed Steam's 128-char cap.
                 returnOffer.setMessage(
-                    `You don't currently own any of the parts needed for this fabricator` +
-                        (result.missing.length > 0 ? ` (need: ${result.missing.join(', ')})` : '') +
-                        `. Your fabricator is being returned — trade it back once you've picked up the parts!`
+                    `You don't own any of the parts for this fabricator. It's being returned — trade it back once you have the parts!`
                 );
                 this.bot.trades
                     .sendOffer(returnOffer)
@@ -3107,7 +3108,7 @@ export default class MyHandler extends Handler {
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
                         this.bot.sendMessage(
                             partner,
-                            `⚠️ Couldn't return your fabricator automatically. Please contact the bot owner — your fabricator is being held.`
+                            `⚠️ Couldn't return your fabricator automatically just now — I'll retry shortly, no action needed on your end.`
                         );
                     });
                 return;
@@ -3123,11 +3124,11 @@ export default class MyHandler extends Handler {
                 componentAssetIds: [],
                 preTradeIds
             });
+            // result.missing can list several unbounded slot descriptions — kept out of the
+            // customer-facing message (still logged elsewhere) so this can't exceed Steam's 128-char cap.
             componentOffer.setMessage(
-                `Thanks! I read your fabricator's recipe and found these parts in your inventory — please accept to continue crafting.` +
-                    (result.missing.length > 0
-                        ? ` Note: you're missing ${result.missing.join(', ')}, so the fabricator will only be partially filled.`
-                        : '')
+                `Thanks! Found these parts in your inventory — accept to continue crafting.` +
+                    (result.missing.length > 0 ? ` Missing some parts, so it may be partially filled.` : '')
             );
 
             const attemptSend = (retriesLeft: number): void => {
@@ -3149,7 +3150,7 @@ export default class MyHandler extends Handler {
                         }
                         log.warn(`[craftingService] Intake: failed to send components offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
                         this.heldIntakeFabricators.set(String(fab.id), partnerSteamID64);
-                        this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request — please contact the bot owner. Your fabricator is being held.`);
+                        this.bot.sendMessage(partner, `⚠️ Failed to send the follow-up parts request just now — I'll retry automatically shortly, no action needed.`);
                     });
             };
             attemptSend(3);
@@ -3212,9 +3213,7 @@ export default class MyHandler extends Handler {
                 returnOffer.data('dict', this.craftingDict(fabIds, []));
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
-                    `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory ` +
-                        `is private. Your fabricators are being returned; please make sure your inventory is ` +
-                        `public and try trading them in again.`
+                    `⚠️ Failed to load your inventory 3x — Steam may be down, or it's private. Fabricators returned; make it public and re-send.`
                 );
                 this.bot.trades
                     .sendOffer(returnOffer)
@@ -3228,8 +3227,8 @@ export default class MyHandler extends Handler {
                         fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
                         this.bot.sendMessage(
                             partner,
-                            `⚠️ Failed to load your inventory, and returning your fabricators also failed. ` +
-                                `Please contact the bot owner — your fabricators are being held.`
+                            `⚠️ Failed to load your inventory, and returning your fabricators also failed just now. ` +
+                                `I'll retry automatically shortly — no action needed unless it doesn't resolve.`
                         );
                     });
                 return;
@@ -3295,8 +3294,7 @@ export default class MyHandler extends Handler {
                 returnOffer.data('dict', this.craftingDict(fabIds, []));
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
-                    `You don't currently own any of the parts needed for these fabricators. ` +
-                        `Your fabricators are being returned — trade them back once you've picked up the parts!`
+                    `You don't own any of the parts for these fabricators. They're being returned — trade them back once you have the parts!`
                 );
                 this.bot.trades
                     .sendOffer(returnOffer)
@@ -3308,7 +3306,7 @@ export default class MyHandler extends Handler {
                         fabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
                         this.bot.sendMessage(
                             partner,
-                            `⚠️ Couldn't return your fabricators automatically. Please contact the bot owner — they're being held.`
+                            `⚠️ Couldn't return your fabricators automatically just now — I'll retry shortly, no action needed on your end.`
                         );
                     });
                 return;
@@ -3341,15 +3339,14 @@ export default class MyHandler extends Handler {
                     preTradeIds
                 });
 
-                const missingMsg =
-                    chunkMissing.length > 0
-                        ? ` Note: ${chunkMissing
-                              .map(m => `fabricator ${m.fabId} is missing ${m.missing.join(', ')}`)
-                              .join('; ')}, so some fabricators may only be partially filled.`
-                        : '';
+                // Per-fabricator missing-parts detail is unbounded (one entry per fab in the chunk) —
+                // kept out of the customer-facing message, replaced with a short fixed note instead.
+                const missingMsg = chunkMissing.length > 0 ? ' Some may be partially filled (missing parts).' : '';
                 offer.setMessage(
-                    `Thanks! I read your ${chunkFabIds.length} fabricators' recipes and found these parts in ` +
-                        `your inventory — please accept to continue crafting.${missingMsg}`
+                    (`Thanks! Found parts for your ${chunkFabIds.length} fabricator(s) — accept to continue crafting.${missingMsg}`).slice(
+                        0,
+                        128
+                    )
                 );
 
                 try {
@@ -3385,7 +3382,7 @@ export default class MyHandler extends Handler {
                     chunkFabIds.forEach(id => this.heldIntakeFabricators.set(id, partnerSteamID64));
                     this.bot.sendMessage(
                         partner,
-                        `⚠️ Failed to send the follow-up parts request for ${chunkFabIds.length} fabricator(s) — please contact the bot owner. They're being held.`
+                        `⚠️ Failed to send the follow-up parts request for ${chunkFabIds.length} fabricator(s) just now — I'll retry automatically shortly, no action needed.`
                     );
                 }
             };
@@ -3498,11 +3495,11 @@ export default class MyHandler extends Handler {
         // it here would tempt a future reader into reusing stale IDs post-accept, so it's dropped;
         // handleStrangifyAccepted re-derives the real pairing from the post-accept backpack diff.
         requestOffer.data('strangifyService', { preTradeIds });
+        // uniqueUnmatched can list many weapon names — kept out of the customer-facing message
+        // (a count is enough context) so this can't exceed Steam's 128-char cap.
         requestOffer.setMessage(
-            `Found ${pairs.length} Strangifier+weapon pair(s) — please accept to apply them!` +
-                (uniqueUnmatched.length > 0
-                    ? ` (No matching Unique-quality weapon owned for: ${uniqueUnmatched.join(', ')}, skipped.)`
-                    : '')
+            `Found ${pairs.length} Strangifier+weapon pair(s) — accept to apply them!` +
+                (uniqueUnmatched.length > 0 ? ` ${uniqueUnmatched.length} unmatched, skipped.` : '')
         );
 
         const attemptSend = (retriesLeft: number): void => {
@@ -3609,7 +3606,7 @@ export default class MyHandler extends Handler {
                     failedPairIds.length > 0
                         ? `Here are your ${resultWeaponIds.length} Strange weapon(s)! ${
                               failedPairIds.length / 2
-                          } pair(s) couldn't be applied and are returned unchanged — contact the bot owner if this persists.`
+                          } pair(s) failed — contact the bot owner.`
                         : `Here are your ${resultWeaponIds.length} Strange weapon(s)! Thanks for using the strangifier service.`
                 );
 
