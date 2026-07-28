@@ -71,14 +71,6 @@ const filterReasons = (reasons: string[]) => {
     return [...filtered];
 };
 
-// summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's never set.
-// It's normally set by the Cart classes or by onNewTradeOffer's own evaluation — neither of which
-// runs for offers the crafting service creates directly via manager.createOffer(). The exact
-// per-item SKU keys don't matter here, this is only used to print an item-count chat summary.
-function craftingDict(giveIds: string[], receiveIds: string[]): { our: Record<string, number>; their: Record<string, number> } {
-    const toCounts = (ids: string[]) => Object.fromEntries(ids.map(id => [id, 1]));
-    return { our: toCounts(giveIds), their: toCounts(receiveIds) };
-}
 
 export default class MyHandler extends Handler {
     readonly commands: Commands;
@@ -2602,7 +2594,7 @@ export default class MyHandler extends Handler {
                                     ? allNewIds
                                     : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
                                 const refundOffer = this.bot.manager.createOffer(offer.partner);
-                                refundOffer.data('dict', craftingDict(refundIds, []));
+                                refundOffer.data('dict', this.craftingDict(refundIds, []));
                                 refundIds.forEach(id =>
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                 );
@@ -2682,7 +2674,7 @@ export default class MyHandler extends Handler {
                                         return;
                                     }
                                     const returnOffer = this.bot.manager.createOffer(offer.partner);
-                                    returnOffer.data('dict', craftingDict(returnIds, []));
+                                    returnOffer.data('dict', this.craftingDict(returnIds, []));
                                     returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
 
                                     let msg: string;
@@ -2833,7 +2825,7 @@ export default class MyHandler extends Handler {
                                         // Kit-only trade — return the resulting KS weapons directly
                                         log.info(`[craftingService] Kit-only trade — returning ${resultWeaponIds.length} KS weapon(s)`);
                                         const returnOffer = this.bot.manager.createOffer(offer.partner);
-                                        returnOffer.data('dict', craftingDict(resultWeaponIds, []));
+                                        returnOffer.data('dict', this.craftingDict(resultWeaponIds, []));
                                         resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
                                         const attemptSend = (retriesLeft: number): void => {
@@ -3029,7 +3021,7 @@ export default class MyHandler extends Handler {
             if (fetchErr) {
                 log.warn(`[craftingService] Intake: giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
                 const returnOffer = this.bot.manager.createOffer(partner);
-                returnOffer.data('dict', craftingDict([String(fab.id)], []));
+                returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
                     `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory ` +
@@ -3098,7 +3090,7 @@ export default class MyHandler extends Handler {
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
                 const returnOffer = this.bot.manager.createOffer(partner);
-                returnOffer.data('dict', craftingDict([String(fab.id)], []));
+                returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
                     `You don't currently own any of the parts needed for this fabricator` +
@@ -3123,7 +3115,7 @@ export default class MyHandler extends Handler {
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
             const componentOffer = this.bot.manager.createOffer(partner);
-            componentOffer.data('dict', craftingDict([], result.assetIds));
+            componentOffer.data('dict', this.craftingDict([], result.assetIds));
             result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
             componentOffer.data('craftingService', {
                 phase: 'components',
@@ -3217,7 +3209,7 @@ export default class MyHandler extends Handler {
             if (fetchErr) {
                 log.warn(`[craftingService] Intake (batch): giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
                 const returnOffer = this.bot.manager.createOffer(partner);
-                returnOffer.data('dict', craftingDict(fabIds, []));
+                returnOffer.data('dict', this.craftingDict(fabIds, []));
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     `⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory ` +
@@ -3300,7 +3292,7 @@ export default class MyHandler extends Handler {
             if (masterAssetIds.length === 0) {
                 log.info(`[craftingService] Intake (batch): no matching components found for ${partnerSteamID64} — returning ${fabIds.length} fabricator(s)`);
                 const returnOffer = this.bot.manager.createOffer(partner);
-                returnOffer.data('dict', craftingDict(fabIds, []));
+                returnOffer.data('dict', this.craftingDict(fabIds, []));
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     `You don't currently own any of the parts needed for these fabricators. ` +
@@ -3340,7 +3332,7 @@ export default class MyHandler extends Handler {
                 const chunkMissing = group.filter(g => g.missing.length > 0);
 
                 const offer = this.bot.manager.createOffer(partner);
-                offer.data('dict', craftingDict([], chunkAssetIds));
+                offer.data('dict', this.craftingDict([], chunkAssetIds));
                 chunkAssetIds.forEach(assetid => offer.addTheirItem({ appid: 440, contextid: '2', assetid }));
                 offer.data('craftingService', {
                     phase: 'components',
@@ -3499,7 +3491,7 @@ export default class MyHandler extends Handler {
         const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
         const requestOffer = this.bot.manager.createOffer(partner);
         const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
-        requestOffer.data('dict', craftingDict([], requestedIds));
+        requestOffer.data('dict', this.craftingDict([], requestedIds));
         requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
         // Only preTradeIds is kept — `pairs` was computed against the customer's PRE-trade asset
         // IDs, which Steam always reassigns once the items land in the bot's own backpack. Storing
@@ -3611,7 +3603,7 @@ export default class MyHandler extends Handler {
                     return;
                 }
                 const returnOffer = this.bot.manager.createOffer(partner);
-                returnOffer.data('dict', craftingDict(returnIds, []));
+                returnOffer.data('dict', this.craftingDict(returnIds, []));
                 returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     failedPairIds.length > 0
@@ -3687,6 +3679,29 @@ export default class MyHandler extends Handler {
         return `🔄 Retrying intake for fabricator ${fabAssetId} (partner ${partnerSteamID64})...`;
     }
 
+    // summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's never set.
+    // It's normally set by the Cart classes or by onNewTradeOffer's own evaluation — neither of
+    // which runs for offers the crafting service creates directly via manager.createOffer(). Keys
+    // need to be actual SKUs (not raw asset IDs) for getSummary() in summarizeOffer.ts to resolve a
+    // real item name instead of printing the bare asset ID — resolve each ID against the bot's
+    // current GC backpack for a defindex/quality, falling back to the raw ID only if the item can't
+    // be found there (e.g. it already left the backpack by the time this runs).
+    private craftingDict(giveIds: string[], receiveIds: string[]): { our: Record<string, number>; their: Record<string, number> } {
+        const backpack: any[] = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        const toCounts = (ids: string[]): Record<string, number> => {
+            const counts: Record<string, number> = {};
+            for (const id of ids) {
+                const item = backpack.find((i: any) => String(i.id) === id);
+                const key = item
+                    ? `${item.def_index};${item.quality ?? 6}${item.flag_cannot_craft ? ';uncraftable' : ''}`
+                    : id;
+                counts[key] = (counts[key] ?? 0) + 1;
+            }
+            return counts;
+        };
+        return { our: toCounts(giveIds), their: toCounts(receiveIds) };
+    }
+
     private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {
         const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
         this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
@@ -3746,7 +3761,7 @@ export default class MyHandler extends Handler {
 
         const partner = new SteamID(partnerSteamID64);
         const returnOffer = this.bot.manager.createOffer(partner);
-        returnOffer.data('dict', craftingDict(stillOwned, []));
+        returnOffer.data('dict', this.craftingDict(stillOwned, []));
         stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
         returnOffer.setMessage(`Here are your item(s) from the crafting service.`);
 
