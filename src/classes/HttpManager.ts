@@ -299,7 +299,14 @@ export default class HttpManager {
                 // can compute the backpack diff after the user accepts.
                 const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
 
-                const offer = this.bot.manager.createOffer(tradeUrl);
+                // @tf2autobot/tradeoffer-manager@2.20.6's createOffer(tradeUrl) has a bug: it does
+                // `url.searchParams.get(partner)` instead of `url.searchParams.get('partner')`, using
+                // the whole trade URL string as the query-param name — always returns null, so
+                // SteamID.fromIndividualAccountID(null) throws "Cannot read properties of null
+                // (reading 'toString')". Sidestep it entirely by passing the steamId we already have
+                // and pulling just the token out of the trade URL ourselves.
+                const token = new URL(tradeUrl).searchParams.get('token') ?? undefined;
+                const offer = this.bot.manager.createOffer(steamId, token);
                 offer.addTheirItem({ appid: 440, contextid: '2', assetid: fabricatorAssetId });
 
                 // summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's
