@@ -39,6 +39,7 @@ import log from '../../lib/logger';
 import * as files from '../../lib/files';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
+import { fetchTradeUrlToken } from '../../lib/craftingWebsiteApi';
 
 import { noiseMakers } from '../../lib/data';
 import { sendAlert } from '../DiscordWebhook/export';
@@ -2960,6 +2961,10 @@ export default class MyHandler extends Handler {
     private async handleCraftingIntake(partner: SteamID, fab: any): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
         this.heldIntakeFabricators.delete(String(fab.id));
+        // See fetchTradeUrlToken: every offer this method sends is initiated by us, not the
+        // customer, so Steam needs a token to bypass their privacy settings if they aren't
+        // friends with the bot. Fetched once up front and reused for every createOffer call below.
+        const token = await fetchTradeUrlToken(partnerSteamID64);
         try {
             // defindex 20002/20003 covers every fabricator regardless of target weapon — the
             // schema's item_name for that base defindex is generic (e.g. "... Kit Fabricator"),
@@ -3027,7 +3032,7 @@ export default class MyHandler extends Handler {
             }
             if (fetchErr) {
                 log.warn(`[craftingService] Intake: giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
-                const returnOffer = this.bot.manager.createOffer(partner);
+                const returnOffer = this.bot.manager.createOffer(partner, token);
                 returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
@@ -3095,7 +3100,7 @@ export default class MyHandler extends Handler {
 
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
-                const returnOffer = this.bot.manager.createOffer(partner);
+                const returnOffer = this.bot.manager.createOffer(partner, token);
                 returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 // result.missing can list several unbounded slot descriptions — kept out of the
@@ -3121,7 +3126,7 @@ export default class MyHandler extends Handler {
             }
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-            const componentOffer = this.bot.manager.createOffer(partner);
+            const componentOffer = this.bot.manager.createOffer(partner, token);
             componentOffer.data('dict', this.craftingDict([], result.assetIds));
             result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
             componentOffer.data('craftingService', {
@@ -3178,6 +3183,8 @@ export default class MyHandler extends Handler {
         const partnerSteamID64 = partner.getSteamID64();
         const fabIds = fabs.map(fab => String(fab.id));
         fabIds.forEach(id => this.heldIntakeFabricators.delete(id));
+        // See fetchTradeUrlToken on handleCraftingIntake above.
+        const token = await fetchTradeUrlToken(partnerSteamID64);
         try {
             const kitDefindexByTier: Partial<Record<number, number>> = {};
             for (const defindex of KS_KIT_DEFINDEXES) {
@@ -3216,7 +3223,7 @@ export default class MyHandler extends Handler {
             }
             if (fetchErr) {
                 log.warn(`[craftingService] Intake (batch): giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
-                const returnOffer = this.bot.manager.createOffer(partner);
+                const returnOffer = this.bot.manager.createOffer(partner, token);
                 returnOffer.data('dict', this.craftingDict(fabIds, []));
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
@@ -3298,7 +3305,7 @@ export default class MyHandler extends Handler {
             const masterAssetIds = fabGroups.flatMap(g => g.assetIds);
             if (masterAssetIds.length === 0) {
                 log.info(`[craftingService] Intake (batch): no matching components found for ${partnerSteamID64} — returning ${fabIds.length} fabricator(s)`);
-                const returnOffer = this.bot.manager.createOffer(partner);
+                const returnOffer = this.bot.manager.createOffer(partner, token);
                 returnOffer.data('dict', this.craftingDict(fabIds, []));
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
@@ -3338,7 +3345,7 @@ export default class MyHandler extends Handler {
                 const chunkAssetIds = group.flatMap(g => g.assetIds);
                 const chunkMissing = group.filter(g => g.missing.length > 0);
 
-                const offer = this.bot.manager.createOffer(partner);
+                const offer = this.bot.manager.createOffer(partner, token);
                 offer.data('dict', this.craftingDict([], chunkAssetIds));
                 chunkAssetIds.forEach(assetid => offer.addTheirItem({ appid: 440, contextid: '2', assetid }));
                 offer.data('craftingService', {
@@ -3417,6 +3424,8 @@ export default class MyHandler extends Handler {
      */
     async handleStrangifyCommand(partner: SteamID): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
+        // See fetchTradeUrlToken on handleCraftingIntake above.
+        const token = await fetchTradeUrlToken(partnerSteamID64);
         this.bot.sendMessage(partner, `🔍 Scanning your inventory for Strangifiers, one moment...`);
 
         const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
@@ -3496,7 +3505,7 @@ export default class MyHandler extends Handler {
         }
 
         const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-        const requestOffer = this.bot.manager.createOffer(partner);
+        const requestOffer = this.bot.manager.createOffer(partner, token);
         const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
         requestOffer.data('dict', this.craftingDict([], requestedIds));
         requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
@@ -3550,6 +3559,8 @@ export default class MyHandler extends Handler {
      */
     private async handleStrangifyAccepted(partner: SteamID, preTradeIds: string[]): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
+        // See fetchTradeUrlToken on handleCraftingIntake above.
+        const token = await fetchTradeUrlToken(partnerSteamID64);
         const resultWeaponIds: string[] = [];
         const failedPairIds: string[] = [];
 
@@ -3609,7 +3620,7 @@ export default class MyHandler extends Handler {
                     log.warn(`[strangifyService] Nothing to return to ${partnerSteamID64}`);
                     return;
                 }
-                const returnOffer = this.bot.manager.createOffer(partner);
+                const returnOffer = this.bot.manager.createOffer(partner, token);
                 returnOffer.data('dict', this.craftingDict(returnIds, []));
                 returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
@@ -3707,7 +3718,9 @@ export default class MyHandler extends Handler {
         }
 
         const partner = new SteamID(partnerSteamID64);
-        const returnOffer = this.bot.manager.createOffer(partner);
+        // See fetchTradeUrlToken on handleCraftingIntake above.
+        const token = await fetchTradeUrlToken(partnerSteamID64);
+        const returnOffer = this.bot.manager.createOffer(partner, token);
         returnOffer.data('dict', this.craftingDict([fabAssetId], []));
         returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: fabAssetId });
         returnOffer.setMessage(`Here's your fabricator back — we weren't able to process it automatically.`);
@@ -3822,7 +3835,9 @@ export default class MyHandler extends Handler {
         }
 
         const partner = new SteamID(partnerSteamID64);
-        const returnOffer = this.bot.manager.createOffer(partner);
+        // See fetchTradeUrlToken on handleCraftingIntake above.
+        const token = await fetchTradeUrlToken(partnerSteamID64);
+        const returnOffer = this.bot.manager.createOffer(partner, token);
         returnOffer.data('dict', this.craftingDict(stillOwned, []));
         stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
         returnOffer.setMessage(`Here are your item(s) from the crafting service.`);
