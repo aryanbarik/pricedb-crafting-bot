@@ -417,6 +417,22 @@ export default class TF2GC {
                 }
             }
             components = buildCraftComponents(fabricator as unknown as GCBackpackItem, componentItems);
+
+            // Diagnostic: robot parts were previously excluded from all attribute logging, making
+            // it impossible to see WHY one intermittently fails a slot's condition (e.g. attribute
+            // 2022, "loot rarity", required on some robot-part slots — see fabricatorSlots.ts's
+            // itemSatisfiesConditions). Logs raw attr 2022 data alongside whether
+            // buildCraftComponents actually matched the item, so a live mismatch can be read
+            // directly from logs instead of reconstructed from slot-count arithmetic.
+            const matchedComponentIds = new Set(components.map(c => c.subject_item_id));
+            for (const item of componentItems) {
+                if (ROBOT_PART_DEFINDEXES.includes(item.def_index as unknown as number)) {
+                    const attrs = (item as unknown as GCBackpackItem).attribute ?? [];
+                    const rarity = attrs.find(a => a.def_index === 2022);
+                    log.debug(`craftFabricator [Mode A] robot part ${(item as any).id} defidx=${item.def_index}: matched=${matchedComponentIds.has((item as any).id)}, attr2022=${JSON.stringify(rarity)}, all_attrs=${JSON.stringify(attrs.map(a => ({ d: a.def_index, v: a.value, vb: (a as any).value_bytes })))}`);
+                }
+            }
+
             if (components.length === 0) {
                 log.warn(`craftFabricator [Mode A]: no components could be mapped for fabricator ${fabricator.id}`);
                 if (job.fabricatorCallback) job.fabricatorCallback(new Error('Provided items did not match any recipe slots'));
