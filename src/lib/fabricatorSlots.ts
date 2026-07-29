@@ -204,7 +204,23 @@ export function buildCraftComponents(
         const slot = slots.find(s => {
             const assigned = slotCounts.get(s.attributeIndex) ?? 0;
             if (assigned >= s.numRequired - s.numFulfilled) return false;
-            if (s.itemDefIndex !== 0 && item.def_index !== s.itemDefIndex) return false;
+            if (s.itemDefIndex !== 0) {
+                // Robot-part slot: defindex alone is both necessary and sufficient. A slot
+                // condition here (e.g. attribute 2022, "loot rarity") turned out to describe a
+                // STATIC, schema-level property of that exact defindex (confirmed via Steam's own
+                // item schema: defindex 5700/5701's own item_description says "rare" — every
+                // instance of that defindex is uniformly that rarity, there's no non-rare variant
+                // sharing the same defindex) — Valve never sends it in the item's own per-instance
+                // attribute list because it's implied by the defindex, not per-item. Checking
+                // itemSatisfiesConditions here made this slot un-matchable 100% of the time,
+                // since the attribute it looks for is never actually present on the live item.
+                return item.def_index === s.itemDefIndex;
+            }
+            // Weapon slot: itemDefIndex is 0 (any weapon), so the condition (killstreak tier,
+            // attribute 2025) is the ONLY thing distinguishing a match — and unlike loot rarity,
+            // killstreak tier genuinely is per-instance (the same weapon defindex can carry any
+            // tier depending on what kit was applied to it), confirmed present in the live
+            // per-item attribute array by this file's own weapon-candidate diagnostic logging.
             return itemSatisfiesConditions(item, s.conditionsStr);
         });
 
@@ -256,10 +272,13 @@ export function findBotComponents(
                 usedIds.add(candidates[k].id);
             }
         } else {
-            // Robot part slot — defindex plus any additional condition (e.g. loot rarity), and
-            // also excluding Non-Craftable items (see weapon slot above).
+            // Robot part slot — defindex alone is sufficient (see buildCraftComponents above for
+            // why: a slot condition here describes a static, schema-level property of that exact
+            // defindex, never present in the live item's own per-instance attribute data, so
+            // checking itemSatisfiesConditions here made the slot un-matchable 100% of the time).
+            // Still excludes Non-Craftable items (see weapon slot above).
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && !i.flag_cannot_craft && i.def_index === slot.itemDefIndex && itemSatisfiesConditions(i, slot.conditionsStr)
+                i => !usedIds.has(i.id) && !i.flag_cannot_craft && i.def_index === slot.itemDefIndex
             );
             if (candidates.length < needed) {
                 missing.push(`${needed - candidates.length}× defindex ${slot.itemDefIndex}`);
