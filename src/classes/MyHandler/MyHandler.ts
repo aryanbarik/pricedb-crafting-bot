@@ -40,6 +40,7 @@ import * as files from '../../lib/files';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
 import { fetchTradeUrlToken } from '../../lib/craftingWebsiteApi';
+import { hasExcludedHalloweenSpell, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
 
 import { noiseMakers } from '../../lib/data';
 import { sendAlert } from '../DiscordWebhook/export';
@@ -3084,6 +3085,20 @@ export default class MyHandler extends Handler {
             // slot — the real recipe has no weapon-type restriction (see decodeFabricatorSlots:
             // weapon slots always decode with itemDefIndex=0). Strange-quality weapons are
             // intentionally excluded even though the base game allows them, per business rule.
+            // Shared with the plain "weapon + kit" lookupSku fallback below — a customer's raw
+            // Steam trade-asset items (with full descriptions) are only available before
+            // Inventory reduces them to its SKU-keyed Dict, which discards this per-instance data.
+            const rawItemsById = new Map(theirInventory.getRawItems.map(item => [item.id, item]));
+            const excludeSpelledIds = (ids: string[]): string[] =>
+                ids.filter(id => {
+                    const rawItem = rawItemsById.get(id);
+                    if (rawItem && hasExcludedHalloweenSpell(rawItem)) {
+                        log.debug(`[craftingService] Intake: excluding item ${id} — has an excluded Halloween Spell`);
+                        return false;
+                    }
+                    return true;
+                });
+
             const lookupKillstreakWeapon = (killstreakTier: number, tradableOnly = true): string[] => {
                 const results: string[] = [];
                 for (const sku of Object.keys(theirInventory.getItems)) {
@@ -3101,7 +3116,15 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake: excluding uncraftable weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
-                    results.push(...theirInventory.findBySKU(sku, tradableOnly));
+                    // Business rule: Festive weapons (a distinct schema defindex, e.g. "Festive
+                    // Rocket Launcher" — not the same thing as a Festivized ";festive" SKU tag) and
+                    // weapons carrying specific Halloween Spells (Exorcism, Pumpkin Bombs,
+                    // Halloween Fire) are never requested as crafting components.
+                    if (isFestiveWeaponDefindex(skuDefindex, this.bot)) {
+                        log.debug(`[craftingService] Intake: excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        continue;
+                    }
+                    results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)));
                 }
                 return results;
             };
@@ -3110,7 +3133,7 @@ export default class MyHandler extends Handler {
                 fab as any,
                 targetWeaponDefindex,
                 kitDefindexByTier,
-                (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly),
+                (sku, tradableOnly) => excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)),
                 lookupKillstreakWeapon
             );
 
@@ -3277,6 +3300,17 @@ export default class MyHandler extends Handler {
                 return;
             }
 
+            const rawItemsById = new Map(theirInventory.getRawItems.map(item => [item.id, item]));
+            const excludeSpelledIds = (ids: string[]): string[] =>
+                ids.filter(id => {
+                    const rawItem = rawItemsById.get(id);
+                    if (rawItem && hasExcludedHalloweenSpell(rawItem)) {
+                        log.debug(`[craftingService] Intake (batch): excluding item ${id} — has an excluded Halloween Spell`);
+                        return false;
+                    }
+                    return true;
+                });
+
             const lookupKillstreakWeapon = (killstreakTier: number, tradableOnly = true): string[] => {
                 const results: string[] = [];
                 for (const sku of Object.keys(theirInventory.getItems)) {
@@ -3289,10 +3323,18 @@ export default class MyHandler extends Handler {
                     // Non-Craftable items can't be used as crafting ingredients in TF2 at all —
                     // Steam's GC would reject the whole recipe fulfillment if one were included.
                     if (parts.includes('uncraftable')) {
-                        log.debug(`[craftingService] Intake: excluding uncraftable weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        log.debug(`[craftingService] Intake (batch): excluding uncraftable weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
-                    results.push(...theirInventory.findBySKU(sku, tradableOnly));
+                    // Business rule: Festive weapons (a distinct schema defindex, e.g. "Festive
+                    // Rocket Launcher" — not the same thing as a Festivized ";festive" SKU tag) and
+                    // weapons carrying specific Halloween Spells (Exorcism, Pumpkin Bombs,
+                    // Halloween Fire) are never requested as crafting components.
+                    if (isFestiveWeaponDefindex(skuDefindex, this.bot)) {
+                        log.debug(`[craftingService] Intake (batch): excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        continue;
+                    }
+                    results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)));
                 }
                 return results;
             };
@@ -3328,7 +3370,7 @@ export default class MyHandler extends Handler {
                     fab as any,
                     targetWeaponDefindex,
                     kitDefindexByTier,
-                    (sku, tradableOnly) => theirInventory.findBySKU(sku, tradableOnly),
+                    (sku, tradableOnly) => excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)),
                     lookupKillstreakWeapon,
                     usedIds
                 );

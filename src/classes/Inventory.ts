@@ -20,6 +20,17 @@ export default class Inventory {
         return this.tradable;
     }
 
+    // The Dict/DictItem shape (see setItems below) only keeps id + a config-filtered subset of
+    // "high value" flags per item, discarding the raw EconItem (descriptions, tags, etc.) entirely
+    // once built. Some checks need that raw data regardless of the bot's own highValue config —
+    // e.g. crafting-service component selection excluding specific Halloween spells outright,
+    // rather than only the spells this bot happens to be configured to flag as high-value.
+    private rawItems: EconItem[] = [];
+
+    get getRawItems(): EconItem[] {
+        return this.rawItems;
+    }
+
     private nonTradable: Dict = {};
 
     get getTotalItems(): number {
@@ -141,6 +152,7 @@ export default class Inventory {
     }
 
     private set setItems(items: EconItem[]) {
+        this.rawItems = items;
         this.tradable = Inventory.createDictionary(
             items.filter(item => item.tradable),
             this.bot,
