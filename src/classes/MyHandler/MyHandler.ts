@@ -2438,6 +2438,66 @@ export default class MyHandler extends Handler {
                     }
                 }
 
+                // If a customer declines our follow-up parts-request offer, the fabricator(s) it
+                // was requesting parts FOR are already sitting in the bot's own backpack (received
+                // in the earlier, already-accepted intake trade) — nothing else ever returns them.
+                // Deliberately a sibling of the notify-gated block above, not nested inside it:
+                // this.componentOffer (like every crafting-service offer WE send) never gets
+                // offer.data('notify') set — only offers the bot RECEIVES do (onNewTradeOffer,
+                // line 632) — so nesting this inside that gate would mean it silently never fires
+                // for the offers that actually matter here. Matches how the sibling Accepted-side
+                // craft-triggering block just below already handles this same problem.
+                if (
+                    offer.state === TradeOfferManager.ETradeOfferState['Declined'] &&
+                    !offer.data('craftingServiceDeclineHandled')
+                ) {
+                    const craftingService = offer.data('craftingService') as
+                        | { phase?: string; fabricatorAssetIds?: string[] }
+                        | undefined;
+                    if (craftingService?.phase === 'components' && (craftingService.fabricatorAssetIds?.length ?? 0) > 0) {
+                        offer.data('craftingServiceDeclineHandled', true);
+                        const partnerSteamID64 = offer.partner.getSteamID64();
+                        const fabricatorAssetIds = craftingService.fabricatorAssetIds as string[];
+                        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+                        const stillOwned = fabricatorAssetIds.filter(id => backpack.some((i: any) => String(i.id) === id));
+
+                        if (stillOwned.length > 0) {
+                            log.info(`[craftingService] Parts request declined by ${partnerSteamID64} — returning ${stillOwned.length} fabricator(s): ${stillOwned.join(', ')}`);
+                            void (async () => {
+                                const token = await fetchTradeUrlToken(partnerSteamID64);
+                                const returnOffer = this.bot.manager.createOffer(offer.partner, token);
+                                returnOffer.data('dict', this.craftingDict(stillOwned, []));
+                                stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                                returnOffer.setMessage(
+                                    `You declined the parts request, so here's your fabricator${stillOwned.length > 1 ? 's' : ''} back — re-send whenever you're ready!`
+                                );
+
+                                const attemptSend = (retriesLeft: number): void => {
+                                    this.bot.trades
+                                        .sendOffer(returnOffer)
+                                        .then(status => {
+                                            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                        })
+                                        .catch((sendErr: Error) => {
+                                            if (retriesLeft > 0) {
+                                                log.warn(`[craftingService] Failed to return fabricator(s) after decline (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
+                                                setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                                                return;
+                                            }
+                                            log.warn(`[craftingService] Failed to return fabricator(s) to ${partnerSteamID64} after decline: ${this.describeSendError(sendErr)}`);
+                                            this.holdReturnItems(partnerSteamID64, stillOwned);
+                                            this.bot.sendMessage(
+                                                offer.partner,
+                                                `⚠️ Couldn't return your fabricator${stillOwned.length > 1 ? 's' : ''} automatically just now — I'll retry shortly, no action needed on your end.`
+                                            );
+                                        });
+                                };
+                                attemptSend(3);
+                            })();
+                        }
+                    }
+                }
+
                 if (
                     [TradeOfferManager.ETradeOfferState['Accepted'], TradeOfferManager.ETradeOfferState['InEscrow']].includes(
                         offer.state
