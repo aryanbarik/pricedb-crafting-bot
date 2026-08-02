@@ -161,7 +161,7 @@ export default class MyHandler extends Handler {
     private hasInvalidValueException = false;
 
     get customGameName(): string {
-        const customGameName = this.opt.miscSettings.game.customName;
+        const customGameName = this.opt.miscSettings.game.presence?.customName;
         return customGameName ? customGameName : `TF2Autobot`;
     }
 
@@ -278,7 +278,7 @@ export default class MyHandler extends Handler {
                 .toFixed(0)} s`
         );
 
-        this.bot.client.gamesPlayed(this.opt.miscSettings.game.playOnlyTF2 ? 440 : [this.customGameName, 440]);
+        this.bot.startSteamGamePresenceUpdater();
         this.bot.client.setPersona(EPersonaState.Online);
 
         this.botSteamID = this.bot.client.steamID;
@@ -503,7 +503,7 @@ export default class MyHandler extends Handler {
     onLoggedOn(): void {
         if (this.bot.isReady) {
             this.bot.client.setPersona(EPersonaState.Online);
-            this.bot.client.gamesPlayed(this.opt.miscSettings.game.playOnlyTF2 ? 440 : [this.customGameName, 440]);
+            this.bot.updateSteamGamePresence(true);
         }
     }
 
@@ -2499,9 +2499,10 @@ export default class MyHandler extends Handler {
                 }
 
                 if (
-                    [TradeOfferManager.ETradeOfferState['Accepted'], TradeOfferManager.ETradeOfferState['InEscrow']].includes(
-                        offer.state
-                    ) &&
+                    [
+                        TradeOfferManager.ETradeOfferState['Accepted'],
+                        TradeOfferManager.ETradeOfferState['InEscrow']
+                    ].includes(offer.state) &&
                     !this.sentSummary[offer.id]
                 ) {
                     // Only run this if the bot handled the offer and do not send again if already sent once
@@ -3022,7 +3023,7 @@ export default class MyHandler extends Handler {
                     this.sentSummary = {};
                 }, 2 * 60 * 1000);
             } else {
-                this.bot.client.gamesPlayed(this.opt.miscSettings.game.playOnlyTF2 ? 440 : [this.customGameName, 440]);
+                this.bot.updateSteamGamePresence();
             }
         })().catch(err => {
             log.error('Error in onTradeOfferChanged:', err);
@@ -4453,7 +4454,7 @@ export default class MyHandler extends Handler {
 
     onTF2QueueCompleted(): void {
         log.debug('Queue finished');
-        this.bot.client.gamesPlayed(this.opt.miscSettings.game.playOnlyTF2 ? 440 : [this.customGameName, 440]);
+        this.bot.updateSteamGamePresence();
     }
 
     onCreateListingsSuccessful(response: { created: number; archived: number; errors: any[] }): void {
