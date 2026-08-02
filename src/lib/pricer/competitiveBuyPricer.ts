@@ -1,6 +1,5 @@
 import Currencies from '@tf2autobot/tf2-currencies';
 import SKU from '@tf2autobot/tf2-sku';
-import dayjs from 'dayjs';
 import Bot from '../../classes/Bot';
 import { apiRequest } from '../apiRequest';
 import log from '../logger';
@@ -175,7 +174,11 @@ export async function refreshOne(
     const newBuy = Currencies.toCurrencies(target, keyPrice);
     const entryData = entry.getJSON();
     entryData.buy = newBuy.toJSON();
-    entryData.time = dayjs().unix();
+
+    // `getJSON()` emits `time`, but the pricelist-add schema has additionalProperties:false and does
+    // not list it, so leaving it in fails validation. Nothing is lost: Entry only keeps `time` for
+    // autopriced entries, and these are all autoprice:false by requirement.
+    delete entryData.time;
 
     try {
         await bot.pricelist.updatePrice({ priceKey: sku, entryData, emitChange: true });
