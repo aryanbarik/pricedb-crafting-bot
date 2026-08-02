@@ -18,7 +18,12 @@ import log from '../logger';
  * writer, since the pricer never touches a non-autopriced entry.
  */
 
-const SEARCH_URL = 'https://backpack.tf/api/classifieds/search/v1';
+/**
+ * The snapshot endpoint, not `/classifieds/search/v1` — search requires a backpack.tf Premium
+ * subscription and returns 401 without one. Snapshot is free, authenticates with the access token
+ * rather than the API key, and returns a sample of current listings for one item.
+ */
+const SNAPSHOT_URL = 'https://backpack.tf/api/classifieds/listings/snapshot';
 
 export interface CompetingOrder {
     steamid: string;
@@ -26,14 +31,12 @@ export interface CompetingOrder {
     value: number;
 }
 
-interface ClassifiedsSearchResponse {
-    buy?: {
-        total?: number;
-        listings?: {
-            steamid?: string;
-            currencies?: { keys?: number; metal?: number };
-        }[];
-    };
+interface SnapshotResponse {
+    listings?: {
+        steamid?: string;
+        intent?: string;
+        currencies?: { keys?: number; metal?: number };
+    }[];
 }
 
 /**
@@ -73,36 +76,31 @@ export function pickTopLevel(orders: CompetingOrder[], minOrders: number): numbe
  * "nobody is bidding", and callers must not reprice off a failed request.
  */
 export async function fetchBuyOrders(bot: Bot, sku: string): Promise<CompetingOrder[]> {
-    const apiKey = bot.options.bptfApiKey;
+    const token = bot.options.bptfAccessToken;
 
-    if (!apiKey) {
-        throw new Error('no backpack.tf API key available yet');
+    if (!token) {
+        throw new Error('no backpack.tf access token available yet');
     }
 
-    const item = SKU.fromString(sku);
-    const name = bot.schema.getName(item, false);
+    const name = bot.schema.getName(SKU.fromString(sku), false);
     const ourSteamID = bot.client.steamID ? bot.client.steamID.getSteamID64() : null;
     const keyPrice = bot.pricelist.getKeyPrice.metal;
 
-    const response = await apiRequest<ClassifiedsSearchResponse>({
+    const response = await apiRequest<SnapshotResponse>({
         method: 'GET',
-        url: SEARCH_URL,
+        url: SNAPSHOT_URL,
         params: {
-            key: apiKey,
+            token,
             appid: 440,
-            item: name,
-            quality: item.quality,
-            craftable: item.craftable === false ? 0 : 1,
-            intent: 'buy',
-            page_size: 30,
-            fold: 0
+            sku: name // snapshot keys off the market name, not a SKU string
         }
     });
 
-    const listings = response?.buy?.listings ?? [];
+    const listings = response?.listings ?? [];
 
-    return listings.reduce<CompetingOrder[]>((orders, listing) => {
-        if (!listing.steamid || listing.steamid === ourSteamID || !listing.currencies) {
+    // Snapshot returns both intents, so the buy filter has to happen here.
+    const orders = listings.reduce<CompetingOrder[]>((orders, listing) => {
+        if (listing.intent !== 'buy' || !listing.steamid || listing.steamid === ourSteamID || !listing.currencies) {
             return orders;
         }
 
@@ -117,6 +115,13 @@ export async function fetchBuyOrders(bot: Bot, sku: string): Promise<CompetingOr
 
         return orders;
     }, []);
+
+    log.debug(
+        `competitiveBuyPricer: ${sku} (${name}) snapshot returned ${listings.length} listing(s), ` +
+            `${orders.length} competing buy order(s)`
+    );
+
+    return orders;
 }
 
 /** Reprice a single configured SKU. Never throws; failures leave the existing price untouched. */

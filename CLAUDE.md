@@ -151,8 +151,22 @@ level → take the highest level held by at least `minOrders` **distinct** steam
 - When the ceiling binds, it logs a warning — the market has moved past what a part is worth as a
   craft input, so the ceiling needs a human look.
 
-Credentials need no setup: `bot.options.bptfApiKey` is populated at boot by the bp.tf login
-(`src/classes/Bot.ts:1765-1766`), even though `options.json` and `ecosystem.json` show it empty.
+### Which backpack.tf endpoint, and why
+
+Uses `/api/classifieds/listings/snapshot` with the **access token**. Do not switch this to
+`/api/classifieds/search/v1` — search requires a backpack.tf **Premium subscription** and returns
+`401 {"message":"This web API requires a Premium subscription"}` without one. That was tried first
+and failed in production on 2026-08-02.
+
+Consequences of snapshot: it returns a *sample* of listings for one item, both intents mixed (so the
+buy filter happens client-side), and it keys off the **market name**, not a SKU string. Because it's
+a sample rather than a ranked page, it can miss the true top bid — the ceiling is what bounds the
+damage, not the completeness of the data. If a Premium subscription is ever bought, `search/v1` with
+`intent=buy&page_size=30&fold=0` would be strictly better.
+
+Credentials need no setup: `bot.options.bptfAccessToken` (and `bptfApiKey`) are populated at boot by
+the bp.tf login (`src/classes/Bot.ts:1765-1766`), even though `options.json` and `ecosystem.json`
+show them empty.
 
 **Changing these entries live:** the bot holds the pricelist in memory and rewrites `pricelist.json`
 on shutdown, so editing that file while it is running gets clobbered. Use `!update` via chat, or
