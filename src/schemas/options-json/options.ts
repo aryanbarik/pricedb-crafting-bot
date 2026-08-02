@@ -779,6 +779,52 @@ export const optionsSchema: jsonschema.Schema = {
                     required: ['enable', 'thresholdInSeconds', 'excludeSKU'],
                     additionalProperties: false
                 },
+                competitiveBuyPricer: {
+                    type: 'object',
+                    properties: {
+                        enable: {
+                            type: 'boolean'
+                        },
+                        intervalMinutes: {
+                            type: 'integer',
+                            minimum: 5
+                        },
+                        minOrders: {
+                            type: 'integer',
+                            minimum: 1
+                        },
+                        items: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    sku: {
+                                        type: 'string'
+                                    },
+                                    maxBuy: {
+                                        type: 'object',
+                                        properties: {
+                                            keys: {
+                                                type: 'integer',
+                                                minimum: 0
+                                            },
+                                            metal: {
+                                                type: 'number',
+                                                minimum: 0
+                                            }
+                                        },
+                                        required: ['keys', 'metal'],
+                                        additionalProperties: false
+                                    }
+                                },
+                                required: ['sku', 'maxBuy'],
+                                additionalProperties: false
+                            }
+                        }
+                    },
+                    required: ['enable', 'intervalMinutes', 'minOrders', 'items'],
+                    additionalProperties: false
+                },
                 filterCantAfford: {
                     $ref: '#/definitions/only-enable'
                 },
@@ -822,6 +868,7 @@ export const optionsSchema: jsonschema.Schema = {
             },
             required: [
                 'partialPriceUpdate',
+                'competitiveBuyPricer',
                 'filterCantAfford',
                 'autoResetToAutopriceOnceSold',
                 'autoRemoveIntentSell',

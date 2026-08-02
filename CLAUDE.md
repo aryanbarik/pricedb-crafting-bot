@@ -94,6 +94,70 @@ The crafting code touches:
 - `src/classes/MyHandler/MyHandler.ts` — added detection block in `onNewTradeOffer` and post-accept trigger in `onTradeOfferChanged`
 - `src/lib/fabricatorSlots.ts` — new file (no conflict risk)
 
+The competitive buy pricer touches:
+- `src/classes/Options.ts` — `pricelist.competitiveBuyPricer` (interface ~line 1400, DEFAULTS ~line 149)
+- `src/schemas/options-json/options.ts` — matching schema block + entry in `pricelist.required`
+- `src/classes/Bot.ts` — `startCompetitiveBuyPricer()`, interval field, cleanup in `halt()`
+- `src/classes/MyHandler/MyHandler.ts` — one call in the ready sequence
+- `src/lib/pricer/competitiveBuyPricer.ts` — new file (no conflict risk)
+
+---
+
+## Competitive Buy Pricer (`pricelist.competitiveBuyPricer`)
+
+Prices configured SKUs off **competing backpack.tf buy orders** instead of the pricer. Built for
+robot parts, which are crafting inputs rather than flip inventory — their value is what they
+contribute to the kit the fabricator produces, not what they resell for. pricedb quotes a
+market-maker spread (8 scrap buy / 9 scrap sell) which loses every fill to the people bidding the
+full 9, who are buying inputs for the same reason we are.
+
+```jsonc
+"pricelist": {
+  "competitiveBuyPricer": {
+    "enable": true,
+    "intervalMinutes": 15,
+    "minOrders": 2,
+    "items": [
+      { "sku": "5705;6", "maxBuy": { "keys": 0, "metal": 1 } },
+      { "sku": "5706;6", "maxBuy": { "keys": 0, "metal": 1 } },
+      { "sku": "5707;6", "maxBuy": { "keys": 0, "metal": 1 } }
+    ]
+  }
+}
+```
+
+Each cycle, per SKU: query bp.tf classifieds for buy listings → drop our own → group bids by price
+level → take the highest level held by at least `minOrders` **distinct** steamids → cap at `maxBuy`
+→ write via `pricelist.updatePrice({ emitChange: true })`, which drives the normal
+`onPriceChange` → `Listings.checkByPriceKey` path so the bp.tf listing follows.
+
+### Rules that are deliberate, not incidental
+
+- **Configured entries MUST have `autoprice: false`.** That is what makes this module their only
+  price writer — the pricer never touches a non-autopriced entry (`Pricelist.ts:569`, `:631`,
+  `:1192`, `:1401`, `:1502`). An entry left on autoprice is skipped with a warning, because anything
+  written would be overwritten moments later.
+- **`minOrders` defaults to 2** so a single troll or fat-fingered buy order cannot drag the price up.
+  A level backed by one steamid is not evidence of a market; a real move shows up as several people
+  repricing. Multiple listings from the *same* steamid count once.
+- **A SKU without `maxBuy` is skipped.** There is no default ceiling — an unbounded default is never
+  the safe one.
+- **A failed API call keeps the current price** and logs a warning. It must never fall back to the
+  pricer, which would silently drop the bid back below the competition — the exact failure this
+  exists to fix.
+- **Clamping happens in the pricelist, not at listing creation.** Trade validation reads the
+  pricelist entry, so clamping only the outgoing listing would advertise 1 ref and then value the
+  incoming offer at 0.88, rejecting the very offers the buy order attracted.
+- When the ceiling binds, it logs a warning — the market has moved past what a part is worth as a
+  craft input, so the ceiling needs a human look.
+
+Credentials need no setup: `bot.options.bptfApiKey` is populated at boot by the bp.tf login
+(`src/classes/Bot.ts:1765-1766`), even though `options.json` and `ecosystem.json` show it empty.
+
+**Changing these entries live:** the bot holds the pricelist in memory and rewrites `pricelist.json`
+on shutdown, so editing that file while it is running gets clobbered. Use `!update` via chat, or
+`pm2 stop` → edit → `pm2 start`.
+
 ---
 
 ## Key Defindexes and Constants
@@ -108,6 +172,22 @@ The crafting code touches:
 | Specialized KS Kit (generic — may appear in `itemAcquired`) | 6527 |
 | Basic KS Kit | 6528 |
 | Mann Co. Supply Crate Key | SKU `5021;6` / market name `Mann Co. Supply Crate Key` |
+
+Robot parts individually (resolved from `items_game.txt` tokens `TF_Item_Robits_Loot_01..08`; the
+SKU is always `<defindex>;6`, built at `src/lib/fabricatorSlots.ts:401`):
+
+| defindex | SKU | Name | Tier |
+|---|---|---|---|
+| 5700 | `5700;6` | Pristine Robot Currency Digester | Pristine |
+| 5701 | `5701;6` | Pristine Robot Brainstorm Bulb | Pristine |
+| 5702 | `5702;6` | Reinforced Robot Emotion Detector | Reinforced |
+| 5703 | `5703;6` | Reinforced Robot Humor Suppression Pump | Reinforced |
+| 5704 | `5704;6` | Reinforced Robot Bomb Stabilizer | Reinforced |
+| 5705 | `5705;6` | Battle-Worn Robot Taunt Processor | Battle-Worn |
+| 5706 | `5706;6` | Battle-Worn Robot KB-808 | Battle-Worn |
+| 5707 | `5707;6` | Battle-Worn Robot Money Furnace | Battle-Worn |
+
+Only 5700/5701 (the Pristine pair) carry the "rare Robot Part" description in the schema.
 
 Recipe slot attribute def_indexes: 2000 (weapon), 2001+ (robot parts/other inputs, count varies per weapon — some recipes have 5, some have 6+), followed by one output-spec slot at whatever the next free index is.
 

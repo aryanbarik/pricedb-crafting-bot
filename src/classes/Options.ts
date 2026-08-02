@@ -146,6 +146,12 @@ export const DEFAULTS: JsonOptions = {
             minProfitScrap: 1,
             stockGracePeriodSeconds: 3600
         },
+        competitiveBuyPricer: {
+            enable: false,
+            intervalMinutes: 15,
+            minOrders: 2,
+            items: []
+        },
         filterCantAfford: {
             enable: false
         },
@@ -1371,6 +1377,7 @@ interface HighValueAlert {
 
 interface Pricelist {
     partialPriceUpdate?: PartialPriceUpdate;
+    competitiveBuyPricer?: CompetitiveBuyPricer;
     filterCantAfford?: OnlyEnable;
     autoResetToAutopriceOnceSold?: OnlyEnable;
     autoRemoveIntentSell?: OnlyEnable;
@@ -1388,6 +1395,23 @@ interface PartialPriceUpdate extends OnlyEnable {
     maxProtectedUnits?: number;
     minProfitScrap?: number;
     stockGracePeriodSeconds?: number;
+}
+
+/**
+ * Prices configured SKUs off the highest competing buy order on backpack.tf instead of the
+ * pricer. Entries listed here must have `autoprice: false` so this is their only price writer.
+ */
+interface CompetitiveBuyPricer extends OnlyEnable {
+    intervalMinutes?: number;
+    /** A price level is only trusted once this many distinct people are bidding it. */
+    minOrders?: number;
+    items?: CompetitiveBuyPricerItem[];
+}
+
+interface CompetitiveBuyPricerItem {
+    sku: string;
+    /** Hard ceiling. Without it the SKU is skipped — never bid unbounded. */
+    maxBuy: { keys: number; metal: number };
 }
 
 interface PriceAge {

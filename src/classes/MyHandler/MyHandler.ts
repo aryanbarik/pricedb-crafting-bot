@@ -327,6 +327,10 @@ export default class MyHandler extends Handler {
             this.bot.startAutoRefreshListings();
         }, 5 * 60 * 1000);
 
+        // Price configured SKUs (robot parts) off competing backpack.tf buy orders instead of the
+        // pricer. Started here so the bp.tf API key obtained during login is available.
+        this.bot.startCompetitiveBuyPricer();
+
         this.pollDataInterval = setInterval(this.refreshPollDataPath.bind(this), 24 * 60 * 60 * 1000);
 
         // Automatically retry any held crafting-service items (stuck intake fabricators, stuck

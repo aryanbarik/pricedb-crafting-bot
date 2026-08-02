@@ -124,6 +124,12 @@
             "minProfitScrap": 1,
             "stockGracePeriodSeconds": 3600
         },
+        "competitiveBuyPricer": {
+            "enable": false,
+            "intervalMinutes": 15,
+            "minOrders": 2,
+            "items": []
+        },
         "filterCantAfford": {
             "enable": false
         },

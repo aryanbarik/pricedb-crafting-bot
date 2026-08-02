@@ -41,6 +41,7 @@ import Groups from './Groups';
 import InventoryCostBasis from './InventoryCostBasis';
 
 import log from '../lib/logger';
+import { refreshAll as refreshAllCompetitiveBuyPrices } from '../lib/pricer/competitiveBuyPricer';
 import Bans, { IsBanned } from '../lib/bans';
 import { sendStats } from './DiscordWebhook/export';
 
@@ -214,6 +215,8 @@ export default class Bot {
     private manncoStoreRetryTimeout: NodeJS.Timeout = null;
 
     private manncoStoreListingsInterval: NodeJS.Timeout = null;
+
+    private competitiveBuyPricerInterval: NodeJS.Timeout = null;
 
     private manncoStoreOperationsInterval: NodeJS.Timeout = null;
 
@@ -608,6 +611,8 @@ export default class Bot {
         this.manncoStoreListingsInterval = null;
         clearInterval(this.manncoStoreOperationsInterval);
         this.manncoStoreOperationsInterval = null;
+        clearInterval(this.competitiveBuyPricerInterval);
+        this.competitiveBuyPricerInterval = null;
         log.debug('Setting status in Steam to "Snooze"');
         this.client.setPersona(EPersonaState.Snooze);
 
@@ -861,6 +866,35 @@ export default class Bot {
                     reject(err as Error);
                 });
         });
+    }
+
+    startCompetitiveBuyPricer(): void {
+        const config = this.options.pricelist?.competitiveBuyPricer;
+
+        if (!config?.enable || this.competitiveBuyPricerInterval) {
+            return;
+        }
+
+        const intervalMinutes = config.intervalMinutes ?? 15;
+
+        log.debug(
+            `Starting competitive buy pricer for ${
+                config.items?.length ?? 0
+            } item(s), every ${intervalMinutes} minute(s)`
+        );
+
+        const run = (): void => {
+            if (this.halted) {
+                return;
+            }
+
+            void refreshAllCompetitiveBuyPrices(this).catch(err => {
+                log.warn('Could not refresh competitive buy prices:', err);
+            });
+        };
+
+        run();
+        this.competitiveBuyPricerInterval = setInterval(run, intervalMinutes * 60 * 1000);
     }
 
     startAutoRefreshListings(): void {
