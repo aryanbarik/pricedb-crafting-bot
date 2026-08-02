@@ -93,3 +93,13 @@ ecosystem.config.json
 repair_polldata.js
 
 JTF Examples/
+
+# planning/notes files (scratch docs, not part of the shipped bot)
+fullbotplan.md
+fullcraftfromcomponents-plan.md
+test-plan-for-human.md
+apply-warpaints-to-weapons.md
+warpaint-warpaintweapons-abritrage.md
+arbitrage-bot-overview.md
+fabricator-arbitrage.md
+pro-ks-strange-weapon-arbitrage.md
