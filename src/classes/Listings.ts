@@ -472,12 +472,18 @@ export default class Listings {
                         return false;
                     });
                 }
+                // An entry priced only in USD has no metal buy price. Treat it as zero rather than
+                // dereferencing null — this comparator runs over the WHOLE pricelist during
+                // startup and ignores `enabled`, so one such entry would stop the bot booting.
+                const buyKeys = (priceKey: string): number => pricelist[priceKey].buy?.keys ?? 0;
+                const buyMetal = (priceKey: string): number => pricelist[priceKey].buy?.metal ?? 0;
+
                 priceKeys = priceKeys
                     .sort((a, b) => {
                         return (
                             currentPure.keys -
-                            (pricelist[b].buy.keys - pricelist[a].buy.keys) * keyPrice.toValue() +
-                            (currentPure.metal - Currencies.toScrap(pricelist[b].buy.metal - pricelist[a].buy.metal))
+                            (buyKeys(b) - buyKeys(a)) * keyPrice.toValue() +
+                            (currentPure.metal - Currencies.toScrap(buyMetal(b) - buyMetal(a)))
                         );
                     })
                     .sort((a, b) => {
@@ -1023,10 +1029,13 @@ export default class Listings {
         const isDueling = entry.sku === '241;6' && opt.miscSettings.checkUses.duel;
         const isNoiseMaker = noiseMakers.has(entry.sku) && opt.miscSettings.checkUses.noiseMaker;
 
+        // A USD-only entry can have no metal price on this side; it simply does not involve keys.
+        const priceInvolvesKeys = entry[key]?.toString().includes('key') ?? false;
+
         if (isCustomBuyNote || isCustomSellNote) {
             details = replaceDetails(intent === 0 ? entry.note.buy : entry.note.sell, entry, key);
 
-            details = entry[key].toString().includes('key')
+            details = priceInvolvesKeys
                 ? details.replace(/%keyPrice%/g, 'Key rate: ' + keyPrice.toString() + '/key')
                 : details.replace(/%keyPrice%/g, '');
 
@@ -1048,11 +1057,11 @@ export default class Listings {
                     : '(𝗢𝗡𝗟𝗬 𝗪𝗜𝗧𝗛 𝟐𝟱x 𝗨𝗦𝗘𝗦)'
             );
 
-            details = entry[key].toString().includes('key')
+            details = priceInvolvesKeys
                 ? details.replace(/%keyPrice%/g, 'Key rate: ' + keyPrice.toString() + '/key')
                 : details.replace(/%keyPrice%/g, '');
             //
-        } else if (entry.sku === '5021;6' || !entry[key].toString().includes('key')) {
+        } else if (entry.sku === '5021;6' || !priceInvolvesKeys) {
             // this part checks if the item Mann Co. Supply Crate Key or the buying/selling price involve keys.
             details = replaceDetails(this.templates[key], entry, key)
                 .replace(/%keyPrice%/g, '')

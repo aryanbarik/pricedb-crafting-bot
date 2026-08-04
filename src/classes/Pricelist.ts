@@ -26,6 +26,25 @@ export enum PricelistChangedSource {
     Other = 'OTHER'
 }
 
+/**
+ * Placeholder metal prices for entries priced only in USD (Mannco.store listings).
+ *
+ * The `!add`/`!update` command path always backfills whichever side you leave out, so every reader
+ * downstream assumes both sides are non-null. A USD-only entry is the one path that produces
+ * `buy: null` / `sell: null`, and that crashes the listing code. These keep the invariant.
+ *
+ * The two sides are deliberately NOT symmetric — the safe direction is opposite for each:
+ *   - buy 0    → "will not pay anything for it". A high buy price would be read by offer
+ *                valuation (`MyHandler.onNewTradeOffer`) as willingness to pay that much, which
+ *                is not gated by intent, so the bot would accept giving away the difference.
+ *   - sell high → "will not sell it cheap". A 0 sell price would list the item for free.
+ *
+ * 1000 keys is high enough that nothing sells, while staying far inside the safe-integer range so
+ * `Currencies.toValue()` arithmetic stays exact.
+ */
+export const USD_ONLY_BUY_PLACEHOLDER: Currency = { keys: 0, metal: 0 };
+export const USD_ONLY_SELL_PLACEHOLDER: Currency = { keys: 1000, metal: 0 };
+
 export interface EntryData {
     sku: string;
     id?: string;
@@ -73,7 +92,6 @@ export class Entry implements EntryData {
 
     sellUsd?: number;
 
-
     promoted: 0 | 1;
 
     group: string | null;
@@ -118,6 +136,12 @@ export class Entry implements EntryData {
             this.sell = new Currencies(entry.sell);
 
             this.time = this.autoprice ? entry.time : null;
+        } else if (entry.buyUsd !== undefined || entry.sellUsd !== undefined) {
+            // Priced in USD only (Mannco.store). Substitute placeholders rather than leaving nulls
+            // behind, so the rest of the pricelist code keeps its "both sides are set" invariant.
+            this.buy = new Currencies(entry.buy ?? USD_ONLY_BUY_PLACEHOLDER);
+            this.sell = new Currencies(entry.sell ?? USD_ONLY_SELL_PLACEHOLDER);
+            this.time = null;
         } else {
             // Price not set yet
             this.buy = null;

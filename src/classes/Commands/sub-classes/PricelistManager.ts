@@ -11,7 +11,13 @@ import { UnknownDictionary, UnknownDictionaryKnownValues } from '../../../types/
 import { removeLinkProtocol, getItemFromParams, normalizeUsdParameterAliases } from '../functions/utils';
 import Bot from '../../Bot';
 import CommandParser from '../../CommandParser';
-import Pricelist, { Entry, EntryData, PricelistChangedSource } from '../../Pricelist';
+import Pricelist, {
+    Entry,
+    EntryData,
+    PricelistChangedSource,
+    USD_ONLY_BUY_PLACEHOLDER,
+    USD_ONLY_SELL_PLACEHOLDER
+} from '../../Pricelist';
 import validator from '../../../lib/validator';
 import { testPriceKey } from '../../../lib/tools/export';
 import IPricer from '../../IPricer';
@@ -1082,9 +1088,11 @@ export default class PricelistManagerCommands {
 
             params.isPartialPriced = false;
         } else if (typeof params.buy !== 'object' && typeof params.sell === 'object') {
+            // itemEntry.buy is null on a USD-only entry; fall back to the placeholder rather than
+            // throwing, so `!update` still works on Mannco.store items.
             params['buy'] = {
-                keys: itemEntry.buy.keys,
-                metal: itemEntry.buy.metal
+                keys: itemEntry.buy?.keys ?? USD_ONLY_BUY_PLACEHOLDER.keys,
+                metal: itemEntry.buy?.metal ?? USD_ONLY_BUY_PLACEHOLDER.metal
             };
         }
 
@@ -1099,8 +1107,8 @@ export default class PricelistManagerCommands {
             params.isPartialPriced = false;
         } else if (typeof params.sell !== 'object' && typeof params.buy === 'object') {
             params['sell'] = {
-                keys: itemEntry.sell.keys,
-                metal: itemEntry.sell.metal
+                keys: itemEntry.sell?.keys ?? USD_ONLY_SELL_PLACEHOLDER.keys,
+                metal: itemEntry.sell?.metal ?? USD_ONLY_SELL_PLACEHOLDER.metal
             };
         }
 
