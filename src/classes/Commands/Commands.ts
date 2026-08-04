@@ -1274,9 +1274,32 @@ export default class Commands {
                 asset => inventoryAssetIds.includes(asset.assetid) && asset.itemId === manncoItemId
             );
             if (available.length < amount) {
+                // The bare count is a dead end — it cannot distinguish "Mannco is not accepting
+                // this item at all" from "it is, but our specific copy maps to a different item id"
+                // (paint and wear variants do this). Say which, so the next step is obvious.
+                const isItemAccepted = depositable.some(asset => asset.itemId === manncoItemId);
+                const ourOfferedAssets = depositable.filter(asset => inventoryAssetIds.includes(asset.assetid));
+
+                let reason: string;
+                if (!isItemAccepted) {
+                    reason =
+                        `Mannco.store is not currently accepting item id ${manncoItemId} for deposit — ` +
+                        `this is their decision and may change.`;
+                } else if (ourOfferedAssets.length === 0) {
+                    reason =
+                        `Mannco.store is accepting item id ${manncoItemId}, but none of our ` +
+                        `${inventoryAssetIds.length} tradable copy/copies were offered.`;
+                } else {
+                    const otherIds = [...new Set(ourOfferedAssets.map(asset => asset.itemId))].join(', ');
+                    reason =
+                        `Mannco.store offered our asset(s) under item id ${otherIds} rather than ` +
+                        `${manncoItemId} — a paint or wear variant probably maps to a different item.`;
+                }
+
                 return this.bot.sendMessage(
                     steamID,
-                    `❌ Mannco.store only made ${available.length} of the requested assets depositable.`
+                    `❌ Mannco.store only made ${available.length} of the requested assets depositable. ` +
+                        `${reason} (${depositable.length} asset(s) depositable in total.)`
                 );
             }
 
