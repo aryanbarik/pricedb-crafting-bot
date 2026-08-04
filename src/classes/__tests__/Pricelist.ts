@@ -47,6 +47,10 @@ describe('USD-only entries (Mannco.store)', () => {
     // An entry priced only in USD used to leave buy/sell null, which crashed Listings.getDetails
     // and — worse — the checkAll sort, which runs over the whole pricelist at startup and ignores
     // `enabled`, so one such entry stopped the bot booting entirely.
+    // Entry's constructor is private; fromData is the public factory. It only needs the schema to
+    // resolve a display name, so a stub is enough here.
+    const schema = { getName: (): string => 'Kill-a-Watt Platinum Pickelhaube' } as unknown as SchemaManager.Schema;
+
     const usdOnly = (extra: Partial<EntryData> = {}): Entry => {
         const data: EntryData = {
             sku: '30042;5;u56',
@@ -59,11 +63,7 @@ describe('USD-only entries (Mannco.store)', () => {
             ...extra
         };
 
-        // eslint's TS program resolves the Entry constructor as `any` here (tsc does not); the
-        // annotation is the real type.
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const entry: Entry = new Entry(data, 'Kill-a-Watt Platinum Pickelhaube');
-        return entry;
+        return Entry.fromData(data, schema);
     };
 
     it('substitutes placeholder metal prices instead of leaving nulls', () => {
@@ -99,8 +99,7 @@ describe('USD-only entries (Mannco.store)', () => {
 
     it('still leaves prices null when there is no price of any kind', () => {
         const data: EntryData = { sku: '5021;6', enabled: true, autoprice: true, min: 0, max: 1, intent: 0 };
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const entry: Entry = new Entry(data, 'Mann Co. Supply Crate Key');
+        const entry = Entry.fromData(data, schema);
 
         expect(entry.buy).toBeNull();
         expect(entry.sell).toBeNull();
