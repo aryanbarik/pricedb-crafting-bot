@@ -151,6 +151,30 @@ level → take the highest level held by at least `minOrders` **distinct** steam
 - When the ceiling binds, it logs a warning — the market has moved past what a part is worth as a
   craft input, so the ceiling needs a human look.
 
+### What production has NOT yet proven (as of 2026-08-07)
+
+Every configured SKU currently sits **exactly at its ceiling**: the three Battle-Worn at 1 ref, the
+two Pristine at 2.33 ref. So the only path production has exercised is `top >= ceiling → write
+ceiling`. The module has been correct on every cycle since deploy, but a ceiling produces the right
+number even when the computation feeding it is wrong — an error in the snapshot parse, the buy-side
+filter, the steamid grouping, or the scrap conversion would all be masked as long as the clamp binds.
+
+**The downward path is untested against live data.** `pickTopLevel` is unit-tested
+(`src/lib/__tests__/competitiveBuyPricer.ts`) and the pure selection logic is sound, but the live
+chain from `fetchBuyOrders` through to a *sub-ceiling* write has never run. Confidence in this module
+should be read as "the clamp works", not "the pricing works".
+
+The first real validation arrives when competing Battle-Worn bids drop below 1 ref. When that
+happens, check `pm2 logs autofab-tf2autobot` for the `buy X -> Y scrap (top competing …)` debug line
+and confirm `Y` tracks the actual top bid on bp.tf rather than sticking at 9 scrap or collapsing to
+the pricedb price. Until then, do not treat a quiet log as evidence of correctness.
+
+Related gap: the ceiling-hit warning is inside the `current !== target` branch, after the
+`if (current === target) return;` early exit. Once a SKU is pinned at its ceiling, `target` stops
+changing, so the warning **never fires** — including in the case it exists for, competitors bidding
+past `maxBuy`. Right now that warning is unreachable for all five SKUs. Fix by hoisting the
+`top > ceiling` check above the early return.
+
 ### Which backpack.tf endpoint, and why
 
 Uses `/api/classifieds/listings/snapshot` with the **access token**. Do not switch this to
