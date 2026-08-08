@@ -39,11 +39,23 @@ export enum PricelistChangedSource {
  *                is not gated by intent, so the bot would accept giving away the difference.
  *   - sell high → "will not sell it cheap". A 0 sell price would list the item for free.
  *
- * 1000 keys is high enough that nothing sells, while staying far inside the safe-integer range so
- * `Currencies.toValue()` arithmetic stays exact.
+ * The sell figure is NOT a price — it is "unsellable" spelled in the only vocabulary the pricelist
+ * has. So it must sit above anything TF2 can be worth, not merely above what we happen to hold.
+ * Earlier values failed that test: a hand-applied 99 keys is exceeded by ordinary mid-tier unusuals
+ * (100-300 keys), and 1000 keys is exceeded by high-tier effects on desirable hats. Both would have
+ * quietly underpriced the very items most worth protecting, and both needed re-checking every time
+ * the inventory changed — which is exactly the property a sentinel must not have.
+ *
+ * 1e6 keys is beyond any real trade while staying far inside the safe-integer range: at ~540 scrap
+ * per key that is ~5.4e8 scrap, versus the ~9e15 limit, so `Currencies.toValue()` stays exact.
+ *
+ * Note this is defense in depth, not the primary guard. What actually keeps these entries off
+ * backpack.tf is `Listings.ts:323`, which builds a listing only when `enabled === true`. Making the
+ * magnitude irrelevant — refusing to list a USD-only entry at all — is the real fix and is still
+ * outstanding.
  */
 export const USD_ONLY_BUY_PLACEHOLDER: Currency = { keys: 0, metal: 0 };
-export const USD_ONLY_SELL_PLACEHOLDER: Currency = { keys: 1000, metal: 0 };
+export const USD_ONLY_SELL_PLACEHOLDER: Currency = { keys: 1000000, metal: 0 };
 
 export interface EntryData {
     sku: string;

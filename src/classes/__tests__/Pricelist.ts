@@ -82,7 +82,10 @@ describe('USD-only entries (Mannco.store)', () => {
 
     it('prices the sell side out of reach rather than at zero', () => {
         // A zero placeholder would list the item for free if the entry were ever enabled.
-        expect(usdOnly().sell.toValue(60)).toBeGreaterThan(new Currencies({ keys: 100, metal: 0 }).toValue(60));
+        // The bound is deliberately well above the top of the unusual market rather than just above
+        // current inventory: 99 keys (the original hand-applied value) is beaten by ordinary mid-tier
+        // unusuals and 1000 by high-tier ones, so either would have underpriced the costliest items.
+        expect(usdOnly().sell.toValue(60)).toBeGreaterThan(new Currencies({ keys: 10000, metal: 0 }).toValue(60));
     });
 
     it('keeps the placeholders inside the safe-integer range', () => {
