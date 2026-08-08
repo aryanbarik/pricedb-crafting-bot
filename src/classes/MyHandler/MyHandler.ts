@@ -885,6 +885,31 @@ export default class MyHandler extends Handler {
                     offer.data('craftingService', { fabricatorAssetIds, componentAssetIds: [], preTradeIds });
                     offer.log('info', `[Mode B] crafting service — ${fabricatorAssetIds.length} fabricator(s) + ${keyCount} key(s)`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
+                } else if (isAdmin && fabricatorAssetIds.length > 0) {
+                    // Bare fabricator from an admin: cover the WHOLE recipe from the bot's own
+                    // stock rather than asking the admin for parts the bot already owns — that
+                    // round trip (withdraw the parts, send them straight back with the fabricator)
+                    // is the thing this feature exists to remove.
+                    //
+                    // Shaped as Mode A data with no components rather than phase:'intake', because
+                    // the intake branch returns before runMultiFabCraft is ever defined and cannot
+                    // reach it. Falling through to the craft branch works because a directly-sent
+                    // fabricator shows up in that trade's own backpack diff, and runMultiFabCraft's
+                    // `components.length > 0 || selfFill` already tolerates an empty component list.
+                    const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+                    offer.data('craftingService', {
+                        fabricatorAssetIds,
+                        componentAssetIds: [],
+                        kitAssetIds: [],
+                        preTradeIds,
+                        adminSelfFill: true
+                    });
+                    const fabList = fabricatorAssetIds.join(', ');
+                    offer.log(
+                        'info',
+                        `[Mode A][self-fill] crafting service — ${fabricatorAssetIds.length} bare fabricator(s) [${fabList}] — filling entirely from the bot's own stock`
+                    );
+                    return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 } else if (fabricatorAssetIds.length > 0) {
                     // Bare fabricator(s), no components, <2 keys: we can't build a craft plan
                     // without knowing the real recipe, and the GC won't tell us that until we own
