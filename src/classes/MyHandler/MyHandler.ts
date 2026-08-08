@@ -2854,6 +2854,7 @@ export default class MyHandler extends Handler {
                                         } else if (result.kitId) {
                                             log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${result.kitId}`);
                                             resultKitIds.push(result.kitId);
+                                            this.reconcileSelfFilledComponents(result.selfFilledIds);
                                         } else if (result.partialFabId) {
                                             log.info(`[craftingService] Partial fill for fab ${fabId} — returning partially filled fab`);
                                             partialFabIds.push(result.partialFabId);
@@ -2876,6 +2877,11 @@ export default class MyHandler extends Handler {
                                                 );
                                                 leftoverIds.push(...unconsumedComponentIds);
                                             }
+                                            // Deliberately NOT added to leftoverIds: these are the
+                                            // bot's own items, and leftoverIds is shipped to the
+                                            // partner. Any of them the craft actually swallowed
+                                            // just needs the inventory cache told.
+                                            this.reconcileSelfFilledComponents(result.selfFilledIds);
                                         }
                                         craftNext();
                                     });
@@ -3996,6 +4002,44 @@ export default class MyHandler extends Handler {
     // deliberately stays reserved — it's tracked in heldReturnItems instead and still isn't ours.
     private releaseCraftingInFlight(assetIds: string[]): void {
         assetIds.forEach(id => this.craftingInFlightIds.delete(id));
+    }
+
+    /**
+     * Drops components the bot spent on its own craft out of the Steam inventory cache.
+     *
+     * Every other TF2GC job already does this (see the combine/craft/apply handlers), but the
+     * fabricator path never needed to: it only ever consumed items that had just arrived from a
+     * customer and were never counted as the bot's stock. Self-fill breaks that assumption — the
+     * items it burns are stock the bot bought. Left uncorrected the cache keeps counting them, so
+     * `amountCanTrade` sizes buy orders against inventory that no longer exists and the bot bids
+     * for parts it thinks it still has.
+     *
+     * Only ids genuinely absent from the GC backpack are removed: a craft can report a partial fill
+     * without having consumed anything, and dropping a still-held item would err the other way.
+     */
+    private reconcileSelfFilledComponents(selfFilledIds: string[] | undefined): void {
+        if (!selfFilledIds?.length) return;
+
+        const backpack: any[] = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        const inventory = this.bot.inventoryManager.getInventory;
+        const affectedSkus = new Set<string>();
+
+        for (const id of selfFilledIds) {
+            if (backpack.some((i: any) => String(i.id) === id)) continue;
+
+            // Resolve the SKU before removing — that lookup is exactly what removeItem invalidates.
+            const sku = inventory.findByAssetid(id);
+            if (sku !== null) affectedSkus.add(sku);
+            inventory.removeItem(id);
+        }
+
+        if (affectedSkus.size === 0) return;
+
+        log.info(
+            `[craftingService] Self-fill consumed ${selfFilledIds.length} of the bot's own item(s); ` +
+                `refreshing listings for ${[...affectedSkus].join(', ')}`
+        );
+        affectedSkus.forEach(sku => this.bot.listings.checkByPriceKey({ priceKey: sku }));
     }
 
     private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {
