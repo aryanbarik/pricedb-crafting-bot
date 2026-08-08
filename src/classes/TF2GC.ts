@@ -60,7 +60,7 @@ type Job = {
     callback?: (err?: Error) => void;
     fabricatorCallback?: (
         err: Error | null,
-        result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[] }
+        result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[]; stillMissing?: string[] }
     ) => void;
     kitCallback?: (err: Error | null, resultWeaponId?: string) => void;
     strangifyCallback?: (err: Error | null, resultWeaponId?: string) => void;
@@ -181,7 +181,7 @@ export default class TF2GC {
         options: { componentIds?: string[]; selfFill?: boolean; excludeIds?: string[] },
         fabricatorCallback?: (
             err: Error | null,
-            result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[] }
+            result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[]; stillMissing?: string[] }
         ) => void
     ): void {
         const { componentIds, selfFill, excludeIds } = options;
@@ -503,25 +503,30 @@ export default class TF2GC {
         // left open. coveredCounts is exactly the "already covered" input findBotComponents needs,
         // so the slot arithmetic lives in one place rather than being recomputed here.
         let selfFilledIds: string[] = [];
+        let stillMissing: string[] = [];
         if (job.selfFill) {
             const excludeSet = new Set<string>(job.excludeIds ?? []);
             const donorPool = backpack.filter(i => i.id !== fabricator.id && !excludeSet.has(i.id));
 
+            // Bank whatever the bot can cover rather than refusing outright when something is
+            // short. Ingredients go INTO the fabricator and come back with it, so a partial fill
+            // returns it closer to done instead of spending anything for nothing.
             const { components: topUp, missing } = findBotComponents(
                 fabricator as unknown as GCBackpackItem,
                 donorPool,
-                { excludeIds: excludeSet, alreadyCovered: coveredCounts }
+                { excludeIds: excludeSet, alreadyCovered: coveredCounts, allowPartial: true }
             );
 
-            if (missing.length > 0) {
-                // Fail BEFORE the GC send. A partial send would consume whatever it did match, so
-                // bailing here is what makes "bot lacks a part" cost nothing.
+            if (components.length === 0 && topUp.length === 0) {
+                // Nothing to send. The GC ignores an empty recipe fulfilment and simply never
+                // replies, so this would surface as a 30s timeout rather than an answer.
                 const msg = `Bot is missing parts: ${missing.join(', ')}`;
-                log.warn(`craftFabricator [self-fill]: ${msg}`);
+                log.warn(`craftFabricator [self-fill]: nothing could be filled — ${msg}`);
                 if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
                 return this.finishedProcessingJob(new Error(msg));
             }
 
+            stillMissing = missing;
             selfFilledIds = topUp.map(c => c.subject_item_id);
             components = [...components, ...topUp];
             for (const c of topUp) {
@@ -529,7 +534,8 @@ export default class TF2GC {
             }
             log.info(
                 `craftFabricator [self-fill]: filled ${topUp.length} slot(s) from the bot's own stock ` +
-                    `(${selfFilledIds.join(', ')})`
+                    `(${selfFilledIds.join(', ')})` +
+                    (missing.length > 0 ? `; still short: ${missing.join(', ')}` : '')
             );
         }
 
@@ -580,7 +586,9 @@ export default class TF2GC {
                 clearTimeout(kitTimeout);
                 cleanup();
                 log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
-                if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(item.id), selfFilledIds });
+                if (job.fabricatorCallback) {
+                    job.fabricatorCallback(null, { kitId: String(item.id), selfFilledIds, stillMissing });
+                }
                 this.finishedProcessingJob();
                 return;
             }
@@ -593,7 +601,7 @@ export default class TF2GC {
                 cleanup();
                 log.debug(`craftFabricator: partial fill — fab re-issued as new id ${item.id} (was ${fabricatorId})`);
                 if (job.fabricatorCallback) {
-                    job.fabricatorCallback(null, { partialFabId: String(item.id), selfFilledIds });
+                    job.fabricatorCallback(null, { partialFabId: String(item.id), selfFilledIds, stillMissing });
                 }
                 this.finishedProcessingJob();
             }
@@ -606,7 +614,9 @@ export default class TF2GC {
             clearTimeout(kitTimeout);
             cleanup();
             log.debug(`craftFabricator: partial fill — fab ${fabricatorId} updated in place`);
-            if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds });
+            if (job.fabricatorCallback) {
+                job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds, stillMissing });
+            }
             this.finishedProcessingJob();
         };
 
@@ -635,7 +645,7 @@ export default class TF2GC {
                 if (newKit) {
                     log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
                     if (job.fabricatorCallback) {
-                        job.fabricatorCallback(null, { kitId: String(newKit.id), selfFilledIds });
+                        job.fabricatorCallback(null, { kitId: String(newKit.id), selfFilledIds, stillMissing });
                     }
                 } else {
                     // No new kit either — check whether the fabricator was re-issued under a new id
@@ -646,7 +656,11 @@ export default class TF2GC {
                     if (newFab) {
                         log.debug(`craftFabricator: timeout — fab gone, found re-issued fab ${newFab.id} in backpack (partial fill)`);
                         if (job.fabricatorCallback) {
-                            job.fabricatorCallback(null, { partialFabId: String(newFab.id), selfFilledIds });
+                            job.fabricatorCallback(null, {
+                                partialFabId: String(newFab.id),
+                                selfFilledIds,
+                                stillMissing
+                            });
                         }
                     } else {
                         const err = new Error('Timed out — fabricator gone but no kit found');
@@ -657,7 +671,9 @@ export default class TF2GC {
             } else {
                 // Fab still present — partial fill happened but itemChanged was missed
                 log.debug(`craftFabricator: timeout — fab ${fabricatorId} still present, treating as partial fill`);
-                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds });
+                if (job.fabricatorCallback) {
+                    job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds, stillMissing });
+                }
             }
             this.finishedProcessingJob();
         }, 30000);
