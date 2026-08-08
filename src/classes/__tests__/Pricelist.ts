@@ -1,4 +1,4 @@
-import Pricelist from '../Pricelist';
+import Pricelist, { Entry, EntryData } from '../Pricelist';
 import SchemaManager from '@tf2autobot/tf2-schema';
 import { DEFAULTS } from '../Options';
 import Currencies from '@tf2autobot/tf2-currencies';
@@ -41,6 +41,72 @@ it('can pricecheck', async () => {
     expect(priceList.hasPrice({ priceKey: '5021;6' })).toEqual(false);
     expect(priceList.getPrice({ priceKey: '5021;6' })).toBeNull();
     // expect(priceList.searchByName('Mann Co. Supply Crate Key')).toBeNull();
+});
+
+describe('USD-only entries (Mannco.store)', () => {
+    // An entry priced only in USD used to leave buy/sell null, which crashed Listings.getDetails
+    // and — worse — the checkAll sort, which runs over the whole pricelist at startup and ignores
+    // `enabled`, so one such entry stopped the bot booting entirely.
+    // Entry's constructor is private; fromData is the public factory. It only needs the schema to
+    // resolve a display name, so a stub is enough here.
+    const schema = { getName: (): string => 'Kill-a-Watt Platinum Pickelhaube' } as unknown as SchemaManager.Schema;
+
+    const usdOnly = (extra: Partial<EntryData> = {}): Entry => {
+        const data: EntryData = {
+            sku: '30042;5;u56',
+            enabled: false,
+            autoprice: false,
+            min: 0,
+            max: 1,
+            intent: 1,
+            sellUsd: 2160,
+            ...extra
+        };
+
+        return Entry.fromData(data, schema);
+    };
+
+    it('substitutes placeholder metal prices instead of leaving nulls', () => {
+        const entry = usdOnly();
+
+        expect(entry.buy).not.toBeNull();
+        expect(entry.sell).not.toBeNull();
+        expect(entry.sellUsd).toEqual(2160);
+    });
+
+    it('never bids anything on the buy side', () => {
+        // A non-zero placeholder here would be read as willingness to pay by offer valuation,
+        // which is NOT gated by intent — the bot would give away the difference.
+        expect(usdOnly().buy.toValue(60)).toEqual(0);
+    });
+
+    it('prices the sell side out of reach rather than at zero', () => {
+        // A zero placeholder would list the item for free if the entry were ever enabled.
+        // The bound is deliberately well above the top of the unusual market rather than just above
+        // current inventory: 99 keys (the original hand-applied value) is beaten by ordinary mid-tier
+        // unusuals and 1000 by high-tier ones, so either would have underpriced the costliest items.
+        expect(usdOnly().sell.toValue(60)).toBeGreaterThan(new Currencies({ keys: 10000, metal: 0 }).toValue(60));
+    });
+
+    it('keeps the placeholders inside the safe-integer range', () => {
+        // MAX_SAFE_INTEGER as a sentinel would lose precision in the checkAll sort arithmetic.
+        expect(Number.isSafeInteger(usdOnly().sell.toValue(60))).toBe(true);
+    });
+
+    it('survives the arithmetic that the checkAll sort performs', () => {
+        const a = usdOnly();
+        const b = usdOnly();
+
+        expect(() => (b.buy.keys - a.buy.keys) * 60 + (b.buy.metal - a.buy.metal)).not.toThrow();
+    });
+
+    it('still leaves prices null when there is no price of any kind', () => {
+        const data: EntryData = { sku: '5021;6', enabled: true, autoprice: true, min: 0, max: 1, intent: 0 };
+        const entry = Entry.fromData(data, schema);
+
+        expect(entry.buy).toBeNull();
+        expect(entry.sell).toBeNull();
+    });
 });
 
 it('can pricecheck detect custom pricers', () => {
