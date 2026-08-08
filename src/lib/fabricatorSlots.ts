@@ -247,7 +247,7 @@ export interface FindBotComponentsOptions {
      */
     excludeIds?: Set<string>;
     /**
-     * attributeIndex -> how many of that slot's requirement some other source already covers,
+     * Maps attributeIndex to how many of that slot's requirement some other source already covers,
      * e.g. components the customer supplied in the trade. Slots covered this way are skipped
      * rather than reported as missing -- that distinction is the whole point of a top-up.
      */
@@ -281,8 +281,8 @@ export function findBotComponents(
     const usedIds = new Set<string>();
 
     for (const slot of slots) {
-        const needed =
-            slot.numRequired - slot.numFulfilled - (alreadyCovered?.get(slot.attributeIndex) ?? 0);
+        const covered = alreadyCovered?.get(slot.attributeIndex) ?? 0;
+        const needed = slot.numRequired - slot.numFulfilled - covered;
 
         // Fully covered elsewhere -- not our slot to fill, and NOT a missing part.
         if (needed <= 0) continue;

@@ -211,6 +211,15 @@ export default class MyHandler extends Handler {
     // retryHeldReturn (wired to the admin-only !retryreturn command).
     private heldReturnItems = new Map<string, string[]>();
 
+    // Backpack IDs the bot is holding on someone else's behalf: received in a crafting trade but not
+    // yet crafted away or returned. Only self-fill reads this, and only to avoid spending a
+    // customer's components on the admin's fabricator. The GC job queue is serial, so it is not
+    // needed for the selection window itself — it covers the much longer gap between "trade
+    // accepted" and "results offer accepted", during which a second trade can arrive.
+    // In-memory like the three maps above, so a restart forgets it; the pricelist stock floor in
+    // buildSelfFillExcludeIds is the backstop for that.
+    private craftingInFlightIds = new Set<string>();
+
     private paths: Paths;
 
     get getPaths(): Paths {
@@ -863,8 +872,12 @@ export default class MyHandler extends Handler {
                         .map((i: any) => String(i.assetid));
                     // Snapshot current GC backpack IDs BEFORE accepting — used to find new items after trade
                     const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
-                    offer.data('craftingService', { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds });
-                    offer.log('info', `[Mode A] crafting service — ${fabricatorAssetIds.length} fabricator(s) [${fabricatorAssetIds.join(', ')}] + ${componentItems.length} component(s)${kitAssetIds.length > 0 ? ` (${kitAssetIds.length} unapplied kit(s))` : ''}`);
+                    // Admins get their fabricator topped up from the bot's own stock, so they only
+                    // have to send the parts the bot doesn't keep (today: the killstreak weapon).
+                    // Deliberately set on this branch only — the intake and kit-only branches keep
+                    // asking the partner for parts, which is what leaves non-admin flows untouched.
+                    offer.data('craftingService', { fabricatorAssetIds, componentAssetIds, kitAssetIds, preTradeIds, adminSelfFill: isAdmin });
+                    offer.log('info', `[Mode A]${isAdmin ? '[self-fill]' : ''} crafting service — ${fabricatorAssetIds.length} fabricator(s) [${fabricatorAssetIds.join(', ')}] + ${componentItems.length} component(s)${kitAssetIds.length > 0 ? ` (${kitAssetIds.length} unapplied kit(s))` : ''}`);
                     return { action: 'accept', reason: 'CRAFTING_SERVICE' };
                 } else if (keyCount >= 2) {
                     // Mode B (key payment): bot uses own parts, keeps keys as payment
@@ -2540,7 +2553,7 @@ export default class MyHandler extends Handler {
                     const craftingService = offer.data('craftingService') as
                         | { phase: 'intake'; fabricatorAssetIds: string[]; preTradeIds?: string[] }
                         | { phase: 'components'; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
-                        | { phase?: undefined; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
+                        | { phase?: undefined; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[]; adminSelfFill?: boolean }
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
@@ -2627,6 +2640,11 @@ export default class MyHandler extends Handler {
                             const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
                             const allNewIds = newItems.map((i: any) => String(i.id));
 
+                            // Held from here until these items are crafted away or returned, so a
+                            // concurrent self-fill craft can't spend them. Released in sendResults
+                            // and doRefund once they're on their way back.
+                            allNewIds.forEach((id: string) => this.craftingInFlightIds.add(id));
+
                             log.debug(`[craftingService] Backpack diff: ${newItems.length} new item(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
 
                             // All new fabs in this trade's diff, Spec (20002) before Pro (20003)
@@ -2634,11 +2652,13 @@ export default class MyHandler extends Handler {
                                 .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
                                 .sort((a: any, b: any) => a.def_index - b.def_index);
 
-                            const { fabricatorAssetIds, componentAssetIds, kitAssetIds } = craftingService as {
+                            const { fabricatorAssetIds, componentAssetIds, kitAssetIds, adminSelfFill } = craftingService as {
                                 fabricatorAssetIds: string[];
                                 componentAssetIds: string[];
                                 kitAssetIds?: string[];
+                                adminSelfFill?: boolean;
                             };
+                            const selfFill = adminSelfFill === true;
 
                             // phase 'components': the fabricator was already received in a prior intake
                             // trade, so it won't appear in THIS trade's diff — look it up directly by its
@@ -2681,6 +2701,7 @@ export default class MyHandler extends Handler {
                                     this.bot.trades.sendOffer(refundOffer)
                                         .then(status => {
                                             if (status === 'pending') void this.bot.trades.acceptConfirmation(refundOffer);
+                                            this.releaseCraftingInFlight(allNewIds);
                                         })
                                         .catch((sendErr: Error) => {
                                             if (retriesLeft > 0) {
@@ -2722,7 +2743,9 @@ export default class MyHandler extends Handler {
 
                                 for (const fab of newFabs) {
                                     const components = buildCraftComponents(fab as any, remainingPool as any);
-                                    if (components.length > 0) {
+                                    // Under self-fill an empty match isn't a dead end — the bot's own
+                                    // stock still has to be offered the slots before we give up.
+                                    if (components.length > 0 || selfFill) {
                                         const usedIds = new Set(components.map((c: any) => c.subject_item_id));
                                         craftPlan.push({ fabId: String(fab.id), componentIds: [...usedIds] });
                                         remainingPool = remainingPool.filter((i: any) => !usedIds.has(String(i.id)));
@@ -2780,6 +2803,7 @@ export default class MyHandler extends Handler {
                                         this.bot.trades.sendOffer(returnOffer)
                                             .then(status => {
                                                 if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                                                this.releaseCraftingInFlight(allNewIds);
                                             })
                                             .catch((sendErr: Error) => {
                                                 if (retriesLeft > 0) {
@@ -2810,10 +2834,23 @@ export default class MyHandler extends Handler {
                                     }
                                     const { fabId, componentIds } = craftPlan[planIndex++];
                                     log.debug(`[craftingService] Crafting fab ${fabId} (${planIndex}/${craftPlan.length}) with ${componentIds.length} component(s)`);
-                                    this.bot.tf2gc.craftFabricator(fabId, { componentIds }, (err, result) => {
+                                    // Rebuilt per fab rather than once per plan: an earlier craft in
+                                    // this same plan may have already spent some of the bot's stock.
+                                    const craftOptions = {
+                                        componentIds,
+                                        selfFill,
+                                        excludeIds: selfFill ? this.buildSelfFillExcludeIds(allNewIds) : undefined
+                                    };
+                                    this.bot.tf2gc.craftFabricator(fabId, craftOptions, (err, result) => {
                                         if (err || !result) {
                                             log.warn(`[craftingService] Craft failed for fab ${fabId}: ${err?.message ?? 'no result'}`);
                                             failedFabIds.push(fabId);
+                                            if (selfFill && err) {
+                                                // The generic "N fab(s) failed" summary doesn't say
+                                                // WHICH part the bot ran out of, which is the only
+                                                // thing worth knowing here.
+                                                this.bot.sendMessage(offer.partner, `⚠️ Couldn't self-fill fabricator ${fabId}: ${err.message}`);
+                                            }
                                         } else if (result.kitId) {
                                             log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${result.kitId}`);
                                             resultKitIds.push(result.kitId);
@@ -3901,6 +3938,64 @@ export default class MyHandler extends Handler {
             return counts;
         };
         return { our: toCounts(giveIds), their: toCounts(receiveIds) };
+    }
+
+    /**
+     * Backpack IDs a self-fill craft must not spend. Everything the bot physically holds is a
+     * candidate ingredient as far as the GC is concerned, so what keeps this safe is subtraction:
+     * anything that belongs to someone else, or that the bot has promised elsewhere, is removed
+     * before the recipe gets to choose.
+     *
+     * @param currentTradeIds every item that arrived in the trade being crafted. Excluded wholesale
+     * because those are passed separately as componentIds — they must not be double-counted as
+     * donated stock, or a partial fill would hand the customer's own items back as "leftovers"
+     * twice over.
+     */
+    private buildSelfFillExcludeIds(currentTradeIds: string[]): string[] {
+        const exclude = new Set<string>(currentTradeIds);
+
+        this.craftingInFlightIds.forEach(id => exclude.add(id));
+        this.heldIntakeFabricators.forEach((_partner, id) => exclude.add(id));
+        this.claimedIntakeFabricatorIds.forEach(id => exclude.add(id));
+        this.heldReturnItems.forEach(ids => ids.forEach(id => exclude.add(id)));
+
+        const backpack: any[] = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+
+        // A fabricator can never fill a slot, and a Killstreak Kit is a recipe's OUTPUT rather than
+        // an input. Neither should ever be selected, and both are valuable enough that relying on
+        // slot matching alone to skip them is not worth the risk.
+        for (const item of backpack) {
+            if (FABRICATOR_DEFINDEXES.includes(item.def_index) || KS_KIT_DEFINDEXES.includes(item.def_index)) {
+                exclude.add(String(item.id));
+            }
+        }
+
+        // Stock floor: never let a craft pull a SKU below the `min` its pricelist entry promises.
+        // Keyed off the pricelist rather than a hardcoded parts list, so killstreak weapons are
+        // covered automatically once the bot starts stocking and pricing them.
+        const bySku = new Map<string, string[]>();
+        for (const item of backpack) {
+            const id = String(item.id);
+            if (exclude.has(id)) continue;
+            const sku = `${item.def_index};${item.quality ?? 6}${item.flag_cannot_craft ? ';uncraftable' : ''}`;
+            bySku.set(sku, [...(bySku.get(sku) ?? []), id]);
+        }
+
+        bySku.forEach((ids, sku) => {
+            const min = this.bot.pricelist.getPrice({ priceKey: sku, onlyEnabled: false })?.min ?? 0;
+            if (min <= 0) return;
+            // Reserve from the front; which specific copies are held back doesn't matter, only how
+            // many. If stock is already at or below the floor this excludes all of them.
+            ids.slice(0, min).forEach(id => exclude.add(id));
+        });
+
+        return [...exclude];
+    }
+
+    // Called once a trade's items are on their way back to their owner. Anything that failed to send
+    // deliberately stays reserved — it's tracked in heldReturnItems instead and still isn't ours.
+    private releaseCraftingInFlight(assetIds: string[]): void {
+        assetIds.forEach(id => this.craftingInFlightIds.delete(id));
     }
 
     private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {

@@ -185,9 +185,11 @@ export default class TF2GC {
         ) => void
     ): void {
         const { componentIds, selfFill, excludeIds } = options;
+        const provided = componentIds?.length ?? 0;
+        const reserved = excludeIds?.length ?? 0;
+        const selfFillNote = selfFill ? `, self-fill enabled, ${reserved} id(s) reserved` : '';
         log.debug(
-            `Enqueueing craftFabricator job for fabricator ${fabricatorId} (${componentIds?.length ?? 0} provided component(s)` +
-                `${selfFill ? `, self-fill enabled, ${excludeIds?.length ?? 0} id(s) reserved` : ''})`
+            `Enqueueing craftFabricator job for fabricator ${fabricatorId} (${provided} provided component(s)${selfFillNote})`
         );
         this.newJob({
             type: 'craftFabricator',
@@ -490,9 +492,7 @@ export default class TF2GC {
         let selfFilledIds: string[] = [];
         if (job.selfFill) {
             const excludeSet = new Set<string>(job.excludeIds ?? []);
-            const donorPool = backpack.filter(
-                i => i.id !== fabricator!.id && !excludeSet.has(i.id)
-            ) as unknown as GCBackpackItem[];
+            const donorPool = backpack.filter(i => i.id !== fabricator.id && !excludeSet.has(i.id));
 
             const { components: topUp, missing } = findBotComponents(
                 fabricator as unknown as GCBackpackItem,
@@ -579,7 +579,9 @@ export default class TF2GC {
                 clearTimeout(kitTimeout);
                 cleanup();
                 log.debug(`craftFabricator: partial fill — fab re-issued as new id ${item.id} (was ${fabricatorId})`);
-                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(item.id), selfFilledIds });
+                if (job.fabricatorCallback) {
+                    job.fabricatorCallback(null, { partialFabId: String(item.id), selfFilledIds });
+                }
                 this.finishedProcessingJob();
             }
         };
@@ -619,7 +621,9 @@ export default class TF2GC {
                 );
                 if (newKit) {
                     log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
-                    if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(newKit.id), selfFilledIds });
+                    if (job.fabricatorCallback) {
+                        job.fabricatorCallback(null, { kitId: String(newKit.id), selfFilledIds });
+                    }
                 } else {
                     // No new kit either — check whether the fabricator was re-issued under a new id
                     // (partial fill) before declaring hard failure.
@@ -628,7 +632,9 @@ export default class TF2GC {
                     );
                     if (newFab) {
                         log.debug(`craftFabricator: timeout — fab gone, found re-issued fab ${newFab.id} in backpack (partial fill)`);
-                        if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(newFab.id), selfFilledIds });
+                        if (job.fabricatorCallback) {
+                            job.fabricatorCallback(null, { partialFabId: String(newFab.id), selfFilledIds });
+                        }
                     } else {
                         const err = new Error('Timed out — fabricator gone but no kit found');
                         log.warn(`craftFabricator: ${err.message} (fab ${fabricatorId})`);

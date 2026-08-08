@@ -1,7 +1,18 @@
 import { findBotComponents, GCBackpackItem, GCItemAttr, KS_KIT_DEFINDEXES } from '../fabricatorSlots';
 
+interface RecipeComponentProto {
+    def_index: number;
+    num_required: number;
+    num_fulfilled: number;
+    attributes_string: string;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const Schema = require('../../../node_modules/@tf2autobot/tf2/protobufs/generated/_load.js');
+const Schema = require('../../../node_modules/@tf2autobot/tf2/protobufs/generated/_load.js') as {
+    CAttribute_DynamicRecipeComponent: {
+        encode(message: RecipeComponentProto): { finish(): Uint8Array };
+    };
+};
 
 const ATTR_KILLSTREAK_TIER = 2025;
 
@@ -14,8 +25,7 @@ const ATTR_KILLSTREAK_TIER = 2025;
  */
 const RECIPE_CONDITION_SEP = '|\x01\x02\x01\x03|\x01\x02\x01\x03|';
 
-const cond = (attrDefIndex: number, value: number): string =>
-    `${attrDefIndex}${RECIPE_CONDITION_SEP}${value}`;
+const cond = (attrDefIndex: number, value: number): string => `${attrDefIndex}${RECIPE_CONDITION_SEP}${value}`;
 
 /**
  * Encodes a recipe slot the same way the GC does, so these tests exercise the real
@@ -53,8 +63,7 @@ function weapon(id: string, tier: number, opts: { uncraftable?: boolean } = {}):
     };
 }
 
-const ids = (r: { components: { subject_item_id: string }[] }): string[] =>
-    r.components.map(c => c.subject_item_id);
+const ids = (r: { components: { subject_item_id: string }[] }): string[] => r.components.map(c => c.subject_item_id);
 
 describe('findBotComponents', () => {
     describe('without options (existing behaviour must not shift)', () => {
