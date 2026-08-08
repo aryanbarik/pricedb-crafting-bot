@@ -280,10 +280,11 @@ export default class HttpManager {
                     return;
                 }
 
-                const { steamId, tradeUrl, fabricatorAssetIds } = req.body as {
+                const { steamId, tradeUrl, fabricatorAssetIds, sourcing } = req.body as {
                     steamId?: string;
                     tradeUrl?: string;
                     fabricatorAssetIds?: string[];
+                    sourcing?: 'customer' | 'depot';
                 };
 
                 if (!steamId || typeof steamId !== 'string') {
@@ -303,6 +304,20 @@ export default class HttpManager {
                     res.status(400).json({ success: false, error: 'Missing fabricatorAssetIds' });
                     return;
                 }
+                // 'depot' asks the bot to supply the components itself. That spends inventory the bot
+                // bought, so it is admin-only for now and the check lives HERE rather than only on
+                // the website: steamId arrives unverified in the body, and this endpoint is reachable
+                // by anyone holding the API key. The website's Steam OpenID login is what makes the
+                // value trustworthy in practice, but it is not the thing enforcing this.
+                const wantsDepot = sourcing === 'depot';
+                if (wantsDepot && !this.bot.isAdmin(steamId)) {
+                    res.status(403).json({
+                        success: false,
+                        error: 'Depot sourcing is not available yet — send your own components instead.'
+                    });
+                    return;
+                }
+
                 // Steam trade offers are capped at 255 items per side, but nothing in this crafting
                 // service flow legitimately produces an order anywhere near that — treat a large batch
                 // as a bad request rather than silently truncating or chunking into multiple offers
@@ -340,16 +355,31 @@ export default class HttpManager {
                 offer.data('dict', { our: {}, their: theirDict });
 
                 // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
-                offer.data('craftingService', {
-                    phase: 'intake',
-                    fabricatorAssetIds,
-                    preTradeIds
-                });
-                offer.setMessage(
-                    fabricatorAssetIds.length > 1
-                        ? `Please accept this offer to send your ${fabricatorAssetIds.length} fabricators — I'll read their recipes and follow up with the parts needed!`
-                        : "Please accept this offer to send your fabricator — I'll read its recipe and follow up with the parts needed!"
+                //
+                // Depot orders are shaped as Mode A with no components rather than phase:'intake',
+                // matching what onNewTradeOffer writes for a bare fabricator from an admin. The
+                // intake branch returns before runMultiFabCraft is defined and cannot reach it,
+                // whereas this falls through to the craft branch — where the fabricator appears in
+                // the trade's own backpack diff exactly as a directly-sent one does.
+                offer.data(
+                    'craftingService',
+                    wantsDepot
+                        ? {
+                              fabricatorAssetIds,
+                              componentAssetIds: [],
+                              kitAssetIds: [],
+                              preTradeIds,
+                              adminSelfFill: true
+                          }
+                        : { phase: 'intake', fabricatorAssetIds, preTradeIds }
                 );
+                const count = fabricatorAssetIds.length;
+                const many = count > 1;
+                const subject = many ? `your ${count} fabricators` : 'your fabricator';
+                const followUp = wantsDepot
+                    ? `I'll fill ${many ? 'them' : 'it'} from depot stock and send the ${many ? 'kits' : 'kit'} back!`
+                    : `I'll read ${many ? 'their recipes' : 'its recipe'} and follow up with the parts needed!`;
+                offer.setMessage(`Please accept this offer to send ${subject} — ${followUp}`);
 
                 const status = await this.bot.trades.sendOffer(offer);
                 if (status === 'pending') {
@@ -359,7 +389,8 @@ export default class HttpManager {
                 }
 
                 log.info(
-                    `[craftingService] Sent intake request-offer ${offer.id} to ${steamId} for ${fabricatorAssetIds.length} fabricator(s) [${fabricatorAssetIds.join(', ')}]`
+                    `[craftingService] Sent ${wantsDepot ? 'depot' : 'intake'} request-offer to ${steamId}: ` +
+                        `offer ${offer.id}, ${count} fabricator(s) [${fabricatorAssetIds.join(', ')}]`
                 );
                 res.json({ success: true, offerId: offer.id });
             } catch (error) {
