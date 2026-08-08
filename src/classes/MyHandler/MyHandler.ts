@@ -4080,22 +4080,38 @@ export default class MyHandler extends Handler {
         const backpack: any[] = ((this.bot.tf2 as any).backpack as any[]) ?? [];
         const inventory = this.bot.inventoryManager.getInventory;
         const affectedSkus = new Set<string>();
+        const consumedIds: string[] = [];
+        const stillPresentIds: string[] = [];
 
         for (const id of selfFilledIds) {
-            if (backpack.some((i: any) => String(i.id) === id)) continue;
+            if (backpack.some((i: any) => String(i.id) === id)) {
+                stillPresentIds.push(id);
+                continue;
+            }
 
             // Resolve the SKU before removing — that lookup is exactly what removeItem invalidates.
             const sku = inventory.findByAssetid(id);
             if (sku !== null) affectedSkus.add(sku);
             inventory.removeItem(id);
+            consumedIds.push(id);
         }
 
-        if (affectedSkus.size === 0) return;
+        if (stillPresentIds.length > 0) {
+            // The GC took fewer components than were offered. Nothing is wrong with the inventory
+            // cache — those items really are still held — but the craft did less than it was asked
+            // to, which is worth knowing rather than inferring from a fill count that never moved.
+            log.warn(
+                `[craftingService] Self-fill: ${stillPresentIds.length} of ${selfFilledIds.length} offered item(s) ` +
+                    `are still in the backpack — the GC did not take them: ${stillPresentIds.join(', ')}`
+            );
+        }
 
-        log.info(
-            `[craftingService] Self-fill consumed ${selfFilledIds.length} of the bot's own item(s); ` +
-                `refreshing listings for ${[...affectedSkus].join(', ')}`
-        );
+        if (consumedIds.length === 0) return;
+
+        // Counts what was verified gone, not what was offered. Reporting the offered count made a
+        // partly-accepted craft look like a fully-accepted one.
+        const skuNote = affectedSkus.size > 0 ? `; refreshing listings for ${[...affectedSkus].join(', ')}` : '';
+        log.info(`[craftingService] Self-fill consumed ${consumedIds.length} of the bot's own item(s)${skuNote}`);
         affectedSkus.forEach(sku => this.bot.listings.checkByPriceKey({ priceKey: sku }));
     }
 
