@@ -267,7 +267,9 @@ The `value` field (proto uint32) and the `value_bytes` float32 both encode the s
 
 ### Conditions string format
 
-`CAttribute_DynamicRecipeComponent.attributes_string` format: `"attrDefIndex|||value|||attrDefIndex2|||value2"`. Values are the **semantic integer** (e.g., `"2"` for kt-tier 2), matching the uint32 encoding in `value`/`value_bytes`.
+`CAttribute_DynamicRecipeComponent.attributes_string` format: `attrDefIndex<SEP>value<SEP>attrDefIndex2<SEP>value2`. Values are the **semantic integer** (e.g., `"2"` for kt-tier 2), matching the uint32 encoding in `value`/`value_bytes`.
+
+**`<SEP>` is not three pipes.** It is `|` + `0x01 0x02 0x01 0x03` + `|` + `0x01 0x02 0x01 0x03` + `|` — see `RECIPE_CONDITION_SEP` at `src/lib/fabricatorSlots.ts:76`, which most editors and every previous version of this doc render as a harmless-looking `|||`. Anything hand-writing a conditions string with literal pipes produces a string that `split()` never divides, so `itemSatisfiesConditions` iterates zero conditions and returns its vacuous `true` — silently matching *every* candidate, e.g. a kt-1 weapon against a kt-2 slot. This bit the unit tests on 2026-08-08 and would bite production code the same way. Build the separator from the escape sequence (`'|\x01\x02\x01\x03|\x01\x02\x01\x03|'`), never by typing pipes.
 
 ### Item IDs
 
