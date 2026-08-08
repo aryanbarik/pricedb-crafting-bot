@@ -2912,6 +2912,19 @@ export default class MyHandler extends Handler {
                                             // partner. Any of them the craft actually swallowed
                                             // just needs the inventory cache told.
                                             this.reconcileSelfFilledComponents(result.selfFilledIds);
+
+                                            if (selfFill && result.stillMissing?.length) {
+                                                // A partial self-fill looks like a failure from the
+                                                // outside — a fabricator comes back, not a kit. Say
+                                                // what got banked and what is still owed, otherwise
+                                                // there is no way to tell it apart from a no-op.
+                                                const banked = result.selfFilledIds?.length ?? 0;
+                                                this.bot.sendMessage(
+                                                    offer.partner,
+                                                    `🔧 Filled fabricator ${fabId} with ${banked} part(s) from depot stock. ` +
+                                                        `Still needs: ${result.stillMissing.join(', ')}.`
+                                                );
+                                            }
                                         }
                                         craftNext();
                                     });
