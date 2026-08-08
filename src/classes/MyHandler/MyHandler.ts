@@ -2810,7 +2810,7 @@ export default class MyHandler extends Handler {
                                     }
                                     const { fabId, componentIds } = craftPlan[planIndex++];
                                     log.debug(`[craftingService] Crafting fab ${fabId} (${planIndex}/${craftPlan.length}) with ${componentIds.length} component(s)`);
-                                    this.bot.tf2gc.craftFabricator(fabId, componentIds.length > 0 ? componentIds : undefined, (err, result) => {
+                                    this.bot.tf2gc.craftFabricator(fabId, { componentIds }, (err, result) => {
                                         if (err || !result) {
                                             log.warn(`[craftingService] Craft failed for fab ${fabId}: ${err?.message ?? 'no result'}`);
                                             failedFabIds.push(fabId);

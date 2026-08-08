@@ -48,6 +48,8 @@ type Job = {
     assetids?: string[];
     fabricatorId?: string;
     componentIds?: string[];
+    selfFill?: boolean;
+    excludeIds?: string[];
     kitId?: string;
     weaponId?: string;
     strangifierId?: string;
@@ -56,7 +58,10 @@ type Job = {
     sortType?: number;
     attribute?: Attributes;
     callback?: (err?: Error) => void;
-    fabricatorCallback?: (err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void;
+    fabricatorCallback?: (
+        err: Error | null,
+        result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[] }
+    ) => void;
     kitCallback?: (err: Error | null, resultWeaponId?: string) => void;
     strangifyCallback?: (err: Error | null, resultWeaponId?: string) => void;
 };
@@ -163,20 +168,35 @@ export default class TF2GC {
         this.newJob({ type: 'craftToken', assetids, tokenType, subTokenType, callback: callback });
     }
 
+    /**
+     * `options.selfFill` lets the bot top the recipe up from its own backpack after the supplied
+     * componentIds are placed — `options.excludeIds` is what it must not spend while doing so.
+     *
+     * This used to be a union-typed second parameter (`string[] | callback`) so a caller could omit
+     * componentIds entirely. Nothing ever called it that way, and a third meaning would have made
+     * the overload unreadable, so it is a plain options object now.
+     */
     craftFabricator(
         fabricatorId: string,
-        componentIdsOrCallback?: string[] | ((err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void),
-        fabricatorCallback?: (err: Error | null, result?: { kitId?: string; partialFabId?: string }) => void
+        options: { componentIds?: string[]; selfFill?: boolean; excludeIds?: string[] },
+        fabricatorCallback?: (
+            err: Error | null,
+            result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[] }
+        ) => void
     ): void {
-        let componentIds: string[] | undefined;
-        let cb = fabricatorCallback;
-        if (Array.isArray(componentIdsOrCallback)) {
-            componentIds = componentIdsOrCallback;
-        } else if (typeof componentIdsOrCallback === 'function') {
-            cb = componentIdsOrCallback;
-        }
-        log.debug(`Enqueueing craftFabricator job for fabricator ${fabricatorId} (${componentIds?.length ?? 0} provided component(s))`);
-        this.newJob({ type: 'craftFabricator', fabricatorId, componentIds, fabricatorCallback: cb });
+        const { componentIds, selfFill, excludeIds } = options;
+        log.debug(
+            `Enqueueing craftFabricator job for fabricator ${fabricatorId} (${componentIds?.length ?? 0} provided component(s)` +
+                `${selfFill ? `, self-fill enabled, ${excludeIds?.length ?? 0} id(s) reserved` : ''})`
+        );
+        this.newJob({
+            type: 'craftFabricator',
+            fabricatorId,
+            componentIds,
+            selfFill,
+            excludeIds,
+            fabricatorCallback
+        });
     }
 
     applyKSKit(kitId: string, weaponId: string, cb: (err: Error | null, resultWeaponId?: string) => void): void {
@@ -394,7 +414,7 @@ export default class TF2GC {
 
         let components: { subject_item_id: string; attribute_index: number }[];
 
-        if (job.componentIds && job.componentIds.length > 0) {
+        if (job.componentIds?.length) {
             // Mode A: use provided component IDs — MyHandler resolves new IDs via itemAcquired before this runs
             const componentItems = job.componentIds
                 .map(id => backpack.find(i => i.id === id))
@@ -433,13 +453,18 @@ export default class TF2GC {
                 }
             }
 
-            if (components.length === 0) {
+            if (components.length === 0 && !job.selfFill) {
                 log.warn(`craftFabricator [Mode A]: no components could be mapped for fabricator ${fabricator.id}`);
                 if (job.fabricatorCallback) job.fabricatorCallback(new Error('Provided items did not match any recipe slots'));
                 return this.finishedProcessingJob(new Error('No components matched'));
             }
+            // Under self-fill this is recoverable rather than fatal: the supplied items matching
+            // nothing just means every slot is still open for the bot's own stock to cover below.
+        } else if (job.selfFill) {
+            components = [];
         } else {
-            // Mode B: find matching items from the bot's own existing inventory
+            // Mode B: find matching items from the bot's own existing inventory. Reachable only
+            // without selfFill, which is to say: not from the trade pipeline today.
             const botItems = backpack.filter(i => i.id !== fabricator!.id) as unknown as GCBackpackItem[];
             const { components: found, missing } = findBotComponents(fabricator as unknown as GCBackpackItem, botItems);
             if (missing.length > 0) {
@@ -459,6 +484,42 @@ export default class TF2GC {
         for (const c of components) {
             coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
         }
+        // Self-fill: top the recipe up from the bot's own stock for whatever the supplied items
+        // left open. coveredCounts is exactly the "already covered" input findBotComponents needs,
+        // so the slot arithmetic lives in one place rather than being recomputed here.
+        let selfFilledIds: string[] = [];
+        if (job.selfFill) {
+            const excludeSet = new Set<string>(job.excludeIds ?? []);
+            const donorPool = backpack.filter(
+                i => i.id !== fabricator!.id && !excludeSet.has(i.id)
+            ) as unknown as GCBackpackItem[];
+
+            const { components: topUp, missing } = findBotComponents(
+                fabricator as unknown as GCBackpackItem,
+                donorPool,
+                { excludeIds: excludeSet, alreadyCovered: coveredCounts }
+            );
+
+            if (missing.length > 0) {
+                // Fail BEFORE the GC send. A partial send would consume whatever it did match, so
+                // bailing here is what makes "bot lacks a part" cost nothing.
+                const msg = `Bot is missing parts: ${missing.join(', ')}`;
+                log.warn(`craftFabricator [self-fill]: ${msg}`);
+                if (job.fabricatorCallback) job.fabricatorCallback(new Error(msg));
+                return this.finishedProcessingJob(new Error(msg));
+            }
+
+            selfFilledIds = topUp.map(c => c.subject_item_id);
+            components = [...components, ...topUp];
+            for (const c of topUp) {
+                coveredCounts.set(c.attribute_index, (coveredCounts.get(c.attribute_index) ?? 0) + 1);
+            }
+            log.info(
+                `craftFabricator [self-fill]: filled ${topUp.length} slot(s) from the bot's own stock ` +
+                    `(${selfFilledIds.join(', ')})`
+            );
+        }
+
         const incompleteSlots = unfilledSlots.filter(
             s => (coveredCounts.get(s.attributeIndex) ?? 0) < (s.numRequired - s.numFulfilled)
         );
@@ -506,7 +567,7 @@ export default class TF2GC {
                 clearTimeout(kitTimeout);
                 cleanup();
                 log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
-                if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(item.id) });
+                if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(item.id), selfFilledIds });
                 this.finishedProcessingJob();
                 return;
             }
@@ -518,7 +579,7 @@ export default class TF2GC {
                 clearTimeout(kitTimeout);
                 cleanup();
                 log.debug(`craftFabricator: partial fill — fab re-issued as new id ${item.id} (was ${fabricatorId})`);
-                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(item.id) });
+                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(item.id), selfFilledIds });
                 this.finishedProcessingJob();
             }
         };
@@ -530,7 +591,7 @@ export default class TF2GC {
             clearTimeout(kitTimeout);
             cleanup();
             log.debug(`craftFabricator: partial fill — fab ${fabricatorId} updated in place`);
-            if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId });
+            if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds });
             this.finishedProcessingJob();
         };
 
@@ -558,7 +619,7 @@ export default class TF2GC {
                 );
                 if (newKit) {
                     log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
-                    if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(newKit.id) });
+                    if (job.fabricatorCallback) job.fabricatorCallback(null, { kitId: String(newKit.id), selfFilledIds });
                 } else {
                     // No new kit either — check whether the fabricator was re-issued under a new id
                     // (partial fill) before declaring hard failure.
@@ -567,7 +628,7 @@ export default class TF2GC {
                     );
                     if (newFab) {
                         log.debug(`craftFabricator: timeout — fab gone, found re-issued fab ${newFab.id} in backpack (partial fill)`);
-                        if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(newFab.id) });
+                        if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: String(newFab.id), selfFilledIds });
                     } else {
                         const err = new Error('Timed out — fabricator gone but no kit found');
                         log.warn(`craftFabricator: ${err.message} (fab ${fabricatorId})`);
@@ -577,7 +638,7 @@ export default class TF2GC {
             } else {
                 // Fab still present — partial fill happened but itemChanged was missed
                 log.debug(`craftFabricator: timeout — fab ${fabricatorId} still present, treating as partial fill`);
-                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId });
+                if (job.fabricatorCallback) job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds });
             }
             this.finishedProcessingJob();
         }, 30000);
