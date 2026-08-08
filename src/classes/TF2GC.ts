@@ -480,7 +480,20 @@ export default class TF2GC {
 
         // Validate all required recipe slots are covered before sending to GC
         const allSlots = decodeFabricatorSlots(fabricator as unknown as GCBackpackItem);
-        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(allSlots.filter(s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex)).map(s => ({ attr: s.attributeIndex, defidx: s.itemDefIndex, need: s.numRequired, cond: s.conditionsStr })))}`);
+        // `have` and `stillNeeds` matter as much as `need`: a fabricator can arrive part-filled, so
+        // "missing 1 of need 2" is ambiguous between "found nothing" and "found one, wanted two"
+        // without them. That ambiguity cost a debugging round trip on 2026-08-08.
+        const slotSummary = allSlots
+            .filter(s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex))
+            .map(s => ({
+                attr: s.attributeIndex,
+                defidx: s.itemDefIndex,
+                need: s.numRequired,
+                have: s.numFulfilled,
+                stillNeeds: s.numRequired - s.numFulfilled,
+                cond: s.conditionsStr
+            }));
+        log.debug(`[craftFabricator] Recipe slots: ${JSON.stringify(slotSummary)}`);
         const unfilledSlots = allSlots.filter(s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired);
         const coveredCounts = new Map<number, number>();
         for (const c of components) {
