@@ -238,29 +238,63 @@ export interface BotComponentResult {
     missing: string[];
 }
 
+export interface FindBotComponentsOptions {
+    /**
+     * Item IDs the bot owns but must not spend -- another customer's in-flight components, items
+     * queued for return, stock held back by a pricelist floor. Previously this function's doc
+     * comment asked the CALLER to pre-filter botBackpack and the only caller didn't, so the
+     * contract went unenforced; passing the set makes it a parameter instead of a convention.
+     */
+    excludeIds?: Set<string>;
+    /**
+     * attributeIndex -> how many of that slot's requirement some other source already covers,
+     * e.g. components the customer supplied in the trade. Slots covered this way are skipped
+     * rather than reported as missing -- that distinction is the whole point of a top-up.
+     */
+    alreadyCovered?: Map<number, number>;
+}
+
 /**
  * Scans the bot's own GC backpack to find items that fill each unfilled recipe slot.
  * botBackpack should exclude the fabricator itself and any payment keys.
+ *
+ * With no options this behaves exactly as before. With `alreadyCovered` it fills only the GAP a
+ * partially-supplied trade left behind, which is what lets the bot top up an admin's fabricator
+ * using its own stock. Slot matching is deliberately generic -- weapon slots are matched on their
+ * killstreak-tier condition, not on any hardcoded item list -- so this starts filling weapon slots
+ * on its own the day the bot begins stocking kt-2 weapons, with no change here.
  */
 export function findBotComponents(
     fabricator: GCBackpackItem,
-    botBackpack: GCBackpackItem[]
+    botBackpack: GCBackpackItem[],
+    options: FindBotComponentsOptions = {}
 ): BotComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
         s => !KS_KIT_DEFINDEXES.includes(s.itemDefIndex) && s.numFulfilled < s.numRequired
     );
+
+    const excludeIds = options.excludeIds ?? new Set<string>();
+    const alreadyCovered = options.alreadyCovered;
 
     const components: { subject_item_id: string; attribute_index: number }[] = [];
     const missing: string[] = [];
     const usedIds = new Set<string>();
 
     for (const slot of slots) {
-        const needed = slot.numRequired - slot.numFulfilled;
+        const needed =
+            slot.numRequired - slot.numFulfilled - (alreadyCovered?.get(slot.attributeIndex) ?? 0);
+
+        // Fully covered elsewhere -- not our slot to fill, and NOT a missing part.
+        if (needed <= 0) continue;
 
         if (slot.itemDefIndex === 0) {
             // Weapon slot — Non-Craftable items can never be used as crafting ingredients in TF2
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && !i.flag_cannot_craft && itemSatisfiesConditions(i, slot.conditionsStr)
+                i =>
+                    !usedIds.has(i.id) &&
+                    !excludeIds.has(i.id) &&
+                    !i.flag_cannot_craft &&
+                    itemSatisfiesConditions(i, slot.conditionsStr)
             );
             if (candidates.length < needed) {
                 const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
@@ -278,7 +312,11 @@ export function findBotComponents(
             // checking itemSatisfiesConditions here made the slot un-matchable 100% of the time).
             // Still excludes Non-Craftable items (see weapon slot above).
             const candidates = botBackpack.filter(
-                i => !usedIds.has(i.id) && !i.flag_cannot_craft && i.def_index === slot.itemDefIndex
+                i =>
+                    !usedIds.has(i.id) &&
+                    !excludeIds.has(i.id) &&
+                    !i.flag_cannot_craft &&
+                    i.def_index === slot.itemDefIndex
             );
             if (candidates.length < needed) {
                 missing.push(`${needed - candidates.length}× defindex ${slot.itemDefIndex}`);
