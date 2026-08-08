@@ -226,6 +226,78 @@ describe('findBotComponents', () => {
         });
     });
 
+    describe('allowPartial (bank what the bot has, report the rest)', () => {
+        it('takes what a short slot can supply instead of skipping it', () => {
+            // The case that prompted this: the bot held 2 of 3 and banked none of them.
+            const f = fab([slot(2000, { defIndex: 5701, required: 3 })]);
+            const result = findBotComponents(f, [part('a', 5701), part('b', 5701)], { allowPartial: true });
+
+            expect(ids(result).sort()).toEqual(['a', 'b']);
+            expect(result.missing).toEqual(['1× defindex 5701']);
+        });
+
+        it('reports the same shortfall whether or not partial is on', () => {
+            // `missing` means "how many more the bot must acquire", so it must not move just
+            // because the available ones were banked. Only the components differ.
+            const f = fab([slot(2000, { defIndex: 5701, required: 3 })]);
+            const backpack = [part('a', 5701), part('b', 5701)];
+
+            expect(findBotComponents(f, backpack).missing).toEqual(['1× defindex 5701']);
+            expect(findBotComponents(f, backpack, { allowPartial: true }).missing).toEqual(['1× defindex 5701']);
+            expect(findBotComponents(f, backpack).components).toEqual([]);
+            expect(findBotComponents(f, backpack, { allowPartial: true }).components).toHaveLength(2);
+        });
+
+        it('banks nothing but still reports when a slot has no candidates', () => {
+            const f = fab([slot(2000, { defIndex: 5701, required: 2 })]);
+            const result = findBotComponents(f, [], { allowPartial: true });
+
+            expect(result.components).toEqual([]);
+            expect(result.missing).toEqual(['2× defindex 5701']);
+        });
+
+        it('partially fills weapon slots too, not just robot parts', () => {
+            const f = fab([slot(2000, { defIndex: 0, required: 2, conditions: cond(2025, 2) })]);
+            const result = findBotComponents(f, [weapon('ks', 2)], { allowPartial: true });
+
+            expect(ids(result)).toEqual(['ks']);
+            expect(result.missing).toEqual(['1× kt-2 killstreak weapon']);
+        });
+
+        it('fills one slot fully, another partly, and skips a covered one', () => {
+            // The realistic depot order: some slots the bot can cover, some it can't, and some the
+            // fabricator already arrived carrying.
+            const f = fab([
+                slot(2000, { defIndex: 0, required: 2, conditions: cond(2025, 2) }),
+                slot(2001, { defIndex: 5707, required: 2 }),
+                slot(2002, { defIndex: 5704, required: 1, fulfilled: 1 })
+            ]);
+            const result = findBotComponents(f, [part('f1', 5707), part('f2', 5707)], { allowPartial: true });
+
+            expect(ids(result).sort()).toEqual(['f1', 'f2']);
+            expect(result.missing).toEqual(['2× kt-2 killstreak weapon']);
+        });
+
+        it('still respects alreadyCovered, excludeIds and Non-Craftable', () => {
+            const f = fab([slot(2000, { defIndex: 5701, required: 2 })]);
+
+            expect(
+                findBotComponents(f, [part('a', 5701)], { allowPartial: true, alreadyCovered: new Map([[2000, 2]]) })
+            ).toEqual({ components: [], missing: [] });
+
+            expect(
+                findBotComponents(f, [part('a', 5701), part('nope', 5701)], {
+                    allowPartial: true,
+                    excludeIds: new Set(['nope'])
+                }).missing
+            ).toEqual(['1× defindex 5701']);
+
+            expect(
+                findBotComponents(f, [part('nc', 5701, { uncraftable: true })], { allowPartial: true }).components
+            ).toEqual([]);
+        });
+    });
+
     describe('forward compatibility: bot stocking killstreak weapons', () => {
         it('fills an uncovered weapon slot from the bot once it holds a kt-2 weapon', () => {
             // Nothing needs to change in the implementation for this to start working — the day a
