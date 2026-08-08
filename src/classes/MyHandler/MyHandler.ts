@@ -39,7 +39,7 @@ import log from '../../lib/logger';
 import * as files from '../../lib/files';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
-import { fetchTradeUrlToken, notifyComponentOffer } from '../../lib/craftingWebsiteApi';
+import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
 import { hasExcludedHalloweenSpell, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
 
 import { noiseMakers } from '../../lib/data';
@@ -2829,6 +2829,11 @@ export default class MyHandler extends Handler {
                                             .then(status => {
                                                 if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
                                                 this.releaseCraftingInFlight(allNewIds);
+                                                void notifyReturnOffer({
+                                                    steamId: partnerSteamID64,
+                                                    componentOfferId: offer.id,
+                                                    returnOfferId: returnOffer.id
+                                                });
                                             })
                                             .catch((sendErr: Error) => {
                                                 if (retriesLeft > 0) {
