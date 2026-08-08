@@ -252,6 +252,16 @@ export interface FindBotComponentsOptions {
      * rather than reported as missing -- that distinction is the whole point of a top-up.
      */
     alreadyCovered?: Map<number, number>;
+    /**
+     * Take what a slot CAN supply instead of skipping it whole. Off by default: a slot needing 3
+     * with 2 candidates contributes nothing and reports "1x ..." missing.
+     *
+     * Ingredients put into a fabricator are banked inside it rather than consumed, so a partial fill
+     * moves parts into the fabricator and hands it back closer to done -- worth doing whenever the
+     * fabricator is going home to whoever owns it. Slots are still reported in `missing` for the
+     * shortfall, so callers can say what is left outstanding.
+     */
+    allowPartial?: boolean;
 }
 
 /**
@@ -276,6 +286,18 @@ export function findBotComponents(
     const excludeIds = options.excludeIds ?? new Set<string>();
     const alreadyCovered = options.alreadyCovered;
 
+    // How many of a slot's requirement to actually claim. Without allowPartial a slot is all or
+    // nothing: falling short means taking none of it, so the caller can decide not to craft at all.
+    const howManyToTake = (available: number, needed: number): number => {
+        if (options.allowPartial) return Math.min(available, needed);
+        return available >= needed ? needed : 0;
+    };
+
+    // Deliberately NOT derived from what we take: `missing` means "how many more of this the bot
+    // would have to acquire", which is the same number whether or not we banked the ones it has.
+    // Tying it to `take` made a whole-slot skip report the entire requirement instead of the gap.
+    const shortfall = (available: number, needed: number): number => needed - Math.min(available, needed);
+
     const components: { subject_item_id: string; attribute_index: number }[] = [];
     const missing: string[] = [];
     const usedIds = new Set<string>();
@@ -296,12 +318,13 @@ export function findBotComponents(
                     !i.flag_cannot_craft &&
                     itemSatisfiesConditions(i, slot.conditionsStr)
             );
-            if (candidates.length < needed) {
+            const take = howManyToTake(candidates.length, needed);
+            const short = shortfall(candidates.length, needed);
+            if (short > 0) {
                 const requiredTier = parseRequiredAttrValue(slot.conditionsStr, ATTR_KILLSTREAK_TIER) ?? 2;
-                missing.push(`${needed - candidates.length}× kt-${requiredTier} killstreak weapon`);
-                continue;
+                missing.push(`${short}× kt-${requiredTier} killstreak weapon`);
             }
-            for (let k = 0; k < needed; k++) {
+            for (let k = 0; k < take; k++) {
                 components.push({ subject_item_id: candidates[k].id, attribute_index: slot.attributeIndex });
                 usedIds.add(candidates[k].id);
             }
@@ -318,11 +341,12 @@ export function findBotComponents(
                     !i.flag_cannot_craft &&
                     i.def_index === slot.itemDefIndex
             );
-            if (candidates.length < needed) {
-                missing.push(`${needed - candidates.length}× defindex ${slot.itemDefIndex}`);
-                continue;
+            const take = howManyToTake(candidates.length, needed);
+            const short = shortfall(candidates.length, needed);
+            if (short > 0) {
+                missing.push(`${short}× defindex ${slot.itemDefIndex}`);
             }
-            for (let k = 0; k < needed; k++) {
+            for (let k = 0; k < take; k++) {
                 components.push({ subject_item_id: candidates[k].id, attribute_index: slot.attributeIndex });
                 usedIds.add(candidates[k].id);
             }
