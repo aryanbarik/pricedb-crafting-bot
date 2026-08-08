@@ -39,7 +39,7 @@ import log from '../../lib/logger';
 import * as files from '../../lib/files';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
-import { fetchTradeUrlToken } from '../../lib/craftingWebsiteApi';
+import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
 import { hasExcludedHalloweenSpell, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
 
 import { noiseMakers } from '../../lib/data';
@@ -2650,9 +2650,9 @@ export default class MyHandler extends Handler {
                                 newFabsFromDiff.forEach((i: any) => this.claimedIntakeFabricatorIds.add(String(i.id)));
 
                                 if (newFabsFromDiff.length === 1) {
-                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0]);
+                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0], offer.id);
                                 } else {
-                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff);
+                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff, offer.id);
                                 }
                             };
 
@@ -2829,6 +2829,11 @@ export default class MyHandler extends Handler {
                                             .then(status => {
                                                 if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
                                                 this.releaseCraftingInFlight(allNewIds);
+                                                void notifyReturnOffer({
+                                                    steamId: partnerSteamID64,
+                                                    componentOfferId: offer.id,
+                                                    returnOfferId: returnOffer.id
+                                                });
                                             })
                                             .catch((sendErr: Error) => {
                                                 if (retriesLeft > 0) {
@@ -3114,7 +3119,7 @@ export default class MyHandler extends Handler {
      * and sends a follow-up offer requesting whatever subset they have (partial fulfillment is
      * fine; the existing craft pipeline already tolerates unfilled slots).
      */
-    private async handleCraftingIntake(partner: SteamID, fab: any): Promise<void> {
+    private async handleCraftingIntake(partner: SteamID, fab: any, intakeOfferId?: string): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
         this.heldIntakeFabricators.delete(String(fab.id));
         // See fetchTradeUrlToken: every offer this method sends is initiated by us, not the
@@ -3334,6 +3339,13 @@ export default class MyHandler extends Handler {
                         log.info(
                             `[craftingService] Intake: sent components offer ${componentOffer.id} to ${partnerSteamID64} (${result.assetIds.length} item(s), missing: ${result.missing.join(', ') || 'none'})`
                         );
+                        if (intakeOfferId) {
+                            void notifyComponentOffer({
+                                steamId: partnerSteamID64,
+                                intakeOfferId,
+                                componentOfferId: componentOffer.id
+                            });
+                        }
                     })
                     .catch((sendErr: Error) => {
                         if (retriesLeft > 0) {
@@ -3363,7 +3375,7 @@ export default class MyHandler extends Handler {
      * usedIds Set so the same owned item can't be requested for two different fabricators' slots.
      * Sends one combined follow-up offer instead of one per fabricator.
      */
-    private async handleCraftingIntakeBatch(partner: SteamID, fabs: any[]): Promise<void> {
+    private async handleCraftingIntakeBatch(partner: SteamID, fabs: any[], intakeOfferId?: string): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
         const fabIds = fabs.map(fab => String(fab.id));
         fabIds.forEach(id => this.heldIntakeFabricators.delete(id));
@@ -3580,6 +3592,13 @@ export default class MyHandler extends Handler {
                     log.info(
                         `[craftingService] Intake (batch): sent components offer ${offer.id} to ${partnerSteamID64} for ${chunkFabIds.length} fabricator(s) (${chunkAssetIds.length} item(s))`
                     );
+                    if (intakeOfferId) {
+                        void notifyComponentOffer({
+                            steamId: partnerSteamID64,
+                            intakeOfferId,
+                            componentOfferId: offer.id
+                        });
+                    }
                 } catch (sendErr) {
                     // Capacity-check uses the raw message (the snippet only ever appears there);
                     // logging uses the decoded eresult/cause version for diagnosability.

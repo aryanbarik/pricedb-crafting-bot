@@ -36,3 +36,43 @@ export async function fetchTradeUrlToken(steamID64: string): Promise<string | un
         return undefined;
     }
 }
+
+/**
+ * Tell the crafting website that the follow-up offer requesting components is ready. The website
+ * matches it to the initial intake offer and exposes the canonical Steam link to its owner.
+ * Notification failure must never interfere with an already-sent Steam offer.
+ */
+export async function notifyComponentOffer(params: {
+    steamId: string;
+    intakeOfferId: string;
+    componentOfferId: string;
+}): Promise<void> {
+    if (!API_KEY) return;
+
+    try {
+        await axios.post(`${WEBSITE_URL}/api/internal/component-offer`, params, {
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            timeout: 5000
+        });
+    } catch (err) {
+        console.warn('[craftingWebsiteApi] Failed to report components offer:', (err as Error).message);
+    }
+}
+
+/** Report a final crafted-result return offer without disrupting the completed Steam trade. */
+export async function notifyReturnOffer(params: {
+    steamId: string;
+    componentOfferId: string;
+    returnOfferId: string;
+}): Promise<void> {
+    if (!API_KEY) return;
+
+    try {
+        await axios.post(`${WEBSITE_URL}/api/internal/return-offer`, params, {
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            timeout: 5000
+        });
+    } catch (err) {
+        console.warn('[craftingWebsiteApi] Failed to report return offer:', (err as Error).message);
+    }
+}
