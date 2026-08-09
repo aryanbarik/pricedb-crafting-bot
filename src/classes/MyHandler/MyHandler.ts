@@ -2480,8 +2480,8 @@ export default class MyHandler extends Handler {
                     }
                 }
 
-                // If a customer declines our follow-up parts-request offer, the fabricator(s) it
-                // was requesting parts FOR are already sitting in the bot's own backpack (received
+                // If our follow-up parts-request offer dies without being accepted, the fabricator(s)
+                // it was requesting parts FOR are already sitting in the bot's own backpack (received
                 // in the earlier, already-accepted intake trade) — nothing else ever returns them.
                 // Deliberately a sibling of the notify-gated block above, not nested inside it:
                 // this.componentOffer (like every crafting-service offer WE send) never gets
@@ -2489,10 +2489,22 @@ export default class MyHandler extends Handler {
                 // line 632) — so nesting this inside that gate would mean it silently never fires
                 // for the offers that actually matter here. Matches how the sibling Accepted-side
                 // craft-triggering block just below already handles this same problem.
-                if (
-                    offer.state === TradeOfferManager.ETradeOfferState['Declined'] &&
-                    !offer.data('craftingServiceDeclineHandled')
-                ) {
+                //
+                // Every terminal non-accepted state counts, not just Declined. A components offer
+                // reaching Canceled (6) instead of Declined (7) is routine — Steam cancels it when
+                // the requested items stop being available, and the sender can cancel it outright —
+                // yet checking Declined alone silently retained a customer's 7 fabricators on
+                // 2026-08-09 with no return and no message. CanceledBySecondFactor (10) is the same
+                // hole for offers that die at mobile confirmation, and InvalidItems (8) for ones
+                // whose contents go stale.
+                const OFFER_DEAD_STATES = [
+                    TradeOfferManager.ETradeOfferState['Declined'],
+                    TradeOfferManager.ETradeOfferState['Canceled'],
+                    TradeOfferManager.ETradeOfferState['CanceledBySecondFactor'],
+                    TradeOfferManager.ETradeOfferState['InvalidItems'],
+                    TradeOfferManager.ETradeOfferState['Expired']
+                ];
+                if (OFFER_DEAD_STATES.includes(offer.state) && !offer.data('craftingServiceDeclineHandled')) {
                     const craftingService = offer.data('craftingService') as
                         | { phase?: string; fabricatorAssetIds?: string[] }
                         | undefined;
@@ -2504,14 +2516,21 @@ export default class MyHandler extends Handler {
                         const stillOwned = fabricatorAssetIds.filter(id => backpack.some((i: any) => String(i.id) === id));
 
                         if (stillOwned.length > 0) {
-                            log.info(`[craftingService] Parts request declined by ${partnerSteamID64} — returning ${stillOwned.length} fabricator(s): ${stillOwned.join(', ')}`);
+                            const stateName = String(TradeOfferManager.ETradeOfferState[offer.state] ?? offer.state);
+                            const fabList = stillOwned.join(', ');
+                            log.info(
+                                `[craftingService] Parts request ended as ${stateName} for ${partnerSteamID64} — ` +
+                                    `returning ${stillOwned.length} fabricator(s): ${fabList}`
+                            );
                             void (async () => {
                                 const token = await fetchTradeUrlToken(partnerSteamID64);
                                 const returnOffer = this.bot.manager.createOffer(offer.partner, token);
                                 returnOffer.data('dict', this.craftingDict(stillOwned, []));
                                 stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                                // Deliberately does not say "you declined" — this now also covers
+                                // offers Steam cancelled or expired, which the customer did not do.
                                 returnOffer.setMessage(
-                                    `You declined the parts request, so here's your fabricator${stillOwned.length > 1 ? 's' : ''} back — re-send whenever you're ready!`
+                                    `The parts request didn't go through, so here's your fabricator${stillOwned.length > 1 ? 's' : ''} back — re-send whenever you're ready!`
                                 );
 
                                 const attemptSend = (retriesLeft: number): void => {
