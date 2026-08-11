@@ -2647,9 +2647,25 @@ export default class MyHandler extends Handler {
                                     }
                                     log.warn(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length} after ${attempt} attempts`);
                                     if (newFabsFromDiff.length === 0) {
+                                        // The fabricators are still in the backpack — the offer was accepted, so
+                                        // they are the bot's problem now whether or not the diff could see them.
+                                        // Telling only the customer to "contact the bot owner" left nobody
+                                        // actually contacting the bot owner: on 2026-08-10 that stranded 28
+                                        // fabricators for hours with no alert anywhere. Alert admins with what
+                                        // they need to recover them by hand.
+                                        //
+                                        // Nothing goes into heldIntakeFabricators here, unlike the ambiguous
+                                        // branch below: that map is keyed by asset id and we have not identified
+                                        // a single one. The ids in the offer are the *customer's* pre-trade ids,
+                                        // which Steam reassigns on transfer, so they cannot be held either.
+                                        log.warn(`[craftingService] Intake: ${expectedCount} fabricator(s) from ${partnerSteamID64} are unaccounted for — offer ${offer.id} was accepted but none appeared in the backpack`);
+                                        this.bot.messageAdmins(
+                                            `⚠️ Intake failed for ${expectedCount} fabricator(s) from ${partnerSteamID64} (offer ${offer.id}) — accepted, but none showed up in the GC backpack. They are still in the bot. Find them with !dumpattrs name=fabricator, then return them with !returnitems steamid=${partnerSteamID64} assetids=<id,id,...>.`,
+                                            []
+                                        );
                                         this.bot.sendMessage(
                                             offer.partner,
-                                            `⚠️ Something went wrong receiving your fabricator(s) — please contact the bot owner.`
+                                            `⚠️ Something went wrong receiving your fabricator(s) — the owner has been alerted and will sort it out. Nothing is lost.`
                                         );
                                     } else {
                                         // Found candidate fabricator(s), just couldn't tell which one(s)
