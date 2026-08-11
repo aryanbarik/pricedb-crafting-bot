@@ -1503,7 +1503,7 @@ export default class Commands {
 
     // Diagnostic command: dumps every raw GC attribute on an item already in the bot's own backpack.
     // Usage: !dumpattrs assetid=<id>  OR  !dumpattrs name=<partial item name>
-    private dumpAttrsCommand(steamID: SteamID, message: string): void {
+    private async dumpAttrsCommand(steamID: SteamID, message: string): Promise<void> {
         const params = CommandParser.parseParams(CommandParser.removeCommand(removeLinkProtocol(message)));
         const assetid =
             typeof params.assetid === 'string'
@@ -1517,6 +1517,12 @@ export default class Commands {
             return this.bot.sendMessage(steamID, '❌ Usage: !dumpattrs assetid=<id>  OR  !dumpattrs name=<partial item name>');
         }
 
+        // This is the command an admin reaches for when items have gone missing, so it must not be
+        // able to answer "not there" from a lapsed GC session — that is indistinguishable from the
+        // item genuinely being gone, and sends the investigation in the wrong direction.
+        await this.bot.tf2gc.ensureFreshBackpack().catch((err: Error) => {
+            log.warn(`dumpattrs: could not refresh the GC backpack, results may be stale: ${err.message}`);
+        });
         const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
 
         const matches = assetid

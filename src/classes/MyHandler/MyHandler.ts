@@ -2512,17 +2512,21 @@ export default class MyHandler extends Handler {
                         offer.data('craftingServiceDeclineHandled', true);
                         const partnerSteamID64 = offer.partner.getSteamID64();
                         const fabricatorAssetIds = craftingService.fabricatorAssetIds as string[];
-                        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
-                        const stillOwned = fabricatorAssetIds.filter(id => backpack.some((i: any) => String(i.id) === id));
 
-                        if (stillOwned.length > 0) {
-                            const stateName = String(TradeOfferManager.ETradeOfferState[offer.state] ?? offer.state);
-                            const fabList = stillOwned.join(', ');
-                            log.info(
-                                `[craftingService] Parts request ended as ${stateName} for ${partnerSteamID64} — ` +
-                                    `returning ${stillOwned.length} fabricator(s): ${fabList}`
-                            );
-                            void (async () => {
+                        void (async () => {
+                            // Fresh read: a lapsed GC session would report every one of these ids as
+                            // no longer owned, turning "return the customer's fabricators" into a
+                            // silent no-op — the same failure this branch exists to prevent.
+                            const backpack = await this.freshGCBackpack();
+                            const stillOwned = fabricatorAssetIds.filter(id => backpack.some((i: any) => String(i.id) === id));
+
+                            if (stillOwned.length > 0) {
+                                const stateName = String(TradeOfferManager.ETradeOfferState[offer.state] ?? offer.state);
+                                const fabList = stillOwned.join(', ');
+                                log.info(
+                                    `[craftingService] Parts request ended as ${stateName} for ${partnerSteamID64} — ` +
+                                        `returning ${stillOwned.length} fabricator(s): ${fabList}`
+                                );
                                 const token = await fetchTradeUrlToken(partnerSteamID64);
                                 const returnOffer = this.bot.manager.createOffer(offer.partner, token);
                                 returnOffer.data('dict', this.craftingDict(stillOwned, []));
@@ -2554,8 +2558,8 @@ export default class MyHandler extends Handler {
                                         });
                                 };
                                 attemptSend(3);
-                            })();
-                        }
+                            }
+                        })();
                     }
                 }
 
@@ -2619,8 +2623,8 @@ export default class MyHandler extends Handler {
                             // follow-up offer requesting matching components.
                             const expectedCount = craftingService.fabricatorAssetIds.length;
 
-                            const attemptIntakeDiff = (attempt: number): void => {
-                                const currentBackpack: any[] = (this.bot.tf2 as any).backpack ?? [];
+                            const attemptIntakeDiff = async (attempt: number): Promise<void> => {
+                                const currentBackpack = await this.freshGCBackpack();
                                 const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
 
                                 // Exclude fabricators another (sibling) intake offer's own diff already
@@ -2638,7 +2642,7 @@ export default class MyHandler extends Handler {
                                 if (newFabsFromDiff.length !== expectedCount) {
                                     if (attempt < 3) {
                                         log.debug(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length} — retrying in 5s (attempt ${attempt + 1}/3)`);
-                                        setTimeout(() => attemptIntakeDiff(attempt + 1), 5000);
+                                        setTimeout(() => void attemptIntakeDiff(attempt + 1), 5000);
                                         return;
                                     }
                                     log.warn(`[craftingService] Intake: expected ${expectedCount} new fabricator(s), found ${newFabsFromDiff.length} after ${attempt} attempts`);
@@ -2675,12 +2679,12 @@ export default class MyHandler extends Handler {
                                 }
                             };
 
-                            setTimeout(() => attemptIntakeDiff(1), 5000);
+                            setTimeout(() => void attemptIntakeDiff(1), 5000);
                             return;
                         }
 
-                        setTimeout(() => {
-                            const currentBackpack: any[] = (this.bot.tf2 as any).backpack ?? [];
+                        setTimeout(async () => {
+                            const currentBackpack = await this.freshGCBackpack();
                             const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
                             const allNewIds = newItems.map((i: any) => String(i.id));
 
@@ -3939,6 +3943,33 @@ export default class MyHandler extends Handler {
     }
 
     /**
+     * The GC backpack, reconnecting first if the session has lapsed. See
+     * TF2GC.ensureFreshBackpack for why a plain `bot.tf2.backpack` read can be arbitrarily old.
+     *
+     * Use this anywhere the answer decides an item's fate — what a trade delivered, what is still
+     * owed, what to send back. A stale read there does not fail loudly; it reports an empty diff or
+     * a missing asset id, which reads exactly like "the customer sent nothing" or "we already
+     * returned it". Reads that only annotate something already decided (a log line, a summary
+     * dict) can keep using the raw array, since being out of date costs nothing there.
+     *
+     * Falls back to the possibly-stale array if the reconnect fails rather than throwing: callers
+     * are mid-trade and a degraded answer beats an unhandled rejection that abandons the offer.
+     * The warning is the signal that a result from this path should not be trusted.
+     */
+    private async freshGCBackpack(): Promise<any[]> {
+        try {
+            await this.bot.tf2gc.ensureFreshBackpack();
+        } catch (err) {
+            log.warn(
+                `[craftingService] Could not refresh the GC backpack — proceeding with a possibly stale view: ${
+                    (err as Error).message
+                }`
+            );
+        }
+        return ((this.bot.tf2 as any).backpack as any[]) ?? [];
+    }
+
+    /**
      * Re-runs the intake step for a fabricator that got stuck after exhausting inventory-fetch
      * retries (see heldIntakeFabricators). Wired to the admin-only !retryintake command.
      */
@@ -3948,7 +3979,7 @@ export default class MyHandler extends Handler {
             return `❌ No held fabricator found with assetid ${fabAssetId}.`;
         }
 
-        const fab = (((this.bot.tf2 as any).backpack as any[]) ?? []).find((i: any) => String(i.id) === fabAssetId);
+        const fab = (await this.freshGCBackpack()).find((i: any) => String(i.id) === fabAssetId);
         if (!fab) {
             return `❌ Fabricator ${fabAssetId} is no longer in the bot's backpack (already processed or traded away?).`;
         }
@@ -3971,7 +4002,9 @@ export default class MyHandler extends Handler {
             return `❌ No held fabricator found with assetid ${fabAssetId}. If it's stuck from before a restart, pass steamid=<64>.`;
         }
 
-        const fab = (((this.bot.tf2 as any).backpack as any[]) ?? []).find((i: any) => String(i.id) === fabAssetId);
+        // Fresh read before clearing the hold below — a stale miss here would drop the only record
+        // that this fabricator belongs to someone.
+        const fab = (await this.freshGCBackpack()).find((i: any) => String(i.id) === fabAssetId);
         if (!fab) {
             this.heldIntakeFabricators.delete(fabAssetId);
             return `❌ Fabricator ${fabAssetId} is no longer in the bot's backpack (already processed or traded away?). Cleared the hold.`;
@@ -4197,7 +4230,7 @@ export default class MyHandler extends Handler {
             return `❌ No held return items found for steamID ${partnerSteamID64}.`;
         }
 
-        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        const backpack = await this.freshGCBackpack();
         const stillOwned = heldIds.filter(id => backpack.some((i: any) => String(i.id) === id));
         const missing = heldIds.filter(id => !stillOwned.includes(id));
 
@@ -4235,7 +4268,11 @@ export default class MyHandler extends Handler {
     // actually still sitting untouched in the backpack — leaving them permanently untracked and
     // unreturned until manually recovered here. Wired to the admin-only !returnitems command.
     async forceReturnItems(partnerSteamID64: string, assetIds: string[]): Promise<string> {
-        const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+        // On 2026-08-10 this reported all 28 of a customer's fabricators as absent while Steam's
+        // inventory API showed every one of them present — the GC session had lapsed hours earlier.
+        // The recovery tool reading the same stale cache as the bug it recovers from is worth
+        // guarding against specifically.
+        const backpack = await this.freshGCBackpack();
         const stillOwned = assetIds.filter(id => backpack.some((i: any) => String(i.id) === id));
         const missing = assetIds.filter(id => !stillOwned.includes(id));
 
@@ -4285,7 +4322,7 @@ export default class MyHandler extends Handler {
             }
 
             for (const [partnerSteamID64, fabAssetIds] of heldByPartner) {
-                const backpack = ((this.bot.tf2 as any).backpack as any[]) ?? [];
+                const backpack = await this.freshGCBackpack();
                 const fabs = fabAssetIds
                     .map(id => backpack.find((i: any) => String(i.id) === id))
                     .filter((f): f is any => !!f);

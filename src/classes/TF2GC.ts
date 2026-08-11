@@ -1259,6 +1259,48 @@ export default class TF2GC {
         return true;
     }
 
+    /**
+     * Resolves once `bot.tf2.backpack` can be trusted to describe what the bot actually owns.
+     *
+     * node-tf2 assigns `backpack` exactly once per GC session, from SOCacheSubscribed
+     * (`handlers.js:154`), and thereafter only mutates it in response to itemAcquired /
+     * itemChanged / itemRemoved. When the GC session ends it clears `haveGCSession` and emits
+     * `disconnectedFromGC` but leaves `backpack` untouched — so the array silently stops tracking
+     * reality instead of emptying or flagging itself. Every read after that point looks completely
+     * normal and returns the last snapshot, however old.
+     *
+     * That is not theoretical: on 2026-08-10 the session lapsed during a 7.5h idle stretch, the
+     * backpack froze at 705 items, and 28 fabricators a customer had just traded in were invisible
+     * to the intake diff. It reported "0 new items" three times and abandoned them, while Steam's
+     * own inventory API showed all 733 items present. Retrying for longer could never have helped —
+     * no session means no events means nothing to observe.
+     *
+     * `haveGCSession` is the only signal node-tf2 offers, so anything deciding item ownership has
+     * to consult it first. Waiting on `backpackLoaded` rather than `connectedToGC` is deliberate:
+     * ClientWelcome fires first and only proves a session exists, while SOCacheSubscribed is what
+     * actually replaces the array we are about to read.
+     */
+    ensureFreshBackpack(): Promise<void> {
+        if (this.bot.tf2.haveGCSession) {
+            // Live session — incremental item events have been keeping the array current.
+            return Promise.resolve();
+        }
+
+        log.debug('ensureFreshBackpack: no GC session, backpack is a stale snapshot — reconnecting');
+
+        // Subscribed before connectToGC resolves, because SOCacheSubscribed can arrive in the same
+        // tick as ClientWelcome; registering afterwards would miss it and stall until the timeout.
+        const backpackLoaded = new Promise<void>((resolve, reject) => {
+            this.listenForEvent(
+                'backpackLoaded',
+                () => resolve(),
+                (err: Error) => reject(err)
+            );
+        });
+
+        return this.connectToGC().then(() => backpackLoaded);
+    }
+
     private connectToGC(): Promise<void> {
         return new Promise((resolve, reject) => {
             if (!this.isConnectedToGC) {
