@@ -73,6 +73,10 @@ const filterReasons = (reasons: string[]) => {
     return [...filtered];
 };
 
+// Bucket key for crafting-offer items whose SKU can't be resolved. Not a valid price key, so
+// summarizeOffer's testPriceKey() short-circuits to printing it literally rather than throwing.
+const UNRESOLVED_DICT_KEY = 'unknown item';
+
 
 export default class MyHandler extends Handler {
     readonly commands: Commands;
@@ -3399,7 +3403,7 @@ export default class MyHandler extends Handler {
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
             const componentOffer = this.bot.manager.createOffer(partner, token);
-            this.prepareCraftingOffer(componentOffer, [], result.assetIds);
+            this.prepareCraftingOffer(componentOffer, [], result.assetIds, theirInventory);
             result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
             componentOffer.data('craftingService', {
                 phase: 'components',
@@ -3650,7 +3654,7 @@ export default class MyHandler extends Handler {
                 const chunkMissing = group.filter(g => g.missing.length > 0);
 
                 const offer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(offer, [], chunkAssetIds);
+                this.prepareCraftingOffer(offer, [], chunkAssetIds, theirInventory);
                 chunkAssetIds.forEach(assetid => offer.addTheirItem({ appid: 440, contextid: '2', assetid }));
                 offer.data('craftingService', {
                     phase: 'components',
@@ -3818,7 +3822,7 @@ export default class MyHandler extends Handler {
         const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
         const requestOffer = this.bot.manager.createOffer(partner, token);
         const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
-        this.prepareCraftingOffer(requestOffer, [], requestedIds);
+        this.prepareCraftingOffer(requestOffer, [], requestedIds, theirInventory);
         requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
         // Only preTradeIds is kept — `pairs` was computed against the customer's PRE-trade asset
         // IDs, which Steam always reassigns once the items land in the bot's own backpack. Storing
@@ -4085,10 +4089,23 @@ export default class MyHandler extends Handler {
     // It's normally set by the Cart classes or by onNewTradeOffer's own evaluation — neither of
     // which runs for offers the crafting service creates directly via manager.createOffer(). Keys
     // need to be actual SKUs (not raw asset IDs) for getSummary() in summarizeOffer.ts to resolve a
-    // real item name instead of printing the bare asset ID — resolve each ID against the bot's
-    // current GC backpack for a defindex/quality, falling back to the raw ID only if the item can't
-    // be found there (e.g. it already left the backpack by the time this runs).
-    private craftingDict(giveIds: string[], receiveIds: string[]): { our: Record<string, number>; their: Record<string, number> } {
+    // real item name instead of printing the bare asset ID.
+    //
+    // The two sides resolve from different places. Items the bot gives away are in its GC backpack;
+    // items the bot *asks for* are still in the partner's inventory and are never in that backpack,
+    // so a caller that requests items has to pass `theirInventory` for them to resolve at all.
+    //
+    // Anything that resolves nowhere is counted under one shared key rather than under its own
+    // asset ID, because a per-ID key makes the dict grow with the size of the offer. That is what
+    // broke on 2026-08-11: components offers requesting ~240 parts had no partner inventory to
+    // resolve against, so each part became its own key, producing 240 "Failed to add null
+    // (<assetid>)" warnings from updateListings.ts and a 3143-character Discord summary that
+    // Discord's 2000-character limit rejected — which killed the admin alert riding on it too.
+    private craftingDict(
+        giveIds: string[],
+        receiveIds: string[],
+        theirInventory?: Inventory
+    ): { our: Record<string, number>; their: Record<string, number> } {
         const backpack: any[] = ((this.bot.tf2 as any).backpack as any[]) ?? [];
         const toCounts = (ids: string[]): Record<string, number> => {
             const counts: Record<string, number> = {};
@@ -4096,7 +4113,7 @@ export default class MyHandler extends Handler {
                 const item = backpack.find((i: any) => String(i.id) === id);
                 const key = item
                     ? `${item.def_index};${item.quality ?? 6}${item.flag_cannot_craft ? ';uncraftable' : ''}`
-                    : id;
+                    : theirInventory?.findByAssetid(id) ?? UNRESOLVED_DICT_KEY;
                 counts[key] = (counts[key] ?? 0) + 1;
             }
             return counts;
@@ -4242,9 +4259,16 @@ export default class MyHandler extends Handler {
      *
      * Only tagged when giveIds is non-empty: the same helper serves parts-request and intake
      * offers, where the bot is receiving rather than returning and a cancellation costs nothing.
+     *
+     * `theirInventory` is only needed when receiveIds is non-empty — see craftingDict for why.
      */
-    private prepareCraftingOffer(offer: TradeOffer, giveIds: string[], receiveIds: string[]): void {
-        offer.data('dict', this.craftingDict(giveIds, receiveIds));
+    private prepareCraftingOffer(
+        offer: TradeOffer,
+        giveIds: string[],
+        receiveIds: string[],
+        theirInventory?: Inventory
+    ): void {
+        offer.data('dict', this.craftingDict(giveIds, receiveIds, theirInventory));
         if (giveIds.length > 0) {
             offer.data('craftingServiceReturn', { assetIds: giveIds });
         }
