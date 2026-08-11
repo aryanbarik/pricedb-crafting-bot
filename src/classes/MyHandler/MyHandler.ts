@@ -2529,7 +2529,7 @@ export default class MyHandler extends Handler {
                                 );
                                 const token = await fetchTradeUrlToken(partnerSteamID64);
                                 const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                returnOffer.data('dict', this.craftingDict(stillOwned, []));
+                                this.prepareCraftingOffer(returnOffer, stillOwned, []);
                                 stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                 // Deliberately does not say "you declined" — this now also covers
                                 // offers Steam cancelled or expired, which the customer did not do.
@@ -2560,6 +2560,37 @@ export default class MyHandler extends Handler {
                                 attemptSend(3);
                             }
                         })();
+                    }
+
+                    // A return offer that died on its own. Sending one only means Steam created it;
+                    // TradeOfferManager's cancelTime (Bot.ts:343) withdraws anything unaccepted after
+                    // 15 minutes, and the partner can decline or let it expire. In every case the
+                    // items come straight back to the bot, untracked — heldReturnItems is only
+                    // populated when the *send* throws, which this is not.
+                    const craftingReturn = offer.data('craftingServiceReturn') as { assetIds?: string[] } | undefined;
+                    const returnedIds = craftingReturn?.assetIds ?? [];
+                    if (returnedIds.length > 0 && !offer.data('craftingServiceReturnDeathHandled')) {
+                        offer.data('craftingServiceReturnDeathHandled', true);
+                        const partnerSteamID64 = offer.partner.getSteamID64();
+                        const assetIds = returnedIds;
+                        const stateName = String(TradeOfferManager.ETradeOfferState[offer.state] ?? offer.state);
+                        log.warn(
+                            `[craftingService] Return offer ${offer.id} to ${partnerSteamID64} ended as ${stateName} — ` +
+                                `${assetIds.length} item(s) are still in the bot: ${assetIds.join(', ')}`
+                        );
+                        // Re-held rather than auto-resent: a cancelTime expiry means the partner was
+                        // not there to accept, and immediately firing another offer that expires the
+                        // same way just burns 15 minutes again. The periodic sweep and !retryreturn
+                        // both pick it up from here.
+                        this.holdReturnItems(partnerSteamID64, assetIds, `a return offer ended as ${stateName}`);
+                        const why =
+                            offer.state === TradeOfferManager.ETradeOfferState['Declined']
+                                ? 'was declined'
+                                : 'expired before it was accepted';
+                        this.bot.sendMessage(
+                            offer.partner,
+                            `Your items didn't make it back — that offer ${why}. They're safe with me; I'll send another shortly.`
+                        );
                     }
                 }
 
@@ -2752,7 +2783,7 @@ export default class MyHandler extends Handler {
                                     ? allNewIds
                                     : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
                                 const refundOffer = this.bot.manager.createOffer(offer.partner, token);
-                                refundOffer.data('dict', this.craftingDict(refundIds, []));
+                                this.prepareCraftingOffer(refundOffer, refundIds, []);
                                 refundIds.forEach(id =>
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                 );
@@ -2838,7 +2869,7 @@ export default class MyHandler extends Handler {
                                         return;
                                     }
                                     const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                    returnOffer.data('dict', this.craftingDict(returnIds, []));
+                                    this.prepareCraftingOffer(returnOffer, returnIds, []);
                                     returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
 
                                     let msg: string;
@@ -3046,7 +3077,7 @@ export default class MyHandler extends Handler {
                                         // Kit-only trade — return the resulting KS weapons directly
                                         log.info(`[craftingService] Kit-only trade — returning ${resultWeaponIds.length} KS weapon(s)`);
                                         const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                        returnOffer.data('dict', this.craftingDict(resultWeaponIds, []));
+                                        this.prepareCraftingOffer(returnOffer, resultWeaponIds, []);
                                         resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
                                         const attemptSend = (retriesLeft: number): void => {
@@ -3246,7 +3277,7 @@ export default class MyHandler extends Handler {
             if (fetchErr) {
                 log.warn(`[craftingService] Intake: giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
+                this.prepareCraftingOffer(returnOffer, [String(fab.id)], []);
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
                     `⚠️ Failed to load your inventory 3x — Steam may be down, or it's private. Fabricator returned; make it public and re-send.`
@@ -3342,7 +3373,7 @@ export default class MyHandler extends Handler {
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                returnOffer.data('dict', this.craftingDict([String(fab.id)], []));
+                this.prepareCraftingOffer(returnOffer, [String(fab.id)], []);
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 // result.missing can list several unbounded slot descriptions — kept out of the
                 // customer-facing message (still logged above) so this can't exceed Steam's 128-char cap.
@@ -3368,7 +3399,7 @@ export default class MyHandler extends Handler {
 
             const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
             const componentOffer = this.bot.manager.createOffer(partner, token);
-            componentOffer.data('dict', this.craftingDict([], result.assetIds));
+            this.prepareCraftingOffer(componentOffer, [], result.assetIds);
             result.assetIds.forEach(assetid => componentOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
             componentOffer.data('craftingService', {
                 phase: 'components',
@@ -3472,7 +3503,7 @@ export default class MyHandler extends Handler {
             if (fetchErr) {
                 log.warn(`[craftingService] Intake (batch): giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                returnOffer.data('dict', this.craftingDict(fabIds, []));
+                this.prepareCraftingOffer(returnOffer, fabIds, []);
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     `⚠️ Failed to load your inventory 3x — Steam may be down, or it's private. Fabricators returned; make it public and re-send.`
@@ -3579,7 +3610,7 @@ export default class MyHandler extends Handler {
             if (masterAssetIds.length === 0) {
                 log.info(`[craftingService] Intake (batch): no matching components found for ${partnerSteamID64} — returning ${fabIds.length} fabricator(s)`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                returnOffer.data('dict', this.craftingDict(fabIds, []));
+                this.prepareCraftingOffer(returnOffer, fabIds, []);
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     `You don't own any of the parts for these fabricators. They're being returned — trade them back once you have the parts!`
@@ -3619,7 +3650,7 @@ export default class MyHandler extends Handler {
                 const chunkMissing = group.filter(g => g.missing.length > 0);
 
                 const offer = this.bot.manager.createOffer(partner, token);
-                offer.data('dict', this.craftingDict([], chunkAssetIds));
+                this.prepareCraftingOffer(offer, [], chunkAssetIds);
                 chunkAssetIds.forEach(assetid => offer.addTheirItem({ appid: 440, contextid: '2', assetid }));
                 offer.data('craftingService', {
                     phase: 'components',
@@ -3787,7 +3818,7 @@ export default class MyHandler extends Handler {
         const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
         const requestOffer = this.bot.manager.createOffer(partner, token);
         const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
-        requestOffer.data('dict', this.craftingDict([], requestedIds));
+        this.prepareCraftingOffer(requestOffer, [], requestedIds);
         requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
         // Only preTradeIds is kept — `pairs` was computed against the customer's PRE-trade asset
         // IDs, which Steam always reassigns once the items land in the bot's own backpack. Storing
@@ -3901,7 +3932,7 @@ export default class MyHandler extends Handler {
                     return;
                 }
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                returnOffer.data('dict', this.craftingDict(returnIds, []));
+                this.prepareCraftingOffer(returnOffer, returnIds, []);
                 returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     failedPairIds.length > 0
@@ -4030,7 +4061,7 @@ export default class MyHandler extends Handler {
         // See fetchTradeUrlToken on handleCraftingIntake above.
         const token = await fetchTradeUrlToken(partnerSteamID64);
         const returnOffer = this.bot.manager.createOffer(partner, token);
-        returnOffer.data('dict', this.craftingDict([fabAssetId], []));
+        this.prepareCraftingOffer(returnOffer, [fabAssetId], []);
         returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: fabAssetId });
         returnOffer.setMessage(`Here's your fabricator back — we weren't able to process it automatically.`);
 
@@ -4042,7 +4073,9 @@ export default class MyHandler extends Handler {
                 partner,
                 `Your fabricator has been returned — sorry for the delay! Feel free to re-send it if you'd like to try again.`
             );
-            return `✅ Returned fabricator ${fabAssetId} to ${partnerSteamID64}.`;
+            // "Sent", not "returned": the offer still has to be accepted, and cancelTime withdraws
+            // it after 15 minutes if it isn't.
+            return `✅ Sent fabricator ${fabAssetId} back to ${partnerSteamID64} — they still need to accept it.`;
         } catch (err) {
             return `❌ Failed to return fabricator ${fabAssetId} to ${partnerSteamID64}: ${this.describeSendError(err)}. Still held — try again.`;
         }
@@ -4183,13 +4216,38 @@ export default class MyHandler extends Handler {
         affectedSkus.forEach(sku => this.bot.listings.checkByPriceKey({ priceKey: sku }));
     }
 
-    private holdReturnItems(partnerSteamID64: string, assetIds: string[]): void {
+    private holdReturnItems(partnerSteamID64: string, assetIds: string[], reason = 'a return send failed'): void {
         const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
         this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
         this.bot.messageAdmins(
-            `⚠️ Held ${assetIds.length} item(s) for ${partnerSteamID64} after a return send failed: ${assetIds.join(', ')}. Use !retryreturn steamid=${partnerSteamID64}.`,
+            `⚠️ Held ${assetIds.length} item(s) for ${partnerSteamID64} after ${reason}: ${assetIds.join(', ')}. Use !retryreturn steamid=${partnerSteamID64}.`,
             []
         );
+    }
+
+    /**
+     * Stamps an outgoing crafting-service offer with its dict and, when it is shipping items out,
+     * marks it as a return so onTradeOfferChanged can notice if it later dies.
+     *
+     * Sending an offer only means Steam accepted the *creation* of one. TradeOfferManager is
+     * constructed with `cancelTime: 15 * 60 * 1000` (Bot.ts:343), so any offer the partner has not
+     * accepted within 15 minutes is withdrawn automatically and the items land back in the bot.
+     * Until now nothing watched for that: heldReturnItems was only populated when sendOffer threw,
+     * so an offer that sent cleanly and was cancelled a quarter of an hour later left its items
+     * untracked, unreturned, and already reported as delivered.
+     *
+     * That is not hypothetical — offer 9293465568 carried 28 fabricators back to a customer on
+     * 2026-08-11, went Active at 02:26:30, was auto-cancelled at 02:41:27, and the fabricators sat
+     * in the bot afterwards with an admin-facing "✅ Returned 28 item(s)" already sent.
+     *
+     * Only tagged when giveIds is non-empty: the same helper serves parts-request and intake
+     * offers, where the bot is receiving rather than returning and a cancellation costs nothing.
+     */
+    private prepareCraftingOffer(offer: TradeOffer, giveIds: string[], receiveIds: string[]): void {
+        offer.data('dict', this.craftingDict(giveIds, receiveIds));
+        if (giveIds.length > 0) {
+            offer.data('craftingServiceReturn', { assetIds: giveIds });
+        }
     }
 
     // Alerts admins (Steam + Discord) whenever a fabricator gets stuck at the intake step —
@@ -4259,7 +4317,7 @@ export default class MyHandler extends Handler {
         // See fetchTradeUrlToken on handleCraftingIntake above.
         const token = await fetchTradeUrlToken(partnerSteamID64);
         const returnOffer = this.bot.manager.createOffer(partner, token);
-        returnOffer.data('dict', this.craftingDict(stillOwned, []));
+        this.prepareCraftingOffer(returnOffer, stillOwned, []);
         stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
         returnOffer.setMessage(`Here are your item(s) from the crafting service.`);
 
@@ -4299,15 +4357,19 @@ export default class MyHandler extends Handler {
         const partner = new SteamID(partnerSteamID64);
         const token = await fetchTradeUrlToken(partnerSteamID64);
         const returnOffer = this.bot.manager.createOffer(partner, token);
-        returnOffer.data('dict', this.craftingDict(stillOwned, []));
+        this.prepareCraftingOffer(returnOffer, stillOwned, []);
         stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
         returnOffer.setMessage(`Here are your item(s) from the crafting service — sorry for the delay!`);
 
         try {
             const status = await this.bot.trades.sendOffer(returnOffer);
             if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+            // "Sent", not "returned". sendOffer resolving means Steam created the offer; the partner
+            // still has to accept, and cancelTime withdraws it after 15 minutes if they don't.
+            // Offer 9293465568 reported "✅ Returned 28 item(s)" and was auto-cancelled 15 minutes
+            // later with every one of those items still in the bot.
             return (
-                `✅ Returned ${stillOwned.length} item(s) to ${partnerSteamID64}` +
+                `✅ Sent ${stillOwned.length} item(s) to ${partnerSteamID64} — not returned until they accept, and the offer expires in 15 min` +
                 (missing.length > 0 ? ` (skipped ${missing.length} not in backpack: ${missing.join(', ')})` : '') +
                 `.`
             );
