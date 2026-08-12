@@ -2752,10 +2752,12 @@ export default class MyHandler extends Handler {
                                 .filter((i: any) => FABRICATOR_DEFINDEXES.includes(i.def_index))
                                 .sort((a: any, b: any) => a.def_index - b.def_index);
 
-                            const { fabricatorAssetIds, componentAssetIds, kitAssetIds, adminSelfFill } = craftingService as {
+                            // kitAssetIds is deliberately not read here — see the unappliedKits
+                            // comment below. It is still written by the detection branches for the
+                            // trade log, but nothing may gate behaviour on it.
+                            const { fabricatorAssetIds, componentAssetIds, adminSelfFill } = craftingService as {
                                 fabricatorAssetIds: string[];
                                 componentAssetIds: string[];
-                                kitAssetIds?: string[];
                                 adminSelfFill?: boolean;
                             };
                             const selfFill = adminSelfFill === true;
@@ -3008,10 +3010,24 @@ export default class MyHandler extends Handler {
                                 craftNext();
                             };
 
-                            // Kit application path: apply unapplied KS Kits to plain weapons, then craft fabs
-                            const unappliedKits = kitAssetIds && kitAssetIds.length > 0
-                                ? availablePool.filter((i: any) => KS_KIT_DEFINDEXES.includes(i.def_index))
-                                : [];
+                            // Kit application path: apply unapplied KS Kits to plain weapons, then craft fabs.
+                            //
+                            // Driven purely by what actually arrived, NOT by the stored kitAssetIds.
+                            // That flag is only ever set by the Mode A (:884) and kit-only (:947)
+                            // detection branches; a components offer built by the intake path never
+                            // sets it, so a kit the bot itself asked for was silently never applied.
+                            // The craft then received a plain weapon carrying no killstreak tier,
+                            // failed to match the weapon slot, and reported "no fabricators could be
+                            // matched with any components" — observed live on offer 9297130174.
+                            //
+                            // Gating on the flag was never meaningful anyway: it was only tested for
+                            // length, and the ids in it are the partner's PRE-trade ids, which Steam
+                            // reassigns the moment the items land here. A kit in a crafting trade is
+                            // always there to be applied — it can never serve as a recipe component,
+                            // since KS_KIT_DEFINDEXES slots are output specs and are filtered out.
+                            const unappliedKits = availablePool.filter((i: any) =>
+                                KS_KIT_DEFINDEXES.includes(i.def_index)
+                            );
 
                             if (unappliedKits.length === 0) {
                                 if (fabricatorAssetIds.length === 0) {
