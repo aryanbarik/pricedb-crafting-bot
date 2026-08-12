@@ -25,7 +25,21 @@ sed -E 's/\x1b\[[0-9;]*m//g'
 Rotation is the most common mistake: an incident spanning midnight lives in **two** files. Check
 timestamps before concluding something didn't happen.
 
-## Start here
+## First decide which kind of audit this is
+
+**Scoped (the common case).** A feature or bugfix is in flight and the question is "did my change
+work?" Trace only that — the specific trade or code path, whether it behaved as intended, and any
+anomaly that bears on it. Then stop. Do **not** append uptime, restart counts, capacity or unrelated
+warnings; padding the answer with clean-but-irrelevant metrics buries the verdict the user is
+actually waiting for. Skip to "Tracing one trade end to end".
+
+**Broad.** An unprompted "audit logs" with nothing in flight, or an explicit ask for overall health.
+Run the whole sweep below.
+
+If unsure, look at what was last deployed. If it was minutes ago and we have been iterating on it,
+the audit is scoped.
+
+## Start here (broad audits)
 
 ```bash
 ssh tf2bot 'date -u; pm2 list | grep -E "autofab-tf2autobot|name"; ss -ltn | grep 3001; curl -s -m 5 http://127.0.0.1:3001/health'
@@ -35,10 +49,9 @@ ssh tf2bot 'date -u; pm2 list | grep -E "autofab-tf2autobot|name"; ss -ltn | gre
 HTTP API binding on 3001 is the readiness signal; **do not** wait a fixed interval or grep the log
 for a startup marker, which will match an older run and return instantly.
 
-## The sweep
+## The sweep (broad audits)
 
-Run these before drawing conclusions. Noise filters matter — the `excluding uncraftable/Festive`
-debug lines can be hundreds per trade.
+Noise filters matter — the `excluding uncraftable/Festive` debug lines can be hundreds per trade.
 
 ```bash
 cd /root/my-patch/pricedb-crafting-bot/logs
@@ -146,8 +159,11 @@ which is separate infrastructure from the Web API.
 
 Lead with the answer, not the method. State what broke, cite the timestamped log lines that show
 it, and separate **verified** from **inferred** — several past conclusions were wrong because a
-plausible story was reported as fact. If nothing is wrong, say so plainly and give the one or two
-numbers that back it (uptime, restart count, capacity), rather than narrating every clean check.
+plausible story was reported as fact.
+
+On a **scoped** audit the answer is a verdict on the change: did it do what it was meant to, shown
+by the lines that prove it. Nothing else belongs there. On a **broad** audit, if nothing is wrong,
+say so plainly with the one or two numbers that back it rather than narrating every clean check.
 
 Quiet logs are not proof of correctness: a code path that never executed produces no output, which
 looks identical to one that ran perfectly.
