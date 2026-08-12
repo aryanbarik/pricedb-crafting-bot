@@ -6,6 +6,35 @@ import SchemaManager from '@tf2autobot/tf2-schema';
 
 import isObject from 'isobject';
 
+/**
+ * Whether a defindex is a STOCK weapon — one of the defaults every account is granted, as opposed
+ * to an unlock.
+ *
+ * This distinction decides whether the bot can apply a Killstreak Kit to its own copy. Stock
+ * weapons are effectively an infinite supply: they are Normal quality, the GC promotes a copy to
+ * Unique on application, and the original is left in place, so one serves unlimited crafts. No other
+ * weapon behaves that way — applying a kit to an unlock transforms that item in place and consumes
+ * it. Treating an unlock as a base item would either destroy a real item or, more likely, hang for
+ * 30 seconds against a defindex the GC has no base item for (1091 sends no response).
+ *
+ * The test is the same one fixItem uses below: stock entries are named after their item_class
+ * (`TF_WEAPON_SCATTERGUN`, and the Unique twin `Upgradeable TF_WEAPON_SCATTERGUN`), while unlocks
+ * carry a real name (`The Detonator`, `Apoco-Fists`). Verified against the live schema: true for
+ * 13/200/190/201/205/210, false for 351/1104/587/1013/45, 61 matching entries in total.
+ *
+ * Strictly this identifies base *items*, not just weapons — the 61 also cover the Engineer PDAs,
+ * Disguise Kit, Spellbook, Grappling Hook and PASSTIME Gun. That is harmless because the only
+ * caller passes a Killstreak Kit's target (attribute 2012), and kits exist only for weapons, so the
+ * non-weapon entries are unreachable in practice. Worth knowing before reusing this elsewhere.
+ */
+export function isBaseWeaponDefindex(defindex: number, schema: SchemaManager.Schema): boolean {
+    const schemaItem = schema.getItemByDefindex(defindex);
+    if (schemaItem === null || !schemaItem.item_class || !schemaItem.name) {
+        return false;
+    }
+    return schemaItem.name.includes(schemaItem.item_class.toUpperCase());
+}
+
 export function fixItem(item: MinimumItem, schema: SchemaManager.Schema): MinimumItem {
     const schemaItem = schema.getItemByDefindex(item.defindex);
     if (schemaItem === null) {

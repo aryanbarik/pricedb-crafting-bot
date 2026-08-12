@@ -3,7 +3,8 @@ import {
     findPartnerComponents,
     GCBackpackItem,
     GCItemAttr,
-    KS_KIT_DEFINDEXES
+    KS_KIT_DEFINDEXES,
+    PartnerKitCandidate
 } from '../fabricatorSlots';
 
 interface RecipeComponentProto {
@@ -347,7 +348,7 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
             weaponSlotFab(2),
             inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
             noPremade,
-            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }]
         );
 
         expect(result.assetIds).toEqual(['KIT1', 'W1']);
@@ -361,7 +362,7 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
             weaponSlotFab(2),
             inventory({ '200;6': ['SCATTERGUN'] }),
             noPremade,
-            () => [{ id: 'KIT_SCATTERGUN', targetDefindex: 200 }]
+            () => [{ id: 'KIT_SCATTERGUN', targetDefindex: 200, targetIsBaseWeapon: false }]
         );
 
         expect(result.assetIds).toEqual(['KIT_SCATTERGUN', 'SCATTERGUN']);
@@ -373,7 +374,7 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
             weaponSlotFab(2),
             inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
             () => ['PREMADE'],
-            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }]
         );
 
         expect(result.assetIds).toEqual(['PREMADE']);
@@ -384,7 +385,7 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
             weaponSlotFab(2),
             inventory({}), // partner owns the kit but not the weapon
             noPremade,
-            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }]
         );
 
         expect(result.assetIds).toEqual([]);
@@ -397,8 +398,8 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
             inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
             noPremade,
             () => [
-                { id: 'KIT_NO_WEAPON', targetDefindex: 18 }, // partner owns no defindex-18 weapon
-                { id: 'KIT_USABLE', targetDefindex: WEAPON_DEFINDEX }
+                { id: 'KIT_NO_WEAPON', targetDefindex: 18, targetIsBaseWeapon: false }, // partner owns no defindex-18 weapon
+                { id: 'KIT_USABLE', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }
             ]
         );
 
@@ -411,7 +412,7 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
             weaponSlotFab(2, 2),
             inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
             () => ['PREMADE'],
-            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }]
         );
 
         expect(result.assetIds).toEqual(['PREMADE', 'KIT1', 'W1']);
@@ -421,7 +422,9 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
     it('will not claim the same kit for two fabricators sharing a usedIds set', () => {
         const usedIds = new Set<string>();
         const inv = inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1', 'W2'] });
-        const kits = (): { id: string; targetDefindex: number }[] => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }];
+        const kits = (): PartnerKitCandidate[] => [
+            { id: 'KIT1', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }
+        ];
 
         const first = findPartnerComponents(weaponSlotFab(2), inv, noPremade, kits, usedIds);
         const second = findPartnerComponents(weaponSlotFab(2), inv, noPremade, kits, usedIds);
@@ -431,13 +434,46 @@ describe('findPartnerComponents — kit + weapon fallback for the weapon slot', 
         expect(second.missing).toEqual([shortfall(1, 2)]);
     });
 
+    it('requests a stock-weapon kit on its own, with no weapon alongside it', () => {
+        // The bot applies this one to its own base item, so the partner needs nothing else. Note the
+        // partner owns no weapon of that defindex at all — they cannot, stock weapons are untradable.
+        const result = findPartnerComponents(weaponSlotFab(2), inventory({}), noPremade, () => [
+            { id: 'STOCK_KIT', targetDefindex: 200, targetIsBaseWeapon: true }
+        ]);
+
+        expect(result.assetIds).toEqual(['STOCK_KIT']);
+        expect(result.missing).toEqual([]);
+    });
+
+    it('still demands the weapon for an unlock kit, which has no base item', () => {
+        // The mirror of the case above: an unlock cannot be conjured from the bot's stock, so a kit
+        // for one is only useful if the partner also owns the weapon.
+        const result = findPartnerComponents(weaponSlotFab(2), inventory({}), noPremade, () => [
+            { id: 'UNLOCK_KIT', targetDefindex: 351, targetIsBaseWeapon: false }
+        ]);
+
+        expect(result.assetIds).toEqual([]);
+        expect(result.missing).toEqual([shortfall(1, 2)]);
+    });
+
+    it('skips an unusable unlock kit and takes a stock kit behind it', () => {
+        const result = findPartnerComponents(weaponSlotFab(2), inventory({}), noPremade, () => [
+            { id: 'UNLOCK_KIT', targetDefindex: 351, targetIsBaseWeapon: false },
+            { id: 'STOCK_KIT', targetDefindex: 200, targetIsBaseWeapon: true }
+        ]);
+
+        expect(result.assetIds).toEqual(['STOCK_KIT']);
+        expect(result.missing).toEqual([]);
+    });
+
     it('ignores kits of the wrong killstreak tier', () => {
         const result = findPartnerComponents(
             weaponSlotFab(2),
             inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
             noPremade,
             // The closure is asked for tier 2; a correct implementation never sees a tier-1 kit.
-            tier => (tier === 1 ? [{ id: 'BASIC_KIT', targetDefindex: WEAPON_DEFINDEX }] : [])
+            tier =>
+                tier === 1 ? [{ id: 'BASIC_KIT', targetDefindex: WEAPON_DEFINDEX, targetIsBaseWeapon: false }] : []
         );
 
         expect(result.assetIds).toEqual([]);

@@ -394,6 +394,12 @@ export interface PartnerComponentResult {
 export interface PartnerKitCandidate {
     id: string;
     targetDefindex: number;
+    /**
+     * True when targetDefindex is a stock weapon, meaning the bot can supply the weapon itself from
+     * its own infinite base-item stock and the partner need only send the kit. False for unlocks,
+     * where the partner must also own the weapon. See isBaseWeaponDefindex in lib/items.ts.
+     */
+    targetIsBaseWeapon: boolean;
 }
 
 /**
@@ -467,8 +473,21 @@ export function findPartnerComponents(
                 // (Scattergun 13 vs 200) — see the lookupKillstreakKit closures in MyHandler.
                 for (const kit of lookupKillstreakKit(requiredTier, true)) {
                     if (usedIds.has(kit.id)) continue;
-                    // Exact `defindex;6` deliberately: the weapon must be Unique AND craftable,
-                    // because an uncraftable weapon yields an uncraftable killstreak weapon, which
+
+                    // A kit for a stock weapon needs nothing else from the partner: the bot applies
+                    // it to its own base item, which it always has and never uses up. Requiring a
+                    // matching weapon here would reject the kit outright, because stock weapons are
+                    // untradable and the partner cannot own one to send.
+                    if (kit.targetIsBaseWeapon) {
+                        usedIds.add(kit.id);
+                        assetIds.push(kit.id);
+                        foundForSlot++;
+                        break;
+                    }
+
+                    // An unlock has no base item, so the partner must supply the weapon too. Exact
+                    // `defindex;6` deliberately: it must be Unique AND craftable, because an
+                    // uncraftable weapon yields an uncraftable killstreak weapon, which
                     // buildCraftComponents then refuses as a recipe ingredient.
                     const weaponId = takeFromSku(SKU.fromObject({ defindex: kit.targetDefindex, quality: 6 }));
                     if (!weaponId) continue;

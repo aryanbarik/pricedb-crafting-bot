@@ -67,7 +67,7 @@ import {
     ATTR_TOOL_TARGET_ITEM,
     getItemAttrValue
 } from '../../lib/fabricatorSlots';
-import { fixItem } from '../../lib/items';
+import { fixItem, isBaseWeaponDefindex } from '../../lib/items';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -3072,30 +3072,43 @@ export default class MyHandler extends Handler {
                                     doRefund(`Could not determine target weapon for kit ${kit.id}`);
                                     return;
                                 }
-                                const match = plainWeapons.find(
-                                    (w: any) =>
-                                        !usedWeaponIds.has(String(w.id)) && w.def_index === Math.round(targetDefindex)
-                                );
-                                if (match) {
-                                    usedWeaponIds.add(String(match.id));
-                                    kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
+                                const target = Math.round(targetDefindex);
+
+                                // A stock weapon is preferred over the customer's own, and is the
+                                // ONLY case where the bot may supply the weapon itself.
+                                //
+                                // Stock weapons are an infinite supply: Normal quality, granted to
+                                // every account, and the GC promotes a *copy* to Unique on
+                                // application while leaving the original in place. One serves
+                                // unlimited crafts, at no cost and taking no inventory slot.
+                                //
+                                // Preferring it is strictly better for the customer — they send only
+                                // the kit and keep their weapon, instead of surrendering a weapon to
+                                // be consumed — and costs the bot nothing.
+                                //
+                                // No other weapon works this way. Applying a kit to an unlock
+                                // transforms that item in place and consumes it, and the bot has no
+                                // base item for one at all, so routing an unlock here would hang for
+                                // 30s against a defindex the GC cannot resolve (1091 sends no
+                                // response). Unlocks must still come from the customer.
+                                if (isBaseWeaponDefindex(target, this.bot.schema)) {
+                                    log.info(
+                                        `[craftingService] Kit ${kit.id} targets stock weapon ${target} — ` +
+                                            `applying to the bot's own base item`
+                                    );
+                                    kitPairs.push({ kitId: String(kit.id), baseitemDefIndex: target });
                                     continue;
                                 }
-                                // No weapon in the trade to apply this to. Rather than refunding, try
-                                // the bot's own stock weapon of that defindex — every account is
-                                // granted the full stock set, and applying a kit to one costs
-                                // nothing: the GC promotes a copy to Unique and leaves the stock
-                                // weapon in place, so it is reusable indefinitely.
-                                //
-                                // This is the only way a customer can get a killstreak stock weapon
-                                // at all. Stock weapons are Normal quality and untradable — everyone
-                                // has them by default so new players are not weaponless — so the
-                                // customer physically cannot send one for us to apply the kit to.
-                                log.info(
-                                    `[craftingService] No weapon for kit ${kit.id} in the trade — attempting the bot's ` +
-                                        `own base item (defindex ${Math.round(targetDefindex)})`
+
+                                const match = plainWeapons.find(
+                                    (w: any) => !usedWeaponIds.has(String(w.id)) && w.def_index === target
                                 );
-                                kitPairs.push({ kitId: String(kit.id), baseitemDefIndex: Math.round(targetDefindex) });
+                                if (!match) {
+                                    doRefund(`No matching weapon (defindex ${target}) in your trade for kit ${kit.id}`);
+                                    return;
+                                }
+                                usedWeaponIds.add(String(match.id));
+                                kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
                             }
 
                             const resultWeaponIds: string[] = [];
@@ -4152,8 +4165,9 @@ export default class MyHandler extends Handler {
             if (isNaN(rawTarget)) continue;
 
             const targetDefindex = fixItem({ defindex: rawTarget, quality: 6 } as any, this.bot.schema).defindex;
+            const targetIsBaseWeapon = isBaseWeaponDefindex(targetDefindex, this.bot.schema);
             for (const id of theirInventory.findBySKU(sku, tradableOnly)) {
-                results.push({ id, targetDefindex });
+                results.push({ id, targetDefindex, targetIsBaseWeapon });
             }
         }
         return results;
