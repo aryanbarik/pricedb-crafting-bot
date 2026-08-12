@@ -3095,15 +3095,14 @@ export default class MyHandler extends Handler {
                             const kitPairs: { kitId: string; weaponId?: string; baseitemDefIndex?: number }[] = [];
                             const usedWeaponIds = new Set<string>();
                             for (const kit of unappliedKits) {
-                                const targetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
+                                const target = this.resolveKitTargetDefindex(kit);
                                 log.debug(
-                                    `[craftingService] Kit ${kit.id} (def=${(kit as any).def_index}) target defindex=${targetDefindex}, attrs=${JSON.stringify(((kit as any).attribute ?? []).map((a: any) => ({ d: a.def_index, v: a.value, vb: a.value_bytes })))}`
+                                    `[craftingService] Kit ${kit.id} (def=${(kit as any).def_index}) target defindex=${target}, attrs=${JSON.stringify(((kit as any).attribute ?? []).map((a: any) => ({ d: a.def_index, v: a.value, vb: a.value_bytes })))}`
                                 );
-                                if (targetDefindex === null) {
+                                if (target === null) {
                                     doRefund(`Could not determine target weapon for kit ${kit.id}`);
                                     return;
                                 }
-                                const target = Math.round(targetDefindex);
 
                                 // A stock weapon is preferred over the customer's own, and is the
                                 // ONLY case where the bot may supply the weapon itself.
@@ -4197,6 +4196,62 @@ export default class MyHandler extends Handler {
         } catch (err) {
             return `❌ Failed to return fabricator ${fabAssetId} to ${partnerSteamID64}: ${this.describeSendError(err)}. Still held — try again.`;
         }
+    }
+
+    /**
+     * The weapon defindex a Killstreak Kit in the GC backpack can be applied to.
+     *
+     * The generic kits (6523/6526/6527) carry it in attribute 2012, because one defindex has to
+     * serve every weapon. The ~25 per-weapon Basic kits do not carry it at all — and correctly so,
+     * since defindex 5794 *is* "Killstreak Wrench Kit", so there is nothing for an attribute to
+     * disambiguate. Their GC items arrive with an entirely empty attribute list.
+     *
+     * Reading only attribute 2012 therefore refuses every per-weapon kit with "Could not determine
+     * target weapon", which refunded a customer's fabricator on 2026-08-12 (kit 17396508437,
+     * def=5794, attrs=[]).
+     *
+     * The fallback reads the target out of the schema name — "Wrench Killstreakifier Basic" — and
+     * resolves it the same way getSKU's getTarget does for the Steam-side item, via
+     * getItemByItemName. That is the call already producing the `td-` segment of every kit SKU in
+     * production, so it is a known-good lookup rather than a new one. It lands on the Unique
+     * "Upgradeable" defindex (Wrench -> 197) because the schema's name index skips quality 0, which
+     * is exactly the defindex base-item application wants.
+     */
+    private resolveKitTargetDefindex(kit: any): number | null {
+        const fromAttr = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
+        if (fromAttr !== null) {
+            return Math.round(fromAttr);
+        }
+
+        const schemaItem = (this.bot.schema as any).getItemByDefindex?.(kit.def_index) as { name?: string } | undefined;
+        const schemaName = schemaItem?.name;
+        if (typeof schemaName !== 'string' || schemaName === '') {
+            return null;
+        }
+
+        // "Wrench Killstreakifier Basic" -> "Wrench"; the generic "Killstreakifier Basic" -> "".
+        const weaponName = schemaName.replace(/\s*Killstreakifier(\s+\S+)?\s*$/i, '').trim();
+        if (weaponName === '' || weaponName === schemaName) {
+            return null;
+        }
+
+        const targetItem = (this.bot.schema as any).getItemByItemName?.(weaponName) as
+            | { defindex?: number }
+            | null
+            | undefined;
+        if (targetItem?.defindex === undefined) {
+            log.warn(
+                `[craftingService] Kit ${kit.id} (def=${kit.def_index}) names weapon "${weaponName}" in the schema, ` +
+                    `but no schema item matched that name — cannot resolve its target`
+            );
+            return null;
+        }
+
+        log.debug(
+            `[craftingService] Kit ${kit.id} (def=${kit.def_index}) carries no attr 2012 — resolved target ` +
+                `"${weaponName}" = defindex ${targetItem.defindex} from the schema name`
+        );
+        return targetItem.defindex;
     }
 
     /**
