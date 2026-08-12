@@ -3061,7 +3061,7 @@ export default class MyHandler extends Handler {
                             // Pairing blind on array order previously mismatched kits to the wrong weapon,
                             // which the GC silently ignores (no response), producing a 30s
                             // "timed out waiting for kit application" failure and a full refund.
-                            const kitPairs: { kitId: string; weaponId: string }[] = [];
+                            const kitPairs: { kitId: string; weaponId?: string; baseitemDefIndex?: number }[] = [];
                             const usedWeaponIds = new Set<string>();
                             for (const kit of unappliedKits) {
                                 const targetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
@@ -3073,14 +3073,29 @@ export default class MyHandler extends Handler {
                                     return;
                                 }
                                 const match = plainWeapons.find(
-                                    (w: any) => !usedWeaponIds.has(String(w.id)) && w.def_index === Math.round(targetDefindex)
+                                    (w: any) =>
+                                        !usedWeaponIds.has(String(w.id)) && w.def_index === Math.round(targetDefindex)
                                 );
-                                if (!match) {
-                                    doRefund(`No matching weapon (defindex ${Math.round(targetDefindex)}) in your trade for kit ${kit.id}`);
-                                    return;
+                                if (match) {
+                                    usedWeaponIds.add(String(match.id));
+                                    kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
+                                    continue;
                                 }
-                                usedWeaponIds.add(String(match.id));
-                                kitPairs.push({ kitId: String(kit.id), weaponId: String(match.id) });
+                                // No weapon in the trade to apply this to. Rather than refunding, try
+                                // the bot's own stock weapon of that defindex — every account is
+                                // granted the full stock set, and applying a kit to one costs
+                                // nothing: the GC promotes a copy to Unique and leaves the stock
+                                // weapon in place, so it is reusable indefinitely.
+                                //
+                                // This is the only way a customer can get a killstreak stock weapon
+                                // at all. Stock weapons are Normal quality and untradable — everyone
+                                // has them by default so new players are not weaponless — so the
+                                // customer physically cannot send one for us to apply the kit to.
+                                log.info(
+                                    `[craftingService] No weapon for kit ${kit.id} in the trade — attempting the bot's ` +
+                                        `own base item (defindex ${Math.round(targetDefindex)})`
+                                );
+                                kitPairs.push({ kitId: String(kit.id), baseitemDefIndex: Math.round(targetDefindex) });
                             }
 
                             const resultWeaponIds: string[] = [];
@@ -3129,16 +3144,33 @@ export default class MyHandler extends Handler {
                                     runMultiFabCraft(fullPool);
                                     return;
                                 }
-                                const { kitId, weaponId } = kitPairs[pairIndex++];
-                                log.debug(`[craftingService] Applying kit ${kitId} to weapon ${weaponId} (${pairIndex}/${kitPairs.length})`);
-                                this.bot.tf2gc.applyKSKit(kitId, weaponId, (err, resultId) => {
+                                const { kitId, weaponId, baseitemDefIndex } = kitPairs[pairIndex++];
+                                const onApplied = (err: Error | null, resultId?: string): void => {
                                     if (err || !resultId) {
                                         doRefund(`Kit application failed (kit ${kitId}): ${err?.message ?? 'no result'}`);
                                         return;
                                     }
                                     resultWeaponIds.push(resultId);
                                     applyNext();
-                                });
+                                };
+
+                                if (baseitemDefIndex !== undefined) {
+                                    log.debug(
+                                        `[craftingService] Applying kit ${kitId} to base item defindex ${baseitemDefIndex} (${pairIndex}/${kitPairs.length})`
+                                    );
+                                    this.bot.tf2gc.applyKSKitToBaseItem(kitId, baseitemDefIndex, onApplied);
+                                } else if (weaponId !== undefined) {
+                                    log.debug(
+                                        `[craftingService] Applying kit ${kitId} to weapon ${weaponId} (${pairIndex}/${kitPairs.length})`
+                                    );
+                                    this.bot.tf2gc.applyKSKit(kitId, weaponId, onApplied);
+                                } else {
+                                    // Unreachable: every kitPairs entry is built with exactly one of
+                                    // the two. Refunding rather than silently skipping, so a future
+                                    // edit that breaks that invariant cannot strand the customer.
+                                    doRefund(`Kit ${kitId} has neither a weapon nor a base item to apply to`);
+                                    return;
+                                }
                             };
                             applyNext();
                         }, 5000);
