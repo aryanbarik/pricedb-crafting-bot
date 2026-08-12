@@ -1,4 +1,10 @@
-import { findBotComponents, GCBackpackItem, GCItemAttr, KS_KIT_DEFINDEXES } from '../fabricatorSlots';
+import {
+    findBotComponents,
+    findPartnerComponents,
+    GCBackpackItem,
+    GCItemAttr,
+    KS_KIT_DEFINDEXES
+} from '../fabricatorSlots';
 
 interface RecipeComponentProto {
     def_index: number;
@@ -312,5 +318,129 @@ describe('findBotComponents', () => {
             expect(ids(result).sort()).toEqual(['ks', 'p']);
             expect(result.missing).toEqual([]);
         });
+    });
+});
+
+/**
+ * The kit + weapon fallback had no coverage at all before this block, which is how it shipped
+ * unreachable: it built a bare `6527;6` SKU that no real Killstreak Kit ever carries (they look
+ * like `6527;6;uncraftable;kt-1;td-452`), so the exact-match inventory lookup never found one.
+ */
+describe('findPartnerComponents — kit + weapon fallback for the weapon slot', () => {
+    const WEAPON_DEFINDEX = 205; // Upgradeable Rocket Launcher
+
+    /** A fabricator whose only open slot is a weapon slot of the given tier. */
+    const weaponSlotFab = (tier: number, required = 1): GCBackpackItem =>
+        fab([slot(2000, { defIndex: 0, required, conditions: cond(ATTR_KILLSTREAK_TIER, tier) })]);
+
+    /** Stands in for the partner's inventory: exact SKU to asset ids, like Inventory.findBySKU. */
+    const inventory =
+        (skuToIds: Record<string, string[]>) =>
+        (sku: string): string[] =>
+            skuToIds[sku] ?? [];
+
+    const noPremade = (): string[] => [];
+    const shortfall = (n: number, tier: number): string => `${n}× kt-${tier} weapon (or kit + weapon)`;
+
+    it('requests the kit and the weapon it targets', () => {
+        const result = findPartnerComponents(
+            weaponSlotFab(2),
+            inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
+            noPremade,
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+        );
+
+        expect(result.assetIds).toEqual(['KIT1', 'W1']);
+        expect(result.missing).toEqual([]);
+    });
+
+    it("pairs on the KIT's target, not the fabricator's — the bug this replaces", () => {
+        // The fabricator carries no target weapon at all here. Under the old implementation that
+        // alone (`targetWeaponDefindex === null`) skipped the fallback outright.
+        const result = findPartnerComponents(
+            weaponSlotFab(2),
+            inventory({ '200;6': ['SCATTERGUN'] }),
+            noPremade,
+            () => [{ id: 'KIT_SCATTERGUN', targetDefindex: 200 }]
+        );
+
+        expect(result.assetIds).toEqual(['KIT_SCATTERGUN', 'SCATTERGUN']);
+        expect(result.missing).toEqual([]);
+    });
+
+    it('prefers a ready-made killstreak weapon and leaves the kit alone', () => {
+        const result = findPartnerComponents(
+            weaponSlotFab(2),
+            inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
+            () => ['PREMADE'],
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+        );
+
+        expect(result.assetIds).toEqual(['PREMADE']);
+    });
+
+    it('reports the slot missing when the kit has no weapon to go on', () => {
+        const result = findPartnerComponents(
+            weaponSlotFab(2),
+            inventory({}), // partner owns the kit but not the weapon
+            noPremade,
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+        );
+
+        expect(result.assetIds).toEqual([]);
+        expect(result.missing).toEqual([shortfall(1, 2)]);
+    });
+
+    it('skips an unusable kit and keeps looking rather than giving up on the first', () => {
+        const result = findPartnerComponents(
+            weaponSlotFab(2),
+            inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
+            noPremade,
+            () => [
+                { id: 'KIT_NO_WEAPON', targetDefindex: 18 }, // partner owns no defindex-18 weapon
+                { id: 'KIT_USABLE', targetDefindex: WEAPON_DEFINDEX }
+            ]
+        );
+
+        expect(result.assetIds).toEqual(['KIT_USABLE', 'W1']);
+        expect(result.missing).toEqual([]);
+    });
+
+    it('mixes a ready-made weapon and a kit pair to fill a two-weapon slot', () => {
+        const result = findPartnerComponents(
+            weaponSlotFab(2, 2),
+            inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
+            () => ['PREMADE'],
+            () => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }]
+        );
+
+        expect(result.assetIds).toEqual(['PREMADE', 'KIT1', 'W1']);
+        expect(result.missing).toEqual([]);
+    });
+
+    it('will not claim the same kit for two fabricators sharing a usedIds set', () => {
+        const usedIds = new Set<string>();
+        const inv = inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1', 'W2'] });
+        const kits = (): { id: string; targetDefindex: number }[] => [{ id: 'KIT1', targetDefindex: WEAPON_DEFINDEX }];
+
+        const first = findPartnerComponents(weaponSlotFab(2), inv, noPremade, kits, usedIds);
+        const second = findPartnerComponents(weaponSlotFab(2), inv, noPremade, kits, usedIds);
+
+        expect(first.assetIds).toEqual(['KIT1', 'W1']);
+        expect(second.assetIds).toEqual([]);
+        expect(second.missing).toEqual([shortfall(1, 2)]);
+    });
+
+    it('ignores kits of the wrong killstreak tier', () => {
+        const result = findPartnerComponents(
+            weaponSlotFab(2),
+            inventory({ [`${WEAPON_DEFINDEX};6`]: ['W1'] }),
+            noPremade,
+            // The closure is asked for tier 2; a correct implementation never sees a tier-1 kit.
+            tier => (tier === 1 ? [{ id: 'BASIC_KIT', targetDefindex: WEAPON_DEFINDEX }] : [])
+        );
+
+        expect(result.assetIds).toEqual([]);
+        expect(result.missing).toEqual([shortfall(1, 2)]);
     });
 });
