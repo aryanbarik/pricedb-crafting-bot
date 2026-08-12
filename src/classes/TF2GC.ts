@@ -40,7 +40,9 @@ type Job = {
         | 'craftToken'
         | 'craftFabricator'
         | 'applyKSKit'
+        | 'applyKSKitToBaseItem'
         | 'applyStrangifier';
+    baseitemDefIndex?: number;
     defindex?: number;
     sku?: string;
     skus?: string[];
@@ -206,6 +208,25 @@ export default class TF2GC {
         this.newJob({ type: 'applyKSKit', kitId, weaponId, kitCallback: cb });
     }
 
+    /**
+     * Applies a Killstreak Kit to a BASE item — a stock weapon of Normal quality, which every
+     * account is granted and which therefore has no CSOEconItem and no asset id to address. The GC
+     * takes a defindex instead, via a separate message (1091, ApplyBaseItemXifier) from the one used
+     * for ordinary items (1082, ApplyXifier). This is what the in-game "Show Stock Items" checkbox
+     * switches the item picker over to.
+     *
+     * The base item is NOT consumed: the GC promotes a copy to Unique and delivers it as a brand new
+     * item, leaving the stock weapon in place. The kit is consumed as usual.
+     */
+    applyKSKitToBaseItem(
+        kitId: string,
+        baseitemDefIndex: number,
+        cb: (err: Error | null, resultWeaponId?: string) => void
+    ): void {
+        log.debug(`Enqueueing applyKSKitToBaseItem job: kit ${kitId} → base item defindex ${baseitemDefIndex}`);
+        this.newJob({ type: 'applyKSKitToBaseItem', kitId, baseitemDefIndex, kitCallback: cb });
+    }
+
     applyStrangifier(strangifierId: string, weaponId: string, cb: (err: Error | null, resultWeaponId?: string) => void): void {
         log.debug(`Enqueueing applyStrangifier job: strangifier ${strangifierId} → weapon ${weaponId}`);
         this.newJob({ type: 'applyStrangifier', strangifierId, weaponId, strangifyCallback: cb });
@@ -267,6 +288,8 @@ export default class TF2GC {
                     func = this.handleCraftFabricatorJob.bind(this, job);
                 } else if (job.type === 'applyKSKit') {
                     func = this.handleApplyKSKitJob.bind(this, job);
+                } else if (job.type === 'applyKSKitToBaseItem') {
+                    func = this.handleApplyKSKitToBaseItemJob.bind(this, job);
                 } else if (job.type === 'applyStrangifier') {
                     func = this.handleApplyStrangifierJob.bind(this, job);
                 }
@@ -796,6 +819,100 @@ export default class TF2GC {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
         this.bot.tf2.on('itemChanged', onItemChanged);
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
+    }
+
+    /**
+     * Applies a kit to a stock (Normal-quality) weapon, addressed by defindex rather than asset id.
+     *
+     * Differs from handleApplyKSKitJob in three ways, all forced by what a base item is:
+     *
+     * - There is nothing to look up in the backpack for the target. Stock weapons are granted to
+     *   every account and are not economy items, so they never appear in the SO cache. Confirmed
+     *   here: `!dumpattrs name=Scattergun` finds nothing, and GetPlayerItems returns no quality-0
+     *   items across inventories of 198, 1,064 and 2,842 items.
+     * - Success can ONLY arrive as itemAcquired. The GC promotes a copy to Unique and delivers it as
+     *   a new item, leaving the stock weapon untouched, so there is no in-place itemChanged to watch
+     *   and no original id to re-check at timeout.
+     * - There is no response message to wait on. Valve defines k_EMsgGCApplyXifierResponse (1083)
+     *   for ordinary items but nothing paired with 1091, so a rejected request is silent and shows
+     *   up only as the timeout below.
+     */
+    private handleApplyKSKitToBaseItemJob(job: Job): void {
+        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
+
+        const kit = backpack?.find(i => i.id === job.kitId);
+        if (!kit) {
+            const err = new Error(`applyKSKitToBaseItem: kit ${job.kitId} not found in backpack`);
+            log.warn(err.message);
+            if (job.kitCallback) job.kitCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+        if (job.baseitemDefIndex === undefined) {
+            const err = new Error('applyKSKitToBaseItem: no base item defindex given');
+            log.warn(err.message);
+            if (job.kitCallback) job.kitCallback(err);
+            return this.finishedProcessingJob(err);
+        }
+
+        let settled = false;
+
+        const cleanup = (): void => {
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
+            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
+            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+        };
+
+        log.debug(
+            `applyKSKitToBaseItem: applying kit ${kit.id} to base item defindex ${job.baseitemDefIndex} via ApplyBaseItemXifier`
+        );
+        (this.bot.tf2 as any).applyToolToBaseItem(kit.id, job.baseitemDefIndex);
+
+        const onItemAcquired = (item: TF2GCItem): void => {
+            const ktAttr = ((item as unknown as GCBackpackItem).attribute ?? []).find(a => a.def_index === 2025);
+            if (!ktAttr) return;
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            cleanup();
+            log.debug(
+                `applyKSKitToBaseItem: new KS weapon acquired ${item.id} (defidx ${item.def_index}) from base item ${job.baseitemDefIndex}`
+            );
+            if (job.kitCallback) job.kitCallback(null, String(item.id));
+            this.finishedProcessingJob();
+        };
+
+        const onDisconnected = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(applyTimeout);
+            cleanup();
+            const err = new Error('Disconnected from TF2 GC during base-item kit application');
+            if (job.kitCallback) job.kitCallback(err);
+            this.finishedProcessingJob(err);
+        };
+
+        const applyTimeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            // Silence here is ambiguous by design — with no response message, a defindex the GC
+            // rejected looks exactly like one it never received. The stock/"Upgradeable" defindex
+            // pair (Scattergun 13 vs 200) is the first thing to suspect if this fires.
+            const err = new Error(
+                `applyKSKitToBaseItem: timed out waiting for a new killstreak weapon from base item defindex ${job.baseitemDefIndex} (kit ${job.kitId}) — the GC sends no response to 1091, so this may mean the defindex was rejected`
+            );
+            log.warn(err.message);
+            if (job.kitCallback) job.kitCallback(err);
+            this.finishedProcessingJob(err);
+        }, 30000);
+
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        this.bot.tf2.on('itemAcquired', onItemAcquired);
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
         this.bot.tf2.on('disconnectedFromGC', onDisconnected);
