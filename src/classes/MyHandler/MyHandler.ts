@@ -2786,9 +2786,28 @@ export default class MyHandler extends Handler {
                                     offer.partner,
                                     `⚠️ Crafting failed: ${reason}. Your items will be returned.`
                                 );
-                                const refundIds = allNewIds.length > 0
-                                    ? allNewIds
-                                    : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
+                                // The fabricator must be added explicitly, not assumed to be in
+                                // allNewIds. On the intake path it arrived in an EARLIER trade (the
+                                // intake request offer) and only the components came in this one, so
+                                // allNewIds covers the parts and nothing else — which is why newFabs
+                                // above has to look it up by id in the first place.
+                                //
+                                // Without this a failed intake craft returned the customer's parts,
+                                // told them "crafting failed, your items will be returned", and kept
+                                // their fabricator. Nothing was logged as stuck and no admin alert
+                                // fired, because from the code's point of view the refund succeeded.
+                                // Seen on offer 9297132450: parts back, fabricator 17396162112 left
+                                // sitting in the bot.
+                                //
+                                // Deduped because the legacy Mode A/B path genuinely does receive the
+                                // fabricator in the same trade, so it is already in allNewIds there.
+                                const baseRefundIds =
+                                    allNewIds.length > 0
+                                        ? allNewIds
+                                        : (offer.itemsToReceive as any[]).map((i: any) => String(i.assetid));
+                                const refundIds = [
+                                    ...new Set([...baseRefundIds, ...newFabs.map((f: any) => String(f.id))])
+                                ];
                                 const refundOffer = this.bot.manager.createOffer(offer.partner, token);
                                 this.prepareCraftingOffer(refundOffer, refundIds, []);
                                 refundIds.forEach(id =>
