@@ -386,6 +386,17 @@ export interface PartnerComponentResult {
 }
 
 /**
+ * An unapplied Killstreak Kit in the partner's inventory, paired with the weapon it can be applied
+ * to. `targetDefindex` must already be normalized the same way the partner's inventory SKU keys are
+ * (i.e. through `fixItem`), or stock weapons will never match — a Scattergun kit records target 13
+ * while the inventory key for the weapon is the "Upgradeable" 200.
+ */
+export interface PartnerKitCandidate {
+    id: string;
+    targetDefindex: number;
+}
+
+/**
  * Finds which of a trade partner's owned items satisfy the fabricator's unfilled recipe slots,
  * using SKU lookups against their inventory rather than a flat backpack array (the bot doesn't
  * own these items yet — this is used to build the follow-up "please send me these parts" offer).
@@ -400,13 +411,16 @@ export interface PartnerComponentResult {
  * Pass a shared `usedIds` Set when matching multiple fabricators against the same partner
  * inventory in one batch, so the same physical item can't get claimed for two different
  * fabricators' slots. Defaults to a fresh Set for single-fabricator callers.
+ *
+ * The fabricator's own target weapon is deliberately NOT a parameter. It used to gate the kit
+ * fallback, which was wrong twice over: the weapon slot accepts any weapon of the right tier, and
+ * a kit is bound to its own target regardless of which fabricator it is destined for.
  */
 export function findPartnerComponents(
     fabricator: GCBackpackItem,
-    targetWeaponDefindex: number | null,
-    kitDefindexByTier: Partial<Record<number, number>>,
     lookupSku: (sku: string, tradableOnly?: boolean) => string[],
     lookupKillstreakWeapon: (killstreakTier: number, tradableOnly?: boolean) => string[],
+    lookupKillstreakKit: (killstreakTier: number, tradableOnly?: boolean) => PartnerKitCandidate[],
     usedIds: Set<string> = new Set()
 ): PartnerComponentResult {
     const slots = decodeFabricatorSlots(fabricator).filter(
@@ -439,21 +453,30 @@ export function findPartnerComponents(
                     continue;
                 }
 
-                if (targetWeaponDefindex === null) continue;
-
-                const kitDefindex = kitDefindexByTier[requiredTier];
-                if (kitDefindex === undefined) continue;
-                const kitSku = SKU.fromObject({ defindex: kitDefindex, quality: 6 });
-                const weaponSku = SKU.fromObject({ defindex: targetWeaponDefindex, quality: 6 });
-                const kitId = takeFromSku(kitSku);
-                if (!kitId) continue;
-                const weaponId = takeFromSku(weaponSku);
-                if (!weaponId) {
-                    usedIds.delete(kitId);
-                    continue;
+                // Fallback: an unapplied Killstreak Kit of the right tier, plus a plain weapon that
+                // kit can actually be applied to.
+                //
+                // The pairing is driven by the KIT's own target, not the fabricator's. Every kit is
+                // bound to one specific weapon (attribute 2012, surfaced as the `td-` SKU segment),
+                // while the recipe's weapon slot decodes with itemDefIndex=0 — any weapon of the
+                // right killstreak tier satisfies it. Keying off the fabricator's target weapon
+                // instead would refuse a Scattergun kit + Scattergun for a fabricator that happens
+                // to target something else, even though that pair crafts perfectly well.
+                //
+                // Candidates arrive already normalized for the stock/"Upgradeable" defindex split
+                // (Scattergun 13 vs 200) — see the lookupKillstreakKit closures in MyHandler.
+                for (const kit of lookupKillstreakKit(requiredTier, true)) {
+                    if (usedIds.has(kit.id)) continue;
+                    // Exact `defindex;6` deliberately: the weapon must be Unique AND craftable,
+                    // because an uncraftable weapon yields an uncraftable killstreak weapon, which
+                    // buildCraftComponents then refuses as a recipe ingredient.
+                    const weaponId = takeFromSku(SKU.fromObject({ defindex: kit.targetDefindex, quality: 6 }));
+                    if (!weaponId) continue;
+                    usedIds.add(kit.id);
+                    assetIds.push(kit.id, weaponId);
+                    foundForSlot++;
+                    break;
                 }
-                assetIds.push(kitId, weaponId);
-                foundForSlot++;
             }
             if (foundForSlot < needed) {
                 missing.push(`${needed - foundForSlot}× kt-${requiredTier} weapon (or kit + weapon)`);

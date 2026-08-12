@@ -61,12 +61,13 @@ import {
     buildCraftComponents,
     findPartnerComponents,
     extractTargetWeaponName,
-    ksKitTierFromName,
+    PartnerKitCandidate,
     KS_KIT_DEFINDEXES,
     FABRICATOR_DEFINDEXES,
     ATTR_TOOL_TARGET_ITEM,
     getItemAttrValue
 } from '../../lib/fabricatorSlots';
+import { fixItem } from '../../lib/items';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -3243,13 +3244,6 @@ export default class MyHandler extends Handler {
                 );
             }
 
-            const kitDefindexByTier: Partial<Record<number, number>> = {};
-            for (const defindex of KS_KIT_DEFINDEXES) {
-                const kitSchemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
-                const tier = kitSchemaItem ? ksKitTierFromName(kitSchemaItem.item_name) : undefined;
-                if (tier !== undefined) kitDefindexByTier[tier] = defindex;
-            }
-
             let theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
             let fetchErr: Error | undefined;
             for (let attempt = 1; attempt <= 3; attempt++) {
@@ -3356,10 +3350,9 @@ export default class MyHandler extends Handler {
 
             const result = findPartnerComponents(
                 fab as any,
-                targetWeaponDefindex,
-                kitDefindexByTier,
                 (sku, tradableOnly) => excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)),
-                lookupKillstreakWeapon
+                lookupKillstreakWeapon,
+                (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly)
             );
 
             if (targetWeaponDefindex !== null && result.missing.some(m => m.includes('weapon'))) {
@@ -3469,13 +3462,6 @@ export default class MyHandler extends Handler {
         // See fetchTradeUrlToken on handleCraftingIntake above.
         const token = await fetchTradeUrlToken(partnerSteamID64);
         try {
-            const kitDefindexByTier: Partial<Record<number, number>> = {};
-            for (const defindex of KS_KIT_DEFINDEXES) {
-                const kitSchemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
-                const tier = kitSchemaItem ? ksKitTierFromName(kitSchemaItem.item_name) : undefined;
-                if (tier !== undefined) kitDefindexByTier[tier] = defindex;
-            }
-
             let theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
             let fetchErr: Error | undefined;
             for (let attempt = 1; attempt <= 3; attempt++) {
@@ -3600,10 +3586,9 @@ export default class MyHandler extends Handler {
 
                 const result = findPartnerComponents(
                     fab as any,
-                    targetWeaponDefindex,
-                    kitDefindexByTier,
                     (sku, tradableOnly) => excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)),
                     lookupKillstreakWeapon,
+                    (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly),
                     usedIds
                 );
 
@@ -4083,6 +4068,47 @@ export default class MyHandler extends Handler {
         } catch (err) {
             return `❌ Failed to return fabricator ${fabAssetId} to ${partnerSteamID64}: ${this.describeSendError(err)}. Still held — try again.`;
         }
+    }
+
+    /**
+     * Unapplied Killstreak Kits of a given tier in a partner's inventory, each paired with the
+     * weapon defindex it can be applied to.
+     *
+     * Shared by both findPartnerComponents callsites rather than duplicated into each, unlike the
+     * two copies of lookupKillstreakWeapon that already exist either side of it.
+     *
+     * Two things here are easy to get wrong:
+     *
+     * - **Do not filter out `uncraftable`.** Killstreak Kits are always Non-Craftable, so the filter
+     *   that is correct for weapon candidates would reject every kit in existence. Craftability of
+     *   the *weapon* is what matters, and that is enforced at the weapon lookup instead.
+     * - **The target defindex must be normalized through `fixItem`.** A kit records its target as
+     *   the raw schema defindex, but partner-inventory SKU keys come from getSKU, which runs
+     *   `fixItem` and rewrites stock weapons to their "Upgradeable" twin (Scattergun 13 -> 200).
+     *   Comparing the two unnormalized silently finds nothing.
+     */
+    private killstreakKitCandidates(
+        theirInventory: Inventory,
+        killstreakTier: number,
+        tradableOnly = true
+    ): PartnerKitCandidate[] {
+        const results: PartnerKitCandidate[] = [];
+        for (const sku of Object.keys(theirInventory.getItems)) {
+            const parts = sku.split(';');
+            if (!KS_KIT_DEFINDEXES.includes(parseInt(parts[0], 10))) continue;
+            if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+
+            const td = parts.find(p => p.startsWith('td-'));
+            if (td === undefined) continue;
+            const rawTarget = parseInt(td.slice(3), 10);
+            if (isNaN(rawTarget)) continue;
+
+            const targetDefindex = fixItem({ defindex: rawTarget, quality: 6 } as any, this.bot.schema).defindex;
+            for (const id of theirInventory.findBySKU(sku, tradableOnly)) {
+                results.push({ id, targetDefindex });
+            }
+        }
+        return results;
     }
 
     // summarizeOffer.ts reads offer.data('dict') and crashes (Object.keys on null) if it's never set.
