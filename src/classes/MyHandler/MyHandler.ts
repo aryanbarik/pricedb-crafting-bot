@@ -3390,15 +3390,26 @@ export default class MyHandler extends Handler {
                 (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly)
             );
 
-            if (targetWeaponDefindex !== null && result.missing.some(m => m.includes('weapon'))) {
-                const ownedSkusForDefindex = Object.keys(theirInventory.getItems).filter(
-                    sku => sku.split(';')[0] === String(targetWeaponDefindex)
-                );
+            // Reports what the two weapon-slot routes actually had to work with. It used to list the
+            // partner's holdings of the FABRICATOR's target defindex, which stopped being what gets
+            // searched: route 1 scans every SKU for a matching kt- tier regardless of weapon type,
+            // and route 2 searches whatever each kit targets. A diagnostic naming the wrong
+            // inventory is worse than none — it sends the next investigation somewhere real but
+            // irrelevant.
+            const unmatchedWeaponSlot = result.missing.find(m => m.includes('weapon'));
+            if (unmatchedWeaponSlot !== undefined) {
+                const partnerSkus = Object.keys(theirInventory.getItems);
+                const isKit = (sku: string): boolean => KS_KIT_DEFINDEXES.includes(parseInt(sku.split(';')[0], 10));
+                // Capped: this is one debug line, and a large inventory can hold hundreds of each.
+                const summarize = (skus: string[]): string =>
+                    skus.length === 0
+                        ? '(none)'
+                        : skus.slice(0, 15).join(', ') + (skus.length > 15 ? `, …and ${skus.length - 15} more` : '');
+
                 log.debug(
-                    `[craftingService] Intake: weapon slot unmatched — searched defindex ${targetWeaponDefindex}, ` +
-                        `partner's inventory SKUs for that defindex: ${
-                            ownedSkusForDefindex.length > 0 ? ownedSkusForDefindex.join(', ') : '(none)'
-                        }`
+                    `[craftingService] Intake: ${unmatchedWeaponSlot} — partner's killstreak weapons: ` +
+                        `${summarize(partnerSkus.filter(s => /;kt-\d/.test(s) && !isKit(s)))}; ` +
+                        `killstreak kits: ${summarize(partnerSkus.filter(isKit))}`
                 );
             }
 
