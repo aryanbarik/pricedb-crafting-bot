@@ -3025,9 +3025,24 @@ export default class MyHandler extends Handler {
                             // reassigns the moment the items land here. A kit in a crafting trade is
                             // always there to be applied — it can never serve as a recipe component,
                             // since KS_KIT_DEFINDEXES slots are output specs and are filtered out.
-                            const unappliedKits = availablePool.filter((i: any) =>
-                                KS_KIT_DEFINDEXES.includes(i.def_index)
-                            );
+                            // Normalized through fixItem before the check, because Basic Killstreak
+                            // Kits come in ~25 per-weapon defindexes (items.ts: Rocket Launcher
+                            // 5726, Scattergun 5727 … Wrench 5794, Revolver 5795 …) on top of the
+                            // generic 6527. fixItem folds every one of them to 6527.
+                            //
+                            // The raw def_index alone is not enough here even though it is what the
+                            // request side sees as a kit: partner-inventory SKUs come from getSKU,
+                            // which already runs fixItem, so all variants look like 6527;6 there.
+                            // The GC backpack reports the raw defindex with no normalization.
+                            // On 2026-08-12 that split cost a customer a craft — a Killstreak Wrench
+                            // Kit (5794) was requested correctly, arrived, and was then not
+                            // recognised as a kit at all (offer 9297250691).
+                            const isKillstreakKit = (i: any): boolean =>
+                                KS_KIT_DEFINDEXES.includes(
+                                    fixItem({ defindex: i.def_index, quality: 6 } as any, this.bot.schema).defindex
+                                );
+
+                            const unappliedKits = availablePool.filter(isKillstreakKit);
 
                             if (unappliedKits.length === 0) {
                                 if (fabricatorAssetIds.length === 0) {
@@ -3043,15 +3058,12 @@ export default class MyHandler extends Handler {
                             const robotPartItems = availablePool.filter((i: any) => ROBOT_PART_DEFINDEXES.includes(i.def_index));
                             const hasKsAttr = (i: any): boolean =>
                                 ((i as any).attribute ?? []).some((a: any) => a.def_index === 2025);
-                            const alreadyKsWeapons = availablePool.filter((i: any) =>
-                                !KS_KIT_DEFINDEXES.includes(i.def_index) &&
-                                !ROBOT_PART_DEFINDEXES.includes(i.def_index) &&
-                                hasKsAttr(i)
+                            const alreadyKsWeapons = availablePool.filter(
+                                (i: any) => !isKillstreakKit(i) && !ROBOT_PART_DEFINDEXES.includes(i.def_index) && hasKsAttr(i)
                             );
-                            const plainWeapons = availablePool.filter((i: any) =>
-                                !KS_KIT_DEFINDEXES.includes(i.def_index) &&
-                                !ROBOT_PART_DEFINDEXES.includes(i.def_index) &&
-                                !hasKsAttr(i)
+                            const plainWeapons = availablePool.filter(
+                                (i: any) =>
+                                    !isKillstreakKit(i) && !ROBOT_PART_DEFINDEXES.includes(i.def_index) && !hasKsAttr(i)
                             );
 
                             // Match each kit to an unused weapon whose defindex equals the kit's own
@@ -3122,12 +3134,39 @@ export default class MyHandler extends Handler {
                                         .map(id => currentBp.find((i: any) => String(i.id) === id))
                                         .filter(Boolean);
 
+                                    // Weapons the customer sent that no kit was applied to. Nothing
+                                    // downstream consumes these — fullPool below is built from robot
+                                    // parts, already-killstreak weapons and craft results only — so
+                                    // without carrying them explicitly they are silently kept.
+                                    //
+                                    // That is how a Killstreak Wrench Kit went missing on
+                                    // 2026-08-12: unrecognised as a kit, it fell into plainWeapons,
+                                    // was matched by nothing, and never appeared in the return offer.
+                                    // The recognition bug is fixed above, but the reason it became a
+                                    // LOST item rather than a failed craft was this gap, and any
+                                    // future item the classifier does not understand would land here
+                                    // the same way.
+                                    const unusedPlainWeapons = plainWeapons.filter(
+                                        (w: any) => !usedWeaponIds.has(String(w.id))
+                                    );
+                                    if (unusedPlainWeapons.length > 0) {
+                                        log.info(
+                                            `[craftingService] ${unusedPlainWeapons.length} weapon(s) went unused by kit application — returning them: ` +
+                                                `${unusedPlainWeapons.map((w: any) => String(w.id)).join(', ')}`
+                                        );
+                                    }
+
                                     if (newFabs.length === 0) {
-                                        // Kit-only trade — return the resulting KS weapons directly
-                                        log.info(`[craftingService] Kit-only trade — returning ${resultWeaponIds.length} KS weapon(s)`);
+                                        // Kit-only trade — return the resulting KS weapons directly,
+                                        // plus anything the customer sent that we did not use.
+                                        const kitOnlyReturnIds = [
+                                            ...resultWeaponIds,
+                                            ...unusedPlainWeapons.map((w: any) => String(w.id))
+                                        ];
+                                        log.info(`[craftingService] Kit-only trade — returning ${kitOnlyReturnIds.length} item(s)`);
                                         const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                        this.prepareCraftingOffer(returnOffer, resultWeaponIds, []);
-                                        resultWeaponIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                                        this.prepareCraftingOffer(returnOffer, kitOnlyReturnIds, []);
+                                        kitOnlyReturnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
                                         const attemptSend = (retriesLeft: number): void => {
                                             this.bot.trades.sendOffer(returnOffer)
@@ -3141,7 +3180,7 @@ export default class MyHandler extends Handler {
                                                         return;
                                                     }
                                                     log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
-                                                    this.holdReturnItems(partnerSteamID64, resultWeaponIds);
+                                                    this.holdReturnItems(partnerSteamID64, kitOnlyReturnIds);
                                                     this.bot.sendMessage(
                                                         offer.partner,
                                                         `⚠️ Crafting complete but I couldn't send your weapon just now — I'll retry automatically shortly, no action needed.`
@@ -3152,7 +3191,17 @@ export default class MyHandler extends Handler {
                                         return;
                                     }
 
-                                    const fullPool = [...robotPartItems, ...alreadyKsWeapons, ...resultWeaponItems];
+                                    // unusedPlainWeapons ride along so runMultiFabCraft sweeps them
+                                    // into leftoverIds and sendResults ships them home. They cannot
+                                    // be mistaken for components: robot-part slots match on an
+                                    // exact 5700-5707 defindex and weapon slots require a killstreak
+                                    // tier attribute, which by definition these do not carry.
+                                    const fullPool = [
+                                        ...robotPartItems,
+                                        ...alreadyKsWeapons,
+                                        ...resultWeaponItems,
+                                        ...unusedPlainWeapons
+                                    ];
                                     log.debug(`[craftingService] Kit application done — pool: ${fullPool.length} item(s) for fab crafting`);
                                     runMultiFabCraft(fullPool);
                                     return;
