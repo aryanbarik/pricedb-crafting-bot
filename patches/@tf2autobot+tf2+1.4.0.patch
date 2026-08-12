@@ -40,7 +40,7 @@ index e83dafd..f56727d 100644
  handlers[Language.FreeTrial_ThankedBySomeone] = function(body) {
  	let proto = decodeProto(Schema.CMsgTFThankedBySomeone, body);
 diff --git a/node_modules/@tf2autobot/tf2/index.js b/node_modules/@tf2autobot/tf2/index.js
-index aa5062f..9b89c40 100644
+index aa5062f..c9ca6ca 100644
 --- a/node_modules/@tf2autobot/tf2/index.js
 +++ b/node_modules/@tf2autobot/tf2/index.js
 @@ -241,6 +241,27 @@ TeamFortress2.prototype.useItem = function(item) {
@@ -71,3 +71,22 @@ index aa5062f..9b89c40 100644
  TeamFortress2.prototype.tradeUP = function (items) {
      this._send(Language.CraftCollectionUpgrade, Schema.CMsgCraftCollectionUpgrade, {
          "item_id": items
+@@ -265,6 +286,18 @@ TeamFortress2.prototype.applyStrangifierOrUnusualifier = function (item, strangi
+     });
+ };
+ 
++// Applies a tool to a BASE (stock / Normal-quality) item, which has no CSOEconItem and therefore no
++// item id to address -- it is identified by defindex instead. This is what the in-game "Show Stock
++// Items" checkbox switches the item picker over to. Message 1091, distinct from ApplyXifier (1082).
++// There is no k_EMsgGCApplyBaseItemXifierResponse, so success is observed via itemAcquired: the GC
++// creates a NEW item and leaves the base item alone.
++TeamFortress2.prototype.applyToolToBaseItem = function (toolItemId, baseitemDefIndex) {
++    this._send(Language.ApplyBaseItemXifier, Schema.CMsgApplyToolToBaseItem, {
++        "tool_item_id": toolItemId,
++        "baseitem_def_index": baseitemDefIndex
++    });
++};
++
+ TeamFortress2.prototype.sortBackpack = function(sortType) {
+ 	this._send(Language.SortItems, Schema.CMsgSortItems, {"sort_type": sortType});
+ };
