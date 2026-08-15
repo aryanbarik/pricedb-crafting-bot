@@ -1418,6 +1418,54 @@ export default class TF2GC {
         return this.connectToGC().then(() => backpackLoaded);
     }
 
+    /**
+     * Replaces the GC backpack snapshot even when node-tf2 still reports a live session.
+     *
+     * Steam can briefly reject a newly crafted item in an outbound offer with EResult 26 while
+     * the GC has already emitted it into the current backpack. In that state
+     * `ensureFreshBackpack()` intentionally does nothing, so the only supported way to obtain a
+     * fresh SOCacheSubscribed snapshot is to leave TF2 and enter it again.
+     *
+     * This is deliberately an exceptional recovery operation, not a normal inventory read.
+     */
+    forceFreshBackpack(): Promise<void> {
+        if (!this.bot.tf2.haveGCSession) {
+            return this.ensureFreshBackpack();
+        }
+
+        log.warn('forceFreshBackpack: restarting the TF2 GC session after an inventory-sync failure');
+
+        return new Promise((resolve, reject) => {
+            let reconnectStarted = false;
+            const cleanup = (): void => {
+                clearTimeout(timeout);
+                this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+                this.bot.tf2.removeListener('backpackLoaded', onBackpackLoaded);
+            };
+            const onBackpackLoaded = (): void => {
+                cleanup();
+                resolve();
+            };
+            const onDisconnected = (): void => {
+                reconnectStarted = true;
+                // Use the normal presence writer so custom/live-key-status presence is restored
+                // together with TF2, rather than replacing it with a bare gamesPlayed(440).
+                this.bot.updateSteamGamePresence(true);
+            };
+            const timeout = setTimeout(() => {
+                cleanup();
+                if (!reconnectStarted) this.bot.updateSteamGamePresence(true);
+                reject(new Error('Timed out waiting for a fresh TF2 GC backpack snapshot'));
+            }, 30000);
+
+            // Register before leaving TF2: SOCacheSubscribed can arrive in the same tick as the
+            // next ClientWelcome, and missing it would turn a successful reset into a timeout.
+            this.bot.tf2.once('backpackLoaded', onBackpackLoaded);
+            this.bot.tf2.once('disconnectedFromGC', onDisconnected);
+            this.bot.client.gamesPlayed([]);
+        });
+    }
+
     private connectToGC(): Promise<void> {
         return new Promise((resolve, reject) => {
             if (!this.isConnectedToGC) {
