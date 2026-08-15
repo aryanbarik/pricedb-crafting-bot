@@ -216,10 +216,6 @@ export default class MyHandler extends Handler {
     // retryHeldReturn (wired to the admin-only !retryreturn command).
     private heldReturnItems = new Map<string, string[]>();
 
-    // A forced GC reconnect is disruptive, so each held return batch gets at most one such
-    // recovery attempt. The regular three-minute retry remains available if Steam still needs
-    // more time to reconcile a freshly crafted item.
-    private forcedGCRefreshForHeldReturn = new Set<string>();
 
     // Backpack IDs the bot is holding on someone else's behalf: received in a crafting trade but not
     // yet crafted away or returned. Only self-fill reads this, and only to avoid spending a
@@ -2893,15 +2889,22 @@ export default class MyHandler extends Handler {
                                 const failedFabIds: string[] = [...uncraftableFabIds];
                                 let planIndex = 0;
 
-                                const sendResults = (): void => {
+                                const sendResults = async (): Promise<void> => {
                                     const returnIds = [...resultKitIds, ...partialFabIds, ...failedFabIds, ...leftoverIds];
                                     if (returnIds.length === 0) {
                                         log.warn(`[craftingService] Nothing to return for offer ${offer.id}`);
                                         return;
                                     }
+                                    log.info(`[craftingService] Refreshing the TF2 GC backpack before returning ${returnIds.length} crafted item(s)`);
+                                    try {
+                                        await this.bot.tf2gc.forceFreshBackpack();
+                                    } catch (refreshErr) {
+                                        log.warn(`[craftingService] Pre-return GC backpack refresh failed: ${(refreshErr as Error).message}`);
+                                    }
+
                                     const returnOffer = this.bot.manager.createOffer(offer.partner, token);
                                     this.prepareCraftingOffer(returnOffer, returnIds, []);
-                                    returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+                                    returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: "2", assetid: id }));
 
                                     let msg: string;
                                     if (resultKitIds.length > 0 && partialFabIds.length === 0 && failedFabIds.length === 0 && leftoverIds.length === 0) {
@@ -2957,10 +2960,9 @@ export default class MyHandler extends Handler {
                                     };
                                     attemptSend(3);
                                 };
-
                                 const craftNext = (): void => {
                                     if (planIndex >= craftPlan.length) {
-                                        sendResults();
+                                        void sendResults();
                                         return;
                                     }
                                     const { fabId, componentIds } = craftPlan[planIndex++];
@@ -4547,10 +4549,8 @@ export default class MyHandler extends Handler {
         const backpack = await this.freshGCBackpack();
         const stillOwned = heldIds.filter(id => backpack.some((i: any) => String(i.id) === id));
         const missing = heldIds.filter(id => !stillOwned.includes(id));
-
         if (stillOwned.length === 0) {
             this.heldReturnItems.delete(partnerSteamID64);
-            this.forcedGCRefreshForHeldReturn.delete(partnerSteamID64);
             return `❌ None of the held items (${heldIds.join(', ')}) are still in the bot's backpack — already sent or traded away? Cleared the hold.`;
         }
 
@@ -4564,29 +4564,14 @@ export default class MyHandler extends Handler {
 
         try {
             const status = await this.bot.trades.sendOffer(returnOffer);
-            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+            if (status === "pending") void this.bot.trades.acceptConfirmation(returnOffer);
             this.heldReturnItems.delete(partnerSteamID64);
-            this.forcedGCRefreshForHeldReturn.delete(partnerSteamID64);
             return (
                 `🔄 Retried return offer to ${partnerSteamID64} with ${stillOwned.length} item(s)` +
-                (missing.length > 0 ? ` (skipped ${missing.length} no-longer-owned item(s): ${missing.join(', ')})` : '') +
+                (missing.length > 0 ? ` (skipped ${missing.length} no-longer-owned item(s): ${missing.join(", ")})` : "") +
                 `.`
             );
         } catch (err) {
-            if (
-                (err as CustomError)?.eresult === 26 &&
-                !this.forcedGCRefreshForHeldReturn.has(partnerSteamID64)
-            ) {
-                this.forcedGCRefreshForHeldReturn.add(partnerSteamID64);
-                log.warn(
-                    `[craftingService] Return to ${partnerSteamID64} got EResult 26; forcing one fresh TF2 GC backpack snapshot before retrying`
-                );
-                try {
-                    await this.bot.tf2gc.forceFreshBackpack();
-                } catch (refreshErr) {
-                    log.warn(`[craftingService] Forced GC backpack refresh failed: ${(refreshErr as Error).message}`);
-                }
-            }
             return `❌ Retry failed: ${this.describeSendError(err)}. Items remain held.`;
         }
     }
