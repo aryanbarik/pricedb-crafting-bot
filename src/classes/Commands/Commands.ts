@@ -216,6 +216,8 @@ export default class Commands {
                 void this.returnFabCommand(steamID, message);
             } else if (command === 'returnitems' && isAdmin) {
                 void this.returnItemsCommand(steamID, message);
+            } else if (command === 'donateparts' && isAdmin) {
+                void this.donatePartsCommand(steamID);
             } else if (command === 'mcosell' && isAdmin) {
                 void this.manncoListCommand(steamID, message);
             } else if (command === 'mcobuy' && isAdmin) {
@@ -785,6 +787,47 @@ export default class Commands {
 
         clearTimeout(this.adminInventoryReset);
         delete this.adminInventory[steamID.getSteamID64()];
+    }
+
+    /** Request every tradable robot part in the requesting admin inventory. */
+    private async donatePartsCommand(steamID: SteamID): Promise<void> {
+        const robotPartDefindexes = new Set([5700, 5701, 5702, 5703, 5704, 5705, 5706, 5707]);
+        const inventory = new Inventory(steamID, this.bot, 'admin', this.bot.boundInventoryGetter);
+
+        try {
+            await inventory.fetch();
+        } catch (err) {
+            log.warn('Failed to fetch inventory for robot-parts deposit from ' + steamID.getSteamID64() + ':', err);
+            return this.bot.sendMessage(
+                steamID,
+                '❌ I could not load your inventory. Make sure it is public and try again.'
+            );
+        }
+
+        const assetids = [...robotPartDefindexes].flatMap(defindex => inventory.findBySKU(String(defindex) + ';6', true));
+        if (assetids.length === 0) {
+            return this.bot.sendMessage(steamID, '❌ I could not find any tradable robot parts in your inventory.');
+        }
+
+        const offer = this.bot.manager.createOffer(steamID);
+        for (const assetid of assetids) {
+            if (!offer.addTheirItem({ appid: 440, contextid: '2', assetid })) {
+                return this.bot.sendMessage(steamID, '❌ Failed to add a robot part to the deposit offer.');
+            }
+        }
+
+        offer.setMessage(`Requesting ${assetids.length} robot ${pluralize('part', assetids.length)} for deposit.`);
+
+        try {
+            await this.bot.trades.sendOffer(offer);
+            this.bot.sendMessage(
+                steamID,
+                `✅ Sent deposit offer ${offer.id} requesting ${assetids.length} robot ${pluralize('part', assetids.length)}.`
+            );
+        } catch (err) {
+            log.warn('Failed to send robot-parts deposit offer to ' + steamID.getSteamID64() + ':', err);
+            this.bot.sendMessage(steamID, '❌ Failed to send robot-parts deposit offer: ' + (err as Error).message);
+        }
     }
 
     // Trade actions
