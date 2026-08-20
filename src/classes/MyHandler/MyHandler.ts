@@ -3857,10 +3857,8 @@ export default class MyHandler extends Handler {
      * name-parsing fallback for others — both already handled internally before the item is ever
      * stored in the inventory dict), so a simple regex on the SKU works for every Strangifier type.
      */
-    async handleStrangifyCommand(partner: SteamID): Promise<void> {
+    async handleStrangifyCommand(partner: SteamID, query = "", prefix = "!"): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
-        // See fetchTradeUrlToken on handleCraftingIntake above.
-        const token = await fetchTradeUrlToken(partnerSteamID64);
         this.bot.sendMessage(partner, `🔍 Scanning your inventory for Strangifiers, one moment...`);
 
         const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
@@ -3887,6 +3885,29 @@ export default class MyHandler extends Handler {
             return;
         }
 
+        const trimmedQuery = query.trim();
+        if (trimmedQuery.length === 0) {
+            this.listStrangifyOptions(partner, theirInventory, prefix);
+            return;
+        }
+
+        const amountMatch = trimmedQuery.match(/\s+x(\d+)$/i);
+        const requestedAmount = amountMatch ? parseInt(amountMatch[1], 10) : 1;
+        let targetName = amountMatch ? trimmedQuery.slice(0, -amountMatch[0].length).trim() : trimmedQuery;
+        const nonCraftable = /^non-craftable\s+/i.test(targetName);
+        targetName = targetName.replace(/^non-craftable\s+/i, "").trim();
+        const targetItem = (this.bot.schema as any).getItemByItemName?.(targetName);
+        if (!targetItem || !Number.isInteger(targetItem.defindex) || requestedAmount < 1) {
+            this.bot.sendMessage(
+                partner,
+                "❌ Usage: " + prefix + "strangify [Non-Craftable ]<item name> x<amount> — for example: " +
+                    prefix + "strangify Non-Craftable Air Strike x3"
+            );
+            return;
+        }
+        const requestedTargetDefindex = targetItem.defindex as number;
+        const craftable = !nonCraftable;
+
         const usedIds = new Set<string>();
         const pairs: { strangifierId: string; weaponId: string }[] = [];
         const unmatched: string[] = [];
@@ -3899,12 +3920,13 @@ export default class MyHandler extends Handler {
             const tdMatch = sku.match(/;td-(\d+)/);
             const targetDefindex = tdMatch ? parseInt(tdMatch[1], 10) : null;
             if (targetDefindex === null) {
-                log.warn(`[strangifyService] Could not resolve target weapon for strangifier SKU ${sku} (${partnerSteamID64})`);
+                log.warn("[strangifyService] Could not resolve target weapon for strangifier SKU " + sku + " (" + partnerSteamID64 + ")");
                 continue;
             }
+            if (targetDefindex !== requestedTargetDefindex) continue;
 
             // Unique (6) and Genuine (1) are both valid strangify inputs.
-            const weaponSkus = [6, 1].map(quality => SKU.fromObject({ defindex: targetDefindex, quality }));
+            const weaponSkus = [6, 1].map(quality => SKU.fromObject({ defindex: targetDefindex, quality, craftable }));
             const strangifierIds = theirInventory.findBySKU(sku, true).filter(id => !usedIds.has(id));
 
             for (const strangifierId of strangifierIds) {
@@ -3922,24 +3944,24 @@ export default class MyHandler extends Handler {
                 usedIds.add(strangifierId);
                 usedIds.add(weaponId);
                 pairs.push({ strangifierId, weaponId });
+                if (pairs.length === requestedAmount) break;
             }
+            if (pairs.length === requestedAmount) break;
         }
 
         const uniqueUnmatched = [...new Set(unmatched)];
 
-        if (pairs.length === 0 && uniqueUnmatched.length === 0) {
-            this.bot.sendMessage(partner, `You don't have any Strangifiers in your inventory.`);
-            return;
-        }
-        if (pairs.length === 0) {
+        if (pairs.length < requestedAmount) {
             this.bot.sendMessage(
                 partner,
-                `Found Strangifier(s) but no matching Unique-quality weapon(s) owned for: ${uniqueUnmatched.join(', ')}. Nothing to request.`
+                "❌ Found " + pairs.length + " matching pair(s), but you requested " + requestedAmount +
+                    ". No offer sent. Run " + prefix + "strangify to see available quantities."
             );
             return;
         }
 
         const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+        const token = await fetchTradeUrlToken(partnerSteamID64);
         const requestOffer = this.bot.manager.createOffer(partner, token);
         const requestedIds = pairs.flatMap(p => [p.strangifierId, p.weaponId]);
         this.prepareCraftingOffer(requestOffer, [], requestedIds, theirInventory);
@@ -3976,6 +3998,70 @@ export default class MyHandler extends Handler {
                 });
         };
         attemptSend(3);
+    }
+
+    private listStrangifyOptions(partner: SteamID, theirInventory: Inventory, prefix: string): void {
+        const strangifierCounts = new Map<number, number>();
+
+        for (const sku of Object.keys(theirInventory.getItems)) {
+            const defindex = parseInt(sku.split(";")[0], 10);
+            const schemaItem = (this.bot.schema as any).getItemByDefindex?.(defindex);
+            if (!schemaItem || schemaItem.item_name !== "Strangifier") continue;
+
+            const tdMatch = sku.match(/;td-(\d+)/);
+            if (!tdMatch) continue;
+
+            const targetDefindex = parseInt(tdMatch[1], 10);
+            const count = theirInventory.findBySKU(sku, true).length;
+            strangifierCounts.set(targetDefindex, (strangifierCounts.get(targetDefindex) ?? 0) + count);
+        }
+
+        if (strangifierCounts.size === 0) {
+            this.bot.sendMessage(partner, "You do not have any Strangifiers in your inventory.");
+            return;
+        }
+
+        const commandLines: string[] = [];
+        for (const targetDefindex of [...strangifierCounts.keys()].sort((a, b) => a - b)) {
+            const targetName = (this.bot.schema as any).getItemByDefindex?.(targetDefindex)?.item_name;
+            if (!targetName) continue;
+
+            const strangifierCount = strangifierCounts.get(targetDefindex) ?? 0;
+            let foundMatchingWeapon = false;
+            for (const craftable of [true, false]) {
+                const weaponCount = [6, 1].reduce(
+                    (count, quality) => count + theirInventory.findBySKU(
+                        SKU.fromObject({ defindex: targetDefindex, quality, craftable }), true
+                    ).length,
+                    0
+                );
+                const pairCount = Math.min(strangifierCount, weaponCount);
+                if (pairCount === 0) continue;
+
+                commandLines.push(prefix + "strangify " + (craftable ? "" : "Non-Craftable ") + targetName + " x" + pairCount);
+                foundMatchingWeapon = true;
+            }
+
+            if (!foundMatchingWeapon) commandLines.push(prefix + "strangify " + targetName + " x" + strangifierCount);
+        }
+
+        if (commandLines.length === 0) {
+            this.bot.sendMessage(partner, "I could not resolve the target weapon names for your Strangifiers.");
+            return;
+        }
+
+        const header = "Available strangify commands (copy one line):";
+        let message = header;
+        for (const line of commandLines.sort((a, b) => a.localeCompare(b))) {
+            const next = message === header ? line : "\n" + line;
+            if (message.length + next.length > 900) {
+                this.bot.sendMessage(partner, message);
+                message = line;
+            } else {
+                message += next;
+            }
+        }
+        this.bot.sendMessage(partner, message);
     }
 
     /**

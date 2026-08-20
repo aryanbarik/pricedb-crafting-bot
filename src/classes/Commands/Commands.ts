@@ -199,7 +199,14 @@ export default class Commands {
                         : (command as CraftUncraft)
                 );
             } else if (command === 'strangify') {
-                void this.bot.handler.handleStrangifyCommand(steamID);
+                const args = removeLinkProtocol(message)
+                    .trim()
+                    .slice(prefix.length)
+                    .trim()
+                    .split(/\s+/)
+                    .slice(1)
+                    .join(' ');
+                void this.bot.handler.handleStrangifyCommand(steamID, args, prefix);
             } else if (['deposit', 'd'].includes(command) && isAdmin) {
                 void this.depositCommand(steamID, message, prefix);
             } else if (['withdraw', 'w'].includes(command) && isAdmin) {
