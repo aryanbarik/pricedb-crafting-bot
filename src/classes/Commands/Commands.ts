@@ -223,9 +223,13 @@ export default class Commands {
                 void this.returnFabCommand(steamID, message);
             } else if (command === 'returnitems' && isAdmin) {
                 void this.returnItemsCommand(steamID, message);
-            } else if (command === "donateweps") {
-                void this.donateWeaponsCommand(steamID);
-            } else if (command === "donateparts") {
+            } else if (command === 'donateweps') {
+                const hasTradeUrlArgument = CommandParser.removeCommand(message).trim() !== '';
+                if (hasTradeUrlArgument && !isAdmin) {
+                    return this.bot.sendMessage(steamID, '❌ Command not available.');
+                }
+                void this.donateWeaponsCommand(steamID, message);
+            } else if (command === 'donateparts') {
                 void this.donatePartsCommand(steamID);
             } else if (command === 'mcosell' && isAdmin) {
                 void this.manncoListCommand(steamID, message);
@@ -844,17 +848,63 @@ export default class Commands {
         }
     }
 
-    /** Request duplicate craftable Unique weapons while preserving one unless a Strange exists. */
-    private async donateWeaponsCommand(steamID: SteamID): Promise<void> {
-        const inventory = new Inventory(steamID, this.bot, 'their', this.bot.boundInventoryGetter);
+    /**
+     * Request duplicate craftable Unique weapons while preserving one unless a Strange exists.
+     *
+     * With no argument this requests the administrator's own duplicates. An administrator can
+     * instead supply a Steam trade URL to request a friend's duplicates directly, e.g.
+     * !donateweps https://steamcommunity.com/tradeoffer/new/?partner=123&token=abcdefgh
+     * A profile URL is deliberately not accepted: it carries no trade token, so it cannot create
+     * a reliable outbound offer to a non-friend.
+     */
+    private async donateWeaponsCommand(requester: SteamID, message: string): Promise<void> {
+        const rawTradeUrl = CommandParser.removeCommand(message).trim();
+        let recipient = requester;
+        let tradeToken: string | undefined;
+
+        if (rawTradeUrl !== '') {
+            let tradeUrl: URL;
+            try {
+                tradeUrl = new URL(rawTradeUrl);
+            } catch {
+                return this.bot.sendMessage(
+                    requester,
+                    '❌ Provide a full Steam trade URL (including its token), not a profile URL.'
+                );
+            }
+
+            const partner = tradeUrl.searchParams.get('partner');
+            const token = tradeUrl.searchParams.get('token');
+            const validPartner =
+                partner !== null && /^\d+$/.test(partner) && Number(partner) > 0 && Number(partner) <= 0xffffffff;
+            if (
+                tradeUrl.protocol !== 'https:' ||
+                tradeUrl.hostname !== 'steamcommunity.com' ||
+                !/^\/tradeoffer\/new\/?$/.test(tradeUrl.pathname) ||
+                !validPartner ||
+                token === null ||
+                token === ''
+            ) {
+                return this.bot.sendMessage(
+                    requester,
+                    '❌ Provide a valid Steam trade URL with both partner and token parameters.'
+                );
+            }
+
+            recipient = new SteamID('[U:1:' + partner + ']');
+            tradeToken = token;
+        }
+
+        const recipientSteamID64 = recipient.getSteamID64();
+        const inventory = new Inventory(recipient, this.bot, 'their', this.bot.boundInventoryGetter);
 
         try {
             await inventory.fetch();
         } catch (err) {
-            log.warn('Failed to fetch inventory for weapon deposit from ' + steamID.getSteamID64() + ':', err);
+            log.warn('Failed to fetch inventory for weapon donation from ' + recipientSteamID64 + ':', err);
             return this.bot.sendMessage(
-                steamID,
-                '❌ I could not load your inventory. Make sure it is public and try again.'
+                requester,
+                '❌ I could not load that inventory. Make sure it is public and try again.'
             );
         }
 
@@ -864,7 +914,7 @@ export default class Commands {
             .map(item => {
                 const sku = item.getSKU(this.bot.schema, false, false, false, false, []).sku;
                 const parsed = SKU.fromString(sku);
-                return { item, sku, parsed, baseSku: `${parsed.defindex};6` };
+                return { item, sku, parsed, baseSku: String(parsed.defindex) + ';6' };
             });
         const strangeWeaponSkus = new Set(
             items
@@ -895,36 +945,69 @@ export default class Commands {
         });
         if (assetids.length === 0) {
             return this.bot.sendMessage(
-                steamID,
-                '❌ I could not find duplicate eligible craftable Unique weapons in your inventory.'
+                requester,
+                '❌ I could not find duplicate eligible craftable Unique weapons in ' +
+                    (rawTradeUrl === '' ? 'your' : 'that') +
+                    ' inventory.'
             );
         }
 
-        const offer = this.bot.manager.createOffer(steamID);
-        for (const assetid of assetids) {
-            if (!offer.addTheirItem({ appid: 440, contextid: '2', assetid })) {
-                return this.bot.sendMessage(steamID, '❌ Failed to add a weapon to the deposit offer.');
-            }
+        // Steam allows at most 255 items on one side of a trade. Send all eligible duplicates in
+        // independent offers rather than silently omitting anything from a large donation.
+        const maxItemsPerOffer = 255;
+        const chunks: string[][] = [];
+        for (let i = 0; i < assetids.length; i += maxItemsPerOffer) {
+            chunks.push(assetids.slice(i, i + maxItemsPerOffer));
         }
-        offer.setMessage(
-            `Requesting ${assetids.length} duplicate craftable Unique ${pluralize(
-                'weapon',
-                assetids.length
-            )} for deposit.`
-        );
 
+        const offerIds: string[] = [];
         try {
-            await this.bot.trades.sendOffer(offer);
+            for (const chunk of chunks) {
+                const offer = this.bot.manager.createOffer(recipient, tradeToken);
+                for (const assetid of chunk) {
+                    if (!offer.addTheirItem({ appid: 440, contextid: '2', assetid })) {
+                        throw new Error('Failed to add a weapon to the donation offer.');
+                    }
+                }
+                offer.setMessage(
+                    'Requesting ' +
+                        String(chunk.length) +
+                        ' duplicate craftable Unique ' +
+                        pluralize('weapon', chunk.length) +
+                        ' for donation.'
+                );
+
+                await this.bot.trades.sendOffer(offer);
+                offerIds.push(offer.id);
+            }
+
             this.bot.sendMessage(
-                steamID,
-                `✅ Sent deposit offer ${offer.id} requesting ${assetids.length} eligible ${pluralize(
-                    'weapon',
-                    assetids.length
-                )}.`
+                requester,
+                '✅ Sent ' +
+                    String(offerIds.length) +
+                    ' donation ' +
+                    pluralize('offer', offerIds.length) +
+                    ' to ' +
+                    recipientSteamID64 +
+                    ', requesting ' +
+                    String(assetids.length) +
+                    ' eligible ' +
+                    pluralize('weapon', assetids.length) +
+                    '.'
             );
         } catch (err) {
-            log.warn('Failed to send weapon deposit offer to ' + steamID.getSteamID64() + ':', err);
-            this.bot.sendMessage(steamID, '❌ Failed to send weapon deposit offer: ' + (err as Error).message);
+            log.warn('Failed to send weapon donation offer to ' + recipientSteamID64 + ':', err);
+            this.bot.sendMessage(
+                requester,
+                '❌ Failed after sending ' +
+                    String(offerIds.length) +
+                    '/' +
+                    String(chunks.length) +
+                    ' donation ' +
+                    pluralize('offer', chunks.length) +
+                    ': ' +
+                    (err as Error).message
+            );
         }
     }
 
