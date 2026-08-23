@@ -2616,6 +2616,11 @@ export default class MyHandler extends Handler {
                     offer.data(`isAccepted${isAcceptedWithEscrow ? '_withEscrow' : ''}`, true);
                     offer.log('trade', `has been accepted${isAcceptedWithEscrow ? ' with trade hold' : ''}.`);
 
+                    const deliveredCraftingReturn = offer.data('craftingServiceReturn') as { assetIds?: string[] } | undefined;
+                    if (Array.isArray(deliveredCraftingReturn?.assetIds)) {
+                        this.releaseCraftingInFlight(deliveredCraftingReturn.assetIds);
+                    }
+
                     // Auto sell and buy keys if ref < minimum
 
                     this.autokeys.check();
@@ -2645,14 +2650,32 @@ export default class MyHandler extends Handler {
                         // See fetchTradeUrlToken on handleCraftingIntake below — every offer sent
                         // from this block (refund, partial-fill/results return) is bot-initiated.
                         const token = await fetchTradeUrlToken(partnerSteamID64);
-                        const preTradeIds = craftingService.preTradeIds;
-                        log.info(`[craftingService] Trade ${offer.id} accepted — scheduling fabricator craft in 5s`);
-
-                        // preTradeIds was snapshotted before the trade was accepted (either in
-                        // onNewTradeOffer, or in HttpManager.ts / handleCraftingIntake for
-                        // bot-initiated website offers). After 5s the GC backpack is synced —
-                        // any ID not in the snapshot is from this trade.
-                        const knownIds = new Set<string>(preTradeIds ?? []);
+                        let receivedAssetIds: string[];
+                        try {
+                            receivedAssetIds = await this.getReceivedTradeAssetIds(offer);
+                        } catch (receiptErr) {
+                            const reason = this.describeSendError(receiptErr);
+                            log.warn(
+                                '[craftingService] Trade ' + offer.id + ' accepted but its receipt cannot safely identify received assets: ' + reason
+                            );
+                            this.bot.messageAdmins(
+                                '⚠️ Crafting offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: Steam receipt did not identify its received assets (' + reason + '). Do not refund by backpack diff.',
+                                []
+                            );
+                            this.bot.sendMessage(offer.partner, '⚠️ Steam did not give me a safe receipt for your items. They are being held for manual recovery; please do not resend anything.');
+                            return;
+                        }
+                        const expectedReceivedCount = offer.itemsToReceive.length;
+                        if (receivedAssetIds.length !== expectedReceivedCount) {
+                            log.warn('[craftingService] Trade ' + offer.id + ' receipt count mismatch: expected ' + expectedReceivedCount + ', got ' + receivedAssetIds.length + '; holding for manual recovery');
+                            this.bot.messageAdmins(
+                                '⚠️ Crafting offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: receipt count ' + receivedAssetIds.length + '/' + expectedReceivedCount + '. Do not refund by backpack diff.',
+                                []
+                            );
+                            this.bot.sendMessage(offer.partner, '⚠️ Steam returned an incomplete receipt for your items. They are being held for manual recovery; please do not resend anything.');
+                            return;
+                        }
+                        log.info('[craftingService] Trade ' + offer.id + ' accepted — received asset IDs: [' + receivedAssetIds.join(', ') + ']; scheduling fabricator craft in 5s');
 
                         if (craftingService.phase === 'intake') {
                             // Received one or more bare fabricators — read each one's real recipe
@@ -2662,7 +2685,8 @@ export default class MyHandler extends Handler {
 
                             const attemptIntakeDiff = async (attempt: number): Promise<void> => {
                                 const currentBackpack = await this.freshGCBackpack();
-                                const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
+                                const backpackById = new Map(currentBackpack.map((item: any) => [String(item.id), item]));
+                                const newItems = receivedAssetIds.map(id => backpackById.get(id)).filter((item): item is any => item !== undefined);
 
                                 // Exclude fabricators another (sibling) intake offer's own diff already
                                 // claimed — see claimedIntakeFabricatorIds' comment for why this happens.
@@ -2674,7 +2698,7 @@ export default class MyHandler extends Handler {
                                     )
                                     .sort((a: any, b: any) => a.def_index - b.def_index);
 
-                                log.debug(`[craftingService] Intake backpack diff (attempt ${attempt}): ${newItems.length} new item(s), ${newFabsFromDiff.length} unclaimed fabricator(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
+                                log.debug(`[craftingService] Intake backpack diff (attempt ${attempt}): ${newItems.length} new item(s), ${newFabsFromDiff.length} unclaimed fabricator(s) (receipt=${receivedAssetIds.length}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
 
                                 if (newFabsFromDiff.length !== expectedCount) {
                                     if (attempt < 3) {
@@ -2738,15 +2762,22 @@ export default class MyHandler extends Handler {
 
                         setTimeout(async () => {
                             const currentBackpack = await this.freshGCBackpack();
-                            const newItems = currentBackpack.filter((i: any) => !knownIds.has(String(i.id)));
-                            const allNewIds = newItems.map((i: any) => String(i.id));
+                            const backpackById = new Map(currentBackpack.map((item: any) => [String(item.id), item]));
+                            const newItems = receivedAssetIds.map(id => backpackById.get(id)).filter((item): item is any => item !== undefined);
+                            if (newItems.length !== receivedAssetIds.length) {
+                                const missingIds = receivedAssetIds.filter(id => !backpackById.has(id));
+                                log.warn('[craftingService] Trade ' + offer.id + ' receipt assets are missing from the GC backpack: ' + missingIds.join(', ') + '; holding for manual recovery');
+                                this.bot.messageAdmins('⚠️ Crafting offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: receipt assets missing from the GC backpack: ' + missingIds.join(', ') + '. Do not refund by backpack diff.', []);
+                                this.bot.sendMessage(offer.partner, '⚠️ I cannot safely locate every item from your accepted trade. They are being held for manual recovery; please do not resend anything.');
+                                return;
+                            }
+                            const allNewIds = receivedAssetIds;
 
-                            // Held from here until these items are crafted away or returned, so a
-                            // concurrent self-fill craft can't spend them. Released in sendResults
-                            // and doRefund once they're on their way back.
+                            // Held from here until each item is either consumed by the craft or the
+                            // customer accepts its return offer, so a concurrent job cannot spend it.
                             allNewIds.forEach((id: string) => this.craftingInFlightIds.add(id));
 
-                            log.debug(`[craftingService] Backpack diff: ${newItems.length} new item(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
+                            log.debug(`[craftingService] Backpack diff: ${newItems.length} new item(s) (receipt=${receivedAssetIds.length}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`);
 
                             // All new fabs in this trade's diff, Spec (20002) before Pro (20003)
                             const newFabsFromDiff = newItems
@@ -2823,7 +2854,9 @@ export default class MyHandler extends Handler {
                                     this.bot.trades.sendOffer(refundOffer)
                                         .then(status => {
                                             if (status === 'pending') void this.bot.trades.acceptConfirmation(refundOffer);
-                                            this.releaseCraftingInFlight(allNewIds);
+                                            // Keep every refunded asset reserved until Steam reports the
+                                            // return offer accepted; a sent offer can still expire or be declined.
+                                            refundIds.forEach(id => this.craftingInFlightIds.add(id));
                                         })
                                         .catch((sendErr: Error) => {
                                             if (retriesLeft > 0) {
@@ -2926,13 +2959,18 @@ export default class MyHandler extends Handler {
                                         msg = parts.join(', ') + '. Thanks!';
                                     }
 
+                                    // Inputs consumed by the GC can be released now. Every item that will
+                                    // be returned stays reserved until this return offer is accepted.
+                                    this.releaseCraftingInFlight(allNewIds.filter(id => !returnIds.includes(id)));
+                                    returnIds.forEach(id => this.craftingInFlightIds.add(id));
+
                                     returnOffer.setMessage(msg.slice(0, 128));
                                     log.info(`[craftingService] Sending return offer to ${partnerSteamID64}: ${returnIds.length} item(s)`);
                                     const attemptSend = (retriesLeft: number): void => {
                                         this.bot.trades.sendOffer(returnOffer)
                                             .then(status => {
                                                 if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                                                this.releaseCraftingInFlight(allNewIds);
+                                                // Keep returnIds reserved until onTradeOfferChanged sees acceptance.
                                                 void notifyReturnOffer({
                                                     steamId: partnerSteamID64,
                                                     componentOfferId: offer.id,
@@ -2987,10 +3025,12 @@ export default class MyHandler extends Handler {
                                         } else if (result.kitId) {
                                             log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${result.kitId}`);
                                             resultKitIds.push(result.kitId);
+                                            this.craftingInFlightIds.add(result.kitId);
                                             this.reconcileSelfFilledComponents(result.selfFilledIds);
                                         } else if (result.partialFabId) {
                                             log.info(`[craftingService] Partial fill for fab ${fabId} — returning partially filled fab`);
                                             partialFabIds.push(result.partialFabId);
+                                            this.craftingInFlightIds.add(result.partialFabId);
                                             // A genuine partial fill (GC actually attached some components) consumes
                                             // them — they cease to exist as separate backpack items. But the timeout
                                             // path in TF2GC.craftFabricator can ALSO report partialFabId just because
@@ -4197,6 +4237,24 @@ export default class MyHandler extends Handler {
         };
 
         applyNext(0);
+    }
+
+    /** Exact bot-side asset IDs received by an accepted Steam trade. */
+    private async getReceivedTradeAssetIds(offer: TradeOffer): Promise<string[]> {
+        return new Promise((resolve, reject) => {
+            offer.getExchangeDetails(false, (err, _status, _tradeInitTime, receivedItems) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                const assetIds = (receivedItems ?? []).map(item => String(item.new_assetid ?? '')).filter(id => id !== '');
+                if (assetIds.length === 0 || new Set(assetIds).size !== assetIds.length) {
+                    reject(new Error('Steam receipt did not contain a complete, unique received-asset list'));
+                    return;
+                }
+                resolve(assetIds);
+            });
+        });
     }
 
     /**
