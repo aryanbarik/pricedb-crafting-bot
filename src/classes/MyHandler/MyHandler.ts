@@ -3934,11 +3934,12 @@ export default class MyHandler extends Handler {
             if (!KS_KIT_DEFINDEXES.includes(defindex)) continue;
 
             const targetMatch = sku.match(/;td-(\d+)/);
-            const targetDefindex = targetMatch ? parseInt(targetMatch[1], 10) : null;
-            if (targetDefindex === null) {
+            const rawTargetDefindex = targetMatch ? parseInt(targetMatch[1], 10) : null;
+            if (rawTargetDefindex === null) {
                 log.warn('[killstreakifyService] Could not resolve target weapon for kit SKU ' + sku + ' (' + partnerSteamID64 + ')');
                 continue;
             }
+            const targetDefindex = fixItem({ defindex: rawTargetDefindex, quality: 6 } as any, this.bot.schema).defindex;
 
             for (const kitId of theirInventory.findBySKU(sku, true)) {
                 if (usedIds.has(kitId)) continue;
@@ -4025,12 +4026,14 @@ export default class MyHandler extends Handler {
         const pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
         for (const kit of receivedItems) {
             const kitId = String(kit.id);
-            if (usedIds.has(kitId) || !KS_KIT_DEFINDEXES.includes(kit.def_index)) continue;
-            const targetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
-            if (targetDefindex === null) {
+            const normalizedKitDefindex = fixItem({ defindex: kit.def_index, quality: 6 } as any, this.bot.schema).defindex;
+            if (usedIds.has(kitId) || !KS_KIT_DEFINDEXES.includes(normalizedKitDefindex)) continue;
+            const rawTargetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
+            if (rawTargetDefindex === null) {
                 log.warn('[killstreakifyService] Received kit ' + kitId + ' has no target-weapon attribute');
                 continue;
             }
+            const targetDefindex = fixItem({ defindex: rawTargetDefindex, quality: 6 } as any, this.bot.schema).defindex;
             if (isBaseWeaponDefindex(targetDefindex, this.bot.schema)) {
                 usedIds.add(kitId);
                 pairs.push({ kitId, targetDefindex });
@@ -4038,7 +4041,8 @@ export default class MyHandler extends Handler {
             }
             const weapon = receivedItems.find((candidate: any) => {
                 const id = String(candidate.id);
-                return !usedIds.has(id) && candidate.def_index === targetDefindex && Number(candidate.quality) === 6 && !candidate.flag_cannot_craft;
+                const normalizedDefindex = fixItem({ defindex: candidate.def_index, quality: Number(candidate.quality) } as any, this.bot.schema).defindex;
+                return !usedIds.has(id) && normalizedDefindex === targetDefindex && Number(candidate.quality) === 6 && !candidate.flag_cannot_craft;
             });
             if (!weapon) continue;
             usedIds.add(kitId);
