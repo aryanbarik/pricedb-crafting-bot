@@ -207,6 +207,8 @@ export default class Commands {
                     .slice(1)
                     .join(' ');
                 void this.bot.handler.handleStrangifyCommand(steamID, args, prefix);
+            } else if (command === 'killstreakify') {
+                void this.bot.handler.handleKillstreakifyCommand(steamID, prefix);
             } else if (['deposit', 'd'].includes(command) && isAdmin) {
                 void this.depositCommand(steamID, message, prefix);
             } else if (['withdraw', 'w'].includes(command) && isAdmin) {

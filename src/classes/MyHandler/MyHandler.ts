@@ -2640,6 +2640,14 @@ export default class MyHandler extends Handler {
                         }, 5000);
                     }
 
+                    const killstreakifyService = offer.data('killstreakifyService') as { requestedIds?: string[] } | undefined;
+                    if (killstreakifyService) {
+                        log.info(`[killstreakifyService] Trade ${offer.id} accepted — scheduling kit application in 5s`);
+                        setTimeout(() => {
+                            void this.handleKillstreakifyAccepted(offer);
+                        }, 5000);
+                    }
+
                     const craftingService = offer.data('craftingService') as
                         | { phase: 'intake'; fabricatorAssetIds: string[]; preTradeIds?: string[] }
                         | { phase: 'components'; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
@@ -3883,6 +3891,242 @@ export default class MyHandler extends Handler {
             log.error(`[craftingService] Intake (batch): unexpected error handling fabricators [${fabIds.join(', ')}]:`, err);
             this.bot.sendMessage(partner, `⚠️ Something went wrong processing your fabricators — please contact the bot owner.`);
         }
+    }
+
+
+    /**
+     * Customer-facing !killstreakify command. It requests each tradable Killstreak Kit alongside
+     * its matching craftable Unique weapon, then applies only the pairs that actually arrive in
+     * the accepted trade. A counteroffer is safe: removed kits or weapons are simply absent from
+     * the Steam receipt and every unmatched received item is returned unchanged.
+     */
+    async handleKillstreakifyCommand(partner: SteamID, prefix = '!'): Promise<void> {
+        const partnerSteamID64 = partner.getSteamID64();
+        this.bot.sendMessage(partner, '🔍 Scanning your inventory for Killstreak Kits, one moment...');
+
+        const theirInventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+        let fetchErr: Error | undefined;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                await theirInventory.fetch();
+                fetchErr = undefined;
+                break;
+            } catch (err) {
+                fetchErr = err as Error;
+                log.warn('[killstreakifyService] attempt ' + attempt + '/3 to load ' + partnerSteamID64 + "'s inventory failed: " + fetchErr.message);
+                if (attempt < 3) {
+                    await new Promise(resolve => setTimeout(resolve, this.inventoryFetchRetryDelay(fetchErr, attempt)));
+                }
+            }
+        }
+        if (fetchErr) {
+            this.bot.sendMessage(
+                partner,
+                '⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory is private. Please make it public and try ' + prefix + 'killstreakify again.'
+            );
+            return;
+        }
+
+        const usedIds = new Set<string>();
+        const pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
+        for (const sku of Object.keys(theirInventory.getItems)) {
+            const defindex = parseInt(sku.split(';')[0], 10);
+            if (!KS_KIT_DEFINDEXES.includes(defindex)) continue;
+
+            const targetMatch = sku.match(/;td-(\d+)/);
+            const targetDefindex = targetMatch ? parseInt(targetMatch[1], 10) : null;
+            if (targetDefindex === null) {
+                log.warn('[killstreakifyService] Could not resolve target weapon for kit SKU ' + sku + ' (' + partnerSteamID64 + ')');
+                continue;
+            }
+
+            for (const kitId of theirInventory.findBySKU(sku, true)) {
+                if (usedIds.has(kitId)) continue;
+                if (isBaseWeaponDefindex(targetDefindex, this.bot.schema)) {
+                    usedIds.add(kitId);
+                    pairs.push({ kitId, targetDefindex });
+                    continue;
+                }
+
+                // Exact plain Unique + craftable SKU: never request a Non-Craftable weapon, a
+                // decorated weapon, or an existing Killstreak weapon as the kit's target.
+                const weaponSku = SKU.fromObject({ defindex: targetDefindex, quality: 6 });
+                const weaponId = theirInventory.findBySKU(weaponSku, true).find(id => !usedIds.has(id));
+                if (!weaponId) continue;
+                usedIds.add(kitId);
+                usedIds.add(weaponId);
+                pairs.push({ kitId, weaponId, targetDefindex });
+            }
+        }
+
+        if (pairs.length === 0) {
+            this.bot.sendMessage(
+                partner,
+                '❌ I could not find any tradable Killstreak Kit + craftable matching-weapon pairs. Non-Craftable weapons are never requested.'
+            );
+            return;
+        }
+
+        const token = await fetchTradeUrlToken(partnerSteamID64);
+        const requestOffer = this.bot.manager.createOffer(partner, token);
+        const requestedIds = pairs.flatMap(pair => (pair.weaponId ? [pair.kitId, pair.weaponId] : [pair.kitId]));
+        this.prepareCraftingOffer(requestOffer, [], requestedIds, theirInventory);
+        requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
+        // Do not store the pre-trade pairing: accepted assets receive new IDs, and a counteroffer
+        // can remove either side. handleKillstreakifyAccepted rebuilds pairs from the receipt.
+        requestOffer.data('killstreakifyService', { requestedIds });
+        requestOffer.setMessage('Found ' + pairs.length + ' Killstreak Kit pair(s) — accept to apply them!');
+
+        const attemptSend = (retriesLeft: number): void => {
+            this.bot.trades.sendOffer(requestOffer)
+                .then(status => {
+                    if (status === 'pending') void this.bot.trades.acceptConfirmation(requestOffer);
+                    log.info('[killstreakifyService] Sent request offer ' + requestOffer.id + ' to ' + partnerSteamID64 + ' for ' + pairs.length + ' pair(s)');
+                })
+                .catch((sendErr: Error) => {
+                    if (retriesLeft > 0) {
+                        log.warn('[killstreakifyService] Failed to send request offer (' + this.describeSendError(sendErr) + '), retrying in 15s (' + retriesLeft + ' left)');
+                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                        return;
+                    }
+                    log.warn('[killstreakifyService] Failed to send request offer to ' + partnerSteamID64 + ': ' + this.describeSendError(sendErr));
+                    this.bot.sendMessage(partner, '⚠️ Failed to send the Killstreak Kit request offer — please try ' + prefix + 'killstreakify again in a bit.');
+                });
+        };
+        attemptSend(3);
+    }
+
+    private async handleKillstreakifyAccepted(offer: TradeOffer): Promise<void> {
+        const partner = offer.partner;
+        const partnerSteamID64 = partner.getSteamID64();
+        let receivedAssetIds: string[];
+        try {
+            receivedAssetIds = await this.getReceivedTradeAssetIds(offer);
+        } catch (err) {
+            const reason = this.describeSendError(err);
+            log.warn('[killstreakifyService] Trade ' + offer.id + ' has no safe received-asset receipt: ' + reason);
+            this.bot.messageAdmins('⚠️ Killstreakify offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: Steam receipt unavailable (' + reason + ').', []);
+            this.bot.sendMessage(partner, '⚠️ Steam did not give me a safe receipt for your items. They are being held for manual recovery.');
+            return;
+        }
+
+        const backpackById = new Map((await this.freshGCBackpack()).map((item: any) => [String(item.id), item]));
+        const receivedItems = receivedAssetIds.map(id => backpackById.get(id)).filter((item): item is any => item !== undefined);
+        if (receivedItems.length !== receivedAssetIds.length) {
+            const missingIds = receivedAssetIds.filter(id => !backpackById.has(id));
+            log.warn('[killstreakifyService] Trade ' + offer.id + ' receipt assets missing from GC backpack: ' + missingIds.join(', '));
+            this.holdReturnItems(partnerSteamID64, receivedAssetIds, 'Killstreakify receipt assets missing from the GC backpack');
+            this.bot.sendMessage(partner, '⚠️ I cannot safely locate every item from your accepted trade. They are held for manual recovery.');
+            return;
+        }
+        receivedAssetIds.forEach(id => this.craftingInFlightIds.add(id));
+
+        const usedIds = new Set<string>();
+        const pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
+        for (const kit of receivedItems) {
+            const kitId = String(kit.id);
+            if (usedIds.has(kitId) || !KS_KIT_DEFINDEXES.includes(kit.def_index)) continue;
+            const targetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
+            if (targetDefindex === null) {
+                log.warn('[killstreakifyService] Received kit ' + kitId + ' has no target-weapon attribute');
+                continue;
+            }
+            if (isBaseWeaponDefindex(targetDefindex, this.bot.schema)) {
+                usedIds.add(kitId);
+                pairs.push({ kitId, targetDefindex });
+                continue;
+            }
+            const weapon = receivedItems.find((candidate: any) => {
+                const id = String(candidate.id);
+                return !usedIds.has(id) && candidate.def_index === targetDefindex && Number(candidate.quality) === 6 && !candidate.flag_cannot_craft;
+            });
+            if (!weapon) continue;
+            usedIds.add(kitId);
+            usedIds.add(String(weapon.id));
+            pairs.push({ kitId, weaponId: String(weapon.id), targetDefindex });
+        }
+
+        const token = await fetchTradeUrlToken(partnerSteamID64);
+        const resultWeaponIds: string[] = [];
+        const successfulInputIds = new Set<string>();
+        const applyNext = (index: number): void => {
+            if (index >= pairs.length) {
+                void this.returnKillstreakifyResults(partner, token, offer.id, receivedAssetIds, successfulInputIds, resultWeaponIds);
+                return;
+            }
+            const pair = pairs[index];
+            const onApplied = (err: Error | null, resultWeaponId?: string): void => {
+                if (err || !resultWeaponId) {
+                    log.warn('[killstreakifyService] Failed to apply kit ' + pair.kitId + ' for ' + partnerSteamID64 + ': ' + (err?.message ?? 'no result'));
+                } else {
+                    successfulInputIds.add(pair.kitId);
+                    if (pair.weaponId) successfulInputIds.add(pair.weaponId);
+                    resultWeaponIds.push(resultWeaponId);
+                    log.info('[killstreakifyService] Applied kit ' + pair.kitId + (pair.weaponId ? ' to weapon ' + pair.weaponId : ' to base item ' + pair.targetDefindex) + ' -> ' + resultWeaponId);
+                }
+                applyNext(index + 1);
+            };
+            if (pair.weaponId) {
+                this.bot.tf2gc.applyKSKit(pair.kitId, pair.weaponId, onApplied);
+            } else {
+                this.bot.tf2gc.applyKSKitToBaseItem(pair.kitId, pair.targetDefindex, onApplied);
+            }
+        };
+
+        log.info('[killstreakifyService] Trade ' + offer.id + ': applying ' + pairs.length + ' complete pair(s) from ' + receivedAssetIds.length + ' received item(s)');
+        applyNext(0);
+    }
+
+    private async returnKillstreakifyResults(
+        partner: SteamID,
+        token: string | undefined,
+        componentOfferId: string,
+        receivedAssetIds: string[],
+        successfulInputIds: Set<string>,
+        resultWeaponIds: string[]
+    ): Promise<void> {
+        const partnerSteamID64 = partner.getSteamID64();
+        const backpack = await this.freshGCBackpack();
+        const ownedIds = new Set(backpack.map((item: any) => String(item.id)));
+        const returnIds = [...new Set([
+            ...resultWeaponIds,
+            ...receivedAssetIds.filter(id => !successfulInputIds.has(id))
+        ])].filter(id => ownedIds.has(id));
+        this.releaseCraftingInFlight(receivedAssetIds.filter(id => !returnIds.includes(id)));
+        returnIds.forEach(id => this.craftingInFlightIds.add(id));
+
+        if (returnIds.length === 0) {
+            log.warn('[killstreakifyService] Nothing owned to return to ' + partnerSteamID64);
+            this.bot.messageAdmins('⚠️ Killstreakify for ' + partnerSteamID64 + ' completed with no returnable assets. Inspect offer ' + componentOfferId + '.', []);
+            return;
+        }
+
+        const returnOffer = this.bot.manager.createOffer(partner, token);
+        this.prepareCraftingOffer(returnOffer, returnIds, []);
+        returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+        returnOffer.setMessage(
+            resultWeaponIds.length > 0
+                ? 'Here are your ' + resultWeaponIds.length + ' Killstreak weapon(s)! Unmatched counteroffer items were returned unchanged.'
+                : 'No complete Killstreak Kit pairs remained after your counteroffer. Your items are returned unchanged.'
+        );
+        const attemptSend = (retriesLeft: number): void => {
+            this.bot.trades.sendOffer(returnOffer)
+                .then(status => {
+                    if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+                    log.info('[killstreakifyService] Sent return offer ' + returnOffer.id + ' to ' + partnerSteamID64 + ': ' + returnIds.length + ' item(s)');
+                })
+                .catch((sendErr: Error) => {
+                    if (retriesLeft > 0) {
+                        log.warn('[killstreakifyService] Failed to send return offer (' + this.describeSendError(sendErr) + '), retrying in 15s (' + retriesLeft + ' left)');
+                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
+                        return;
+                    }
+                    log.warn('[killstreakifyService] Failed to send return offer to ' + partnerSteamID64 + ': ' + this.describeSendError(sendErr));
+                    this.holdReturnItems(partnerSteamID64, returnIds);
+                    this.bot.sendMessage(partner, '⚠️ Killstreakify completed but I could not return your items automatically. Contact the bot owner.');
+                });
+        };
+        attemptSend(3);
     }
 
     /**
