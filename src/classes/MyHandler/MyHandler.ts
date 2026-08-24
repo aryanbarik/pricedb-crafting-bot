@@ -4028,9 +4028,16 @@ export default class MyHandler extends Handler {
             const kitId = String(kit.id);
             const normalizedKitDefindex = fixItem({ defindex: kit.def_index, quality: 6 } as any, this.bot.schema).defindex;
             if (usedIds.has(kitId) || !KS_KIT_DEFINDEXES.includes(normalizedKitDefindex)) continue;
-            const rawTargetDefindex = getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM);
+            // Specific Basic Killstreak Kits have no dynamic tool_target_item attribute in the
+            // GC backpack. Their standard SKU still carries td-<defindex>, so use it as the
+            // fallback while preserving the attribute path for generic, Specialized, and Pro kits.
+            const kitSku = this.bot.inventoryManager.getInventory.findByAssetid(kitId);
+            const skuTargetMatch = kitSku?.match(/;td-(\d+)/);
+            const rawTargetDefindex =
+                getItemAttrValue(kit, ATTR_TOOL_TARGET_ITEM) ??
+                (skuTargetMatch ? parseInt(skuTargetMatch[1], 10) : null);
             if (rawTargetDefindex === null) {
-                log.warn('[killstreakifyService] Received kit ' + kitId + ' has no target-weapon attribute');
+                log.warn('[killstreakifyService] Received kit ' + kitId + ' has no target-weapon attribute or SKU target (sku=' + (kitSku ?? 'unknown') + ')');
                 continue;
             }
             const targetDefindex = fixItem({ defindex: rawTargetDefindex, quality: 6 } as any, this.bot.schema).defindex;
