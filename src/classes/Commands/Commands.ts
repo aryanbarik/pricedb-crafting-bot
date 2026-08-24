@@ -224,7 +224,7 @@ export default class Commands {
             } else if (command === 'returnitems' && isAdmin) {
                 void this.returnItemsCommand(steamID, message);
             } else if (command === 'donateweps') {
-                const hasTradeUrlArgument = CommandParser.removeCommand(message).trim() !== '';
+                const hasTradeUrlArgument = message.trim().replace(/^\S+\s*/, '') !== '';
                 if (hasTradeUrlArgument && !isAdmin) {
                     return this.bot.sendMessage(steamID, '❌ Command not available.');
                 }
@@ -858,7 +858,7 @@ export default class Commands {
      * a reliable outbound offer to a non-friend.
      */
     private async donateWeaponsCommand(requester: SteamID, message: string): Promise<void> {
-        const rawTradeUrl = CommandParser.removeCommand(message).trim();
+        const rawTradeUrl = message.trim().replace(/^\S+\s*/, '');
         let recipient = requester;
         let tradeToken: string | undefined;
 
