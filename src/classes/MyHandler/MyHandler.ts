@@ -37,6 +37,7 @@ import Autokeys from '../Autokeys/Autokeys';
 import { Paths } from '../../resources/paths';
 import log from '../../lib/logger';
 import * as files from '../../lib/files';
+import CraftingJournal from '../../lib/craftingJournal';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
 import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
@@ -227,6 +228,7 @@ export default class MyHandler extends Handler {
     private craftingInFlightIds = new Set<string>();
 
     private paths: Paths;
+    private craftingJournal: CraftingJournal;
 
     get getPaths(): Paths {
         return this.paths;
@@ -260,6 +262,7 @@ export default class MyHandler extends Handler {
         this.autokeys = new Autokeys(bot);
 
         this.paths = genPaths(this.opt.steamAccountName);
+        this.craftingJournal = new CraftingJournal(this.paths.files.craftingJournal);
 
         PriceCheckQueue.setBot(this.bot);
         PriceCheckQueue.setRequestCheckFn(this.priceSource.requestCheck.bind(this.priceSource));
@@ -283,6 +286,24 @@ export default class MyHandler extends Handler {
     }
 
     onReady(): void {
+        // Do not replay uncertain GC operations after a process restart. Keep their assets
+        // reserved and surface the durable receipt to the owner for reconciliation.
+        if (this.craftingJournal.open().some(job => job.stage === 'accepted' || (job.stage === 'held' && job.receivedAssetIds.length === 0))) {
+            log.warn('[craftingService] Unidentified customer assets in craft journal; halting trading until reconciled');
+            void this.bot.halt();
+        }
+        for (const job of this.craftingJournal.open()) {
+            [...job.receivedAssetIds, ...job.fabricatorAssetIds, ...job.returnAssetIds].forEach(id =>
+                this.craftingInFlightIds.add(id)
+            );
+            log.warn(`[craftingService] Recoverable journal job ${job.offerId} (${job.stage}) for ${job.partnerSteamId}`);
+            this.bot.messageAdmins(
+                `⚠️ Craft journal: offer ${job.offerId} (${job.stage}) for ${job.partnerSteamId} ` +
+                    `needs reconciliation after restart; ${job.receivedAssetIds.length} receipt item(s), ` +
+                    `${job.returnAssetIds.length} return item(s). Journal: ${this.paths.files.craftingJournal}.`,
+                []
+            );
+        }
         log.info(
             `TF2Autobot v${process.env.BOT_VERSION} is ready | ${pluralize(
                 'item',
@@ -646,6 +667,13 @@ export default class MyHandler extends Handler {
 
     async onNewTradeOffer(offer: TradeOffer): Promise<null | OnNewTradeOffer> {
         offer.log('info', 'is being processed...');
+        const reservedGiveIds = offer.itemsToGive
+            .map(item => String(item.assetid))
+            .filter(id => this.isCraftingAssetReserved(id));
+        if (reservedGiveIds.length > 0) {
+            offer.log('warn', `Refusing offer containing customer-owned crafting assets: ${reservedGiveIds.join(', ')}`);
+            return { action: 'decline', reason: 'CRAFTING_RESERVED_ITEMS' };
+        }
 
         // Allow sending notifications
         offer.data('notify', true);
@@ -2381,6 +2409,12 @@ export default class MyHandler extends Handler {
 
     onTradeOfferChanged(offer: TradeOffer, oldState: number, timeTakenToComplete?: number): void {
         void (async () => {
+            const outgoingReturn = offer.data('craftingServiceReturn') as
+                | { sourceOfferId?: string }
+                | undefined;
+            if (outgoingReturn?.sourceOfferId && this.craftingJournal.get(outgoingReturn.sourceOfferId)) {
+                this.craftingJournal.update(outgoingReturn.sourceOfferId, { returnOfferId: offer.id });
+            }
             // Not sure if it can go from other states to active
             if (oldState === TradeOfferManager.ETradeOfferState['Accepted']) {
                 offer.data('switchedState', oldState);
@@ -2573,9 +2607,14 @@ export default class MyHandler extends Handler {
                     // 15 minutes, and the partner can decline or let it expire. In every case the
                     // items come straight back to the bot, untracked — heldReturnItems is only
                     // populated when the *send* throws, which this is not.
-                    const craftingReturn = offer.data('craftingServiceReturn') as { assetIds?: string[] } | undefined;
+                    const craftingReturn = offer.data('craftingServiceReturn') as
+                        | { assetIds?: string[]; sourceOfferId?: string }
+                        | undefined;
                     const returnedIds = craftingReturn?.assetIds ?? [];
                     if (returnedIds.length > 0 && !offer.data('craftingServiceReturnDeathHandled')) {
+                        if (craftingReturn?.sourceOfferId && this.craftingJournal.get(craftingReturn.sourceOfferId)) {
+                            this.craftingJournal.update(craftingReturn.sourceOfferId, { stage: 'held', returnOfferId: offer.id });
+                        }
                         offer.data('craftingServiceReturnDeathHandled', true);
                         const partnerSteamID64 = offer.partner.getSteamID64();
                         const assetIds = returnedIds;
@@ -2609,6 +2648,50 @@ export default class MyHandler extends Handler {
                 ) {
                     // Only run this if the bot handled the offer and do not send again if already sent once
 
+                    // An accepted offer can be observed again after a process restart. A journaled
+                    // job may already have changed GC state, so never replay it automatically.
+                    if (offer.data('craftingService') && this.craftingJournal.hasHandled(offer.id)) {
+                        const saved = this.craftingJournal.get(offer.id);
+                        log.warn(`[craftingService] Offer ${offer.id} already journaled as ${saved?.stage ?? 'archived'}; skipping duplicate accepted event`);
+                        this.sentSummary[offer.id] = true;
+                        return;
+                    }
+
+                    const acceptedCraft = offer.data('craftingService') as
+                        | { phase?: string; fabricatorAssetIds?: string[]; intakeOfferId?: string }
+                        | undefined;
+                    let acceptedReceivedAssetIds: string[] | undefined;
+                    if (acceptedCraft) {
+                        // Persist custody and reserve the Steam receipt before processAccepted
+                        // updates inventory or creates any sale listings.
+                        this.craftingJournal.recordAccepted(offer.id, offer.partner.getSteamID64(),
+                            acceptedCraft.phase ?? 'legacy', acceptedCraft.fabricatorAssetIds ?? []);
+                        try {
+                            acceptedReceivedAssetIds = await this.getReceivedTradeAssetIds(offer);
+                        } catch (receiptErr) {
+                            const reason = this.describeSendError(receiptErr);
+                            this.craftingJournal.update(offer.id, { stage: 'held' });
+                            void this.bot.halt();
+                            log.warn('[craftingService] Trade ' + offer.id + ' accepted but its receipt cannot safely identify received assets: ' + reason);
+                            this.bot.messageAdmins('⚠️ Crafting offer ' + offer.id + ' from ' + offer.partner.getSteamID64() + ' is held: Steam receipt did not identify its received assets (' + reason + '). Do not refund by backpack diff.', []);
+                            this.bot.sendMessage(offer.partner, '⚠️ Steam did not give me a safe receipt for your items. They are being held for manual recovery; please do not resend anything.');
+                            this.sentSummary[offer.id] = true;
+                            return;
+                        }
+                        const expectedReceivedCount = offer.itemsToReceive.length;
+                        if (acceptedReceivedAssetIds.length !== expectedReceivedCount) {
+                            this.craftingJournal.update(offer.id, { stage: 'held', receivedAssetIds: acceptedReceivedAssetIds });
+                            void this.bot.halt();
+                            log.warn('[craftingService] Trade ' + offer.id + ' receipt count mismatch: expected ' + expectedReceivedCount + ', got ' + acceptedReceivedAssetIds.length + '; holding for manual recovery');
+                            this.bot.messageAdmins('⚠️ Crafting offer ' + offer.id + ' from ' + offer.partner.getSteamID64() + ' is held: receipt count ' + acceptedReceivedAssetIds.length + '/' + expectedReceivedCount + '. Do not refund by backpack diff.', []);
+                            this.bot.sendMessage(offer.partner, '⚠️ Steam returned an incomplete receipt for your items. They are being held for manual recovery; please do not resend anything.');
+                            this.sentSummary[offer.id] = true;
+                            return;
+                        }
+                        this.craftingJournal.update(offer.id, { stage: 'queued', receivedAssetIds: acceptedReceivedAssetIds });
+                        acceptedReceivedAssetIds.forEach(id => this.craftingInFlightIds.add(id));
+                    }
+
                     clearTimeout(this.resetSentSummaryTimeout);
                     this.sentSummary[offer.id] = true;
 
@@ -2616,14 +2699,36 @@ export default class MyHandler extends Handler {
                     offer.data(`isAccepted${isAcceptedWithEscrow ? '_withEscrow' : ''}`, true);
                     offer.log('trade', `has been accepted${isAcceptedWithEscrow ? ' with trade hold' : ''}.`);
 
-                    const deliveredCraftingReturn = offer.data('craftingServiceReturn') as { assetIds?: string[] } | undefined;
+                    const deliveredCraftingReturn = offer.data('craftingServiceReturn') as
+                        | { assetIds?: string[]; sourceOfferId?: string }
+                        | undefined;
                     if (Array.isArray(deliveredCraftingReturn?.assetIds)) {
+                        if (deliveredCraftingReturn.sourceOfferId && this.craftingJournal.get(deliveredCraftingReturn.sourceOfferId)) {
+                            this.craftingJournal.update(deliveredCraftingReturn.sourceOfferId, { stage: 'completed' });
+                        }
                         this.releaseCraftingInFlight(deliveredCraftingReturn.assetIds);
                     }
 
                     // Auto sell and buy keys if ref < minimum
 
                     this.autokeys.check();
+
+                    if (acceptedCraft) {
+                        // Ownership of these fabricators moves from the intake job to this
+                        // components job only after the latter is durably recorded.
+                        if (acceptedCraft.phase === 'components' && acceptedCraft.intakeOfferId) {
+                            const parent = this.craftingJournal.get(acceptedCraft.intakeOfferId);
+                            if (parent) {
+                                const transferred = new Set(acceptedCraft.fabricatorAssetIds ?? []);
+                                const remaining = parent.fabricatorAssetIds.filter(id => !transferred.has(id));
+                                this.craftingJournal.update(parent.offerId, {
+                                    fabricatorAssetIds: remaining,
+                                    stage: remaining.length > 0 ? 'awaiting_components' : 'completed',
+                                    linkedOfferId: offer.id
+                                });
+                            }
+                        }
+                    }
 
                     const result = await processAccepted(offer, this.bot, timeTakenToComplete, isAcceptedWithEscrow);
 
@@ -2658,31 +2763,7 @@ export default class MyHandler extends Handler {
                         // See fetchTradeUrlToken on handleCraftingIntake below — every offer sent
                         // from this block (refund, partial-fill/results return) is bot-initiated.
                         const token = await fetchTradeUrlToken(partnerSteamID64);
-                        let receivedAssetIds: string[];
-                        try {
-                            receivedAssetIds = await this.getReceivedTradeAssetIds(offer);
-                        } catch (receiptErr) {
-                            const reason = this.describeSendError(receiptErr);
-                            log.warn(
-                                '[craftingService] Trade ' + offer.id + ' accepted but its receipt cannot safely identify received assets: ' + reason
-                            );
-                            this.bot.messageAdmins(
-                                '⚠️ Crafting offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: Steam receipt did not identify its received assets (' + reason + '). Do not refund by backpack diff.',
-                                []
-                            );
-                            this.bot.sendMessage(offer.partner, '⚠️ Steam did not give me a safe receipt for your items. They are being held for manual recovery; please do not resend anything.');
-                            return;
-                        }
-                        const expectedReceivedCount = offer.itemsToReceive.length;
-                        if (receivedAssetIds.length !== expectedReceivedCount) {
-                            log.warn('[craftingService] Trade ' + offer.id + ' receipt count mismatch: expected ' + expectedReceivedCount + ', got ' + receivedAssetIds.length + '; holding for manual recovery');
-                            this.bot.messageAdmins(
-                                '⚠️ Crafting offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: receipt count ' + receivedAssetIds.length + '/' + expectedReceivedCount + '. Do not refund by backpack diff.',
-                                []
-                            );
-                            this.bot.sendMessage(offer.partner, '⚠️ Steam returned an incomplete receipt for your items. They are being held for manual recovery; please do not resend anything.');
-                            return;
-                        }
+                        const receivedAssetIds = acceptedReceivedAssetIds as string[];
                         log.info('[craftingService] Trade ' + offer.id + ' accepted — received asset IDs: [' + receivedAssetIds.join(', ') + ']; scheduling fabricator craft in 5s');
 
                         if (craftingService.phase === 'intake') {
@@ -2756,6 +2837,10 @@ export default class MyHandler extends Handler {
                                 }
 
                                 newFabsFromDiff.forEach((i: any) => this.claimedIntakeFabricatorIds.add(String(i.id)));
+                                this.craftingJournal.update(offer.id, {
+                                    stage: 'awaiting_components',
+                                    fabricatorAssetIds: newFabsFromDiff.map((i: any) => String(i.id))
+                                });
 
                                 if (newFabsFromDiff.length === 1) {
                                     void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0], offer.id);
@@ -2773,6 +2858,7 @@ export default class MyHandler extends Handler {
                             const backpackById = new Map(currentBackpack.map((item: any) => [String(item.id), item]));
                             const newItems = receivedAssetIds.map(id => backpackById.get(id)).filter((item): item is any => item !== undefined);
                             if (newItems.length !== receivedAssetIds.length) {
+                                this.craftingJournal.update(offer.id, { stage: 'held' });
                                 const missingIds = receivedAssetIds.filter(id => !backpackById.has(id));
                                 log.warn('[craftingService] Trade ' + offer.id + ' receipt assets are missing from the GC backpack: ' + missingIds.join(', ') + '; holding for manual recovery');
                                 this.bot.messageAdmins('⚠️ Crafting offer ' + offer.id + ' from ' + partnerSteamID64 + ' is held: receipt assets missing from the GC backpack: ' + missingIds.join(', ') + '. Do not refund by backpack diff.', []);
@@ -2780,6 +2866,7 @@ export default class MyHandler extends Handler {
                                 return;
                             }
                             const allNewIds = receivedAssetIds;
+                            this.craftingJournal.update(offer.id, { stage: 'processing' });
 
                             // Held from here until each item is either consumed by the craft or the
                             // customer accepts its return offer, so a concurrent job cannot spend it.
@@ -2849,7 +2936,7 @@ export default class MyHandler extends Handler {
                                     ...new Set([...baseRefundIds, ...newFabs.map((f: any) => String(f.id))])
                                 ];
                                 const refundOffer = this.bot.manager.createOffer(offer.partner, token);
-                                this.prepareCraftingOffer(refundOffer, refundIds, []);
+                                this.prepareCraftingOffer(refundOffer, refundIds, [], undefined, offer.id);
                                 refundIds.forEach(id =>
                                     refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
                                 );
@@ -2944,7 +3031,7 @@ export default class MyHandler extends Handler {
                                     }
 
                                     const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                    this.prepareCraftingOffer(returnOffer, returnIds, []);
+                                    this.prepareCraftingOffer(returnOffer, returnIds, [], undefined, offer.id);
                                     returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: "2", assetid: id }));
 
                                     let msg: string;
@@ -3238,7 +3325,7 @@ export default class MyHandler extends Handler {
                                         ];
                                         log.info(`[craftingService] Kit-only trade — returning ${kitOnlyReturnIds.length} item(s)`);
                                         const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                        this.prepareCraftingOffer(returnOffer, kitOnlyReturnIds, []);
+                                        this.prepareCraftingOffer(returnOffer, kitOnlyReturnIds, [], undefined, offer.id);
                                         kitOnlyReturnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                                         returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
                                         const attemptSend = (retriesLeft: number): void => {
@@ -3458,7 +3545,7 @@ export default class MyHandler extends Handler {
             if (fetchErr) {
                 log.warn(`[craftingService] Intake: giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(returnOffer, [String(fab.id)], []);
+                this.prepareCraftingOffer(returnOffer, [String(fab.id)], [], undefined, intakeOfferId);
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 returnOffer.setMessage(
                     `⚠️ Failed to load your inventory 3x — Steam may be down, or it's private. Fabricator returned; make it public and re-send.`
@@ -3553,7 +3640,7 @@ export default class MyHandler extends Handler {
             if (result.assetIds.length === 0) {
                 log.info(`[craftingService] Intake: no matching components found for ${partnerSteamID64} — returning fabricator ${fab.id}`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(returnOffer, [String(fab.id)], []);
+                this.prepareCraftingOffer(returnOffer, [String(fab.id)], [], undefined, intakeOfferId);
                 returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: String(fab.id) });
                 // result.missing can list several unbounded slot descriptions — kept out of the
                 // customer-facing message (still logged above) so this can't exceed Steam's 128-char cap.
@@ -3585,6 +3672,7 @@ export default class MyHandler extends Handler {
                 phase: 'components',
                 fabricatorAssetIds: [String(fab.id)],
                 componentAssetIds: [],
+                intakeOfferId,
                 preTradeIds
             });
             // result.missing can list several unbounded slot descriptions — kept out of the
@@ -3676,7 +3764,7 @@ export default class MyHandler extends Handler {
             if (fetchErr) {
                 log.warn(`[craftingService] Intake (batch): giving up loading ${partnerSteamID64}'s inventory after 3 attempts: ${fetchErr.message}`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(returnOffer, fabIds, []);
+                this.prepareCraftingOffer(returnOffer, fabIds, [], undefined, intakeOfferId);
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     `⚠️ Failed to load your inventory 3x — Steam may be down, or it's private. Fabricators returned; make it public and re-send.`
@@ -3782,7 +3870,7 @@ export default class MyHandler extends Handler {
             if (masterAssetIds.length === 0) {
                 log.info(`[craftingService] Intake (batch): no matching components found for ${partnerSteamID64} — returning ${fabIds.length} fabricator(s)`);
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(returnOffer, fabIds, []);
+                this.prepareCraftingOffer(returnOffer, fabIds, [], undefined, intakeOfferId);
                 fabIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     `You don't own any of the parts for these fabricators. They're being returned — trade them back once you have the parts!`
@@ -3828,6 +3916,7 @@ export default class MyHandler extends Handler {
                     phase: 'components',
                     fabricatorAssetIds: chunkFabIds,
                     componentAssetIds: [],
+                    intakeOfferId,
                     preTradeIds
                 });
 
@@ -4522,21 +4611,27 @@ export default class MyHandler extends Handler {
      * returned it". Reads that only annotate something already decided (a log line, a summary
      * dict) can keep using the raw array, since being out of date costs nothing there.
      *
-     * Falls back to the possibly-stale array if the reconnect fails rather than throwing: callers
-     * are mid-trade and a degraded answer beats an unhandled rejection that abandons the offer.
-     * The warning is the signal that a result from this path should not be trusted.
+     * Never return a stale array. An accepted trade can arrive while Steam is disconnected;
+     * deciding that receipt assets are missing from an old snapshot can strand customer items.
+     * Keep the job paused and retry the connection until a GC backpack is actually loaded.
      */
     private async freshGCBackpack(): Promise<any[]> {
-        try {
-            await this.bot.tf2gc.ensureFreshBackpack();
-        } catch (err) {
-            log.warn(
-                `[craftingService] Could not refresh the GC backpack — proceeding with a possibly stale view: ${
-                    (err as Error).message
-                }`
-            );
+        while (true) {
+            try {
+                await this.bot.tf2gc.ensureFreshBackpack();
+                if (!this.bot.tf2.haveGCSession) {
+                    throw new Error('GC session ended before backpack could be read');
+                }
+                const backpack = (this.bot.tf2 as any).backpack;
+                if (!Array.isArray(backpack)) {
+                    throw new Error('GC session has no backpack snapshot yet');
+                }
+                return backpack;
+            } catch (err) {
+                log.warn(`[craftingService] GC backpack unavailable; pausing accepted craft for 30s: ${(err as Error).message}`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+            }
         }
-        return ((this.bot.tf2 as any).backpack as any[]) ?? [];
     }
 
     /**
@@ -4796,6 +4891,16 @@ export default class MyHandler extends Handler {
         assetIds.forEach(id => this.craftingInFlightIds.delete(id));
     }
 
+    isCraftingAssetReserved(assetId: string): boolean {
+        if (this.craftingInFlightIds.has(assetId) || this.heldIntakeFabricators.has(assetId)) return true;
+        if ([...this.heldReturnItems.values()].some(ids => ids.includes(assetId))) return true;
+        return this.craftingJournal.open().some(job =>
+            job.receivedAssetIds.includes(assetId) ||
+            job.fabricatorAssetIds.includes(assetId) ||
+            job.returnAssetIds.includes(assetId)
+        );
+    }
+
     /**
      * Drops components the bot spent on its own craft out of the Steam inventory cache.
      *
@@ -4883,11 +4988,15 @@ export default class MyHandler extends Handler {
         offer: TradeOffer,
         giveIds: string[],
         receiveIds: string[],
-        theirInventory?: Inventory
+        theirInventory?: Inventory,
+        sourceOfferId?: string
     ): void {
+        if (sourceOfferId && giveIds.length > 0 && this.craftingJournal.get(sourceOfferId)) {
+            this.craftingJournal.update(sourceOfferId, { stage: 'returning', returnAssetIds: giveIds });
+        }
         offer.data('dict', this.craftingDict(giveIds, receiveIds, theirInventory));
         if (giveIds.length > 0) {
-            offer.data('craftingServiceReturn', { assetIds: giveIds });
+            offer.data('craftingServiceReturn', { assetIds: giveIds, sourceOfferId });
         }
     }
 

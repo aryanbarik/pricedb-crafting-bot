@@ -600,6 +600,13 @@ export default class Pricelist extends EventEmitter {
     }
 
     private async validateEntry(entry: Entry, src: PricelistChangedSource, isBulk: boolean): Promise<void> {
+        // An admin !add/!update explicitly authorizes a sale. Clear the marker used by
+        // automatic post-trade additions so the listing safety gate honors that command.
+        if (src === PricelistChangedSource.Command &&
+            (entry.intent === 1 || entry.intent === 2) &&
+            (entry.group === 'invalidItem' || entry.group === 'painted')) {
+            entry.group = 'manualSale';
+        }
         const keyPrices = this.getKeyPrices;
 
         if (entry.autoprice && !entry.isPartialPriced && !isBulk) {
