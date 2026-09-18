@@ -6,8 +6,11 @@ const emptyMetal = () => ({ '5000;6': [] as string[], '5001;6': [] as string[], 
 
 describe('weapon bank eligibility', () => {
     const bot = {
-        craftWeapons: ['18;6', '42;6'],
-        schema: { getItemByDefindex: (id: number) => ({ capabilities: { can_killstreakify: id === 18 } }) }
+        craftWeapons: ['18;6', '22;6', '42;6', '140;6', '159;6'],
+        schema: { getItemByDefindex: (id: number) => ({
+            item_name: id === 22 ? 'Festive Rocket Launcher' : 'Rocket Launcher',
+            capabilities: { can_killstreakify: true }
+        }) }
     } as any;
     const weapon = (sku: string, overrides: Record<string, unknown> = {}) => ({
         tradable: true,
@@ -19,6 +22,11 @@ describe('weapon bank eligibility', () => {
 
     test('allows only plain tradable Unique weapons with Killstreak Kits', () => {
         expect(isEligible(weapon('18;6'), bot)).toBe(true);
+        expect(isEligible(weapon('140;6'), bot)).toBe(false);
+        expect(isEligible(weapon('159;6'), bot)).toBe(false);
+        expect(isEligible(weapon('22;6'), bot)).toBe(false);
+        expect(isEligible(weapon('18;6', { descriptions: [{ value: 'Halloween: Exorcism' }] }), bot)).toBe(false);
+        expect(isEligible(weapon('18;6', { descriptions: [{ value: 'A normal description' }] }), bot)).toBe(true);
         expect(isEligible(weapon('42;6'), bot)).toBe(false);
         expect(isEligible(weapon('18;11'), bot)).toBe(false);
         expect(isEligible(weapon('18;6;uncraftable'), bot)).toBe(false);

@@ -12,6 +12,7 @@ export interface BankCatalog {
 
 const METAL: Record<string, number> = { '5000;6': 1, '5001;6': 3, '5002;6': 9 };
 const MAX_WEAPONS = 50;
+const NO_KIT_WEAPONS = new Set([42, 140, 159]); // Sandvich, Wrangler, Dalokohs Bar
 
 function rawSku(item: any, bot: Bot): string {
     return item.getSKU(bot.schema, false, false, false, false, []).sku;
@@ -22,7 +23,11 @@ export function isEligible(item: any, bot: Bot): boolean {
     const sku = rawSku(item, bot);
     if (!/^\d+;6$/.test(sku) || item.name !== item.market_name) return false;
     if (!bot.craftWeapons.includes(sku)) return false;
-    const schemaItem = bot.schema.getItemByDefindex(Number(sku.split(';')[0]));
+    const defindex = Number(sku.split(';')[0]);
+    if (NO_KIT_WEAPONS.has(defindex)) return false;
+    const schemaItem = bot.schema.getItemByDefindex(defindex);
+    if (schemaItem?.item_name?.startsWith('Festive ')) return false;
+    if (item.descriptions?.some((description: { value?: string }) => description.value?.startsWith('Halloween:'))) return false;
     return schemaItem?.capabilities?.can_killstreakify === true;
 }
 
