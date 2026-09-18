@@ -10,6 +10,7 @@ import Bot from './Bot';
 import ApiCart from './Carts/ApiCart';
 import { parseTradeUrl } from '../lib/tools/parseTradeUrl';
 import SteamID from 'steamid';
+import { getBankCatalog, sendBankOffer } from './WeaponBank';
 
 export default class HttpManager {
     /**
@@ -277,6 +278,44 @@ export default class HttpManager {
                 log.error('[killstreakifyService] Website request failed:', error);
             });
             res.status(202).json({ success: true });
+        });
+
+        this.app.get('/api/weapons/catalog/:steamId', this.validateApiKey.bind(this), async (req, res) => {
+            const steamId = req.params.steamId;
+            if (!this.bot || !/^7656119\d{10}$/.test(steamId)) {
+                res.status(400).json({ success: false, error: 'A valid Steam ID is required.' });
+                return;
+            }
+            try {
+                res.json({ success: true, catalog: await getBankCatalog(this.bot, steamId) });
+            } catch (error) {
+                log.error('[weaponBank] Could not load catalog:', error);
+                res.status(503).json({ success: false, error: 'Could not load weapon stock. Try again shortly.' });
+            }
+        });
+
+        this.app.post('/api/weapons/offer', this.validateApiKey.bind(this), async (req, res) => {
+            if (!this.bot) {
+                res.status(503).json({ success: false, error: 'Bot is not initialized.' });
+                return;
+            }
+            const { steamId, tradeUrl, sellAssetIds, buyAssetIds } = req.body as {
+                steamId?: string; tradeUrl?: string; sellAssetIds?: string[]; buyAssetIds?: string[];
+            };
+            if (typeof steamId !== 'string' || typeof tradeUrl !== 'string' ||
+                !Array.isArray(sellAssetIds) || !Array.isArray(buyAssetIds) ||
+                [...sellAssetIds, ...buyAssetIds].some(id => typeof id !== 'string')) {
+                res.status(400).json({ success: false, error: 'Invalid weapon selection.' });
+                return;
+            }
+            try {
+                const offerId = await sendBankOffer(this.bot, steamId, tradeUrl, sellAssetIds, buyAssetIds);
+                res.json({ success: true, offerId });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Could not send the weapon trade.';
+                log.warn('[weaponBank] Offer rejected:', message);
+                res.status(400).json({ success: false, error: message });
+            }
         });
 
         // Website crafting endpoint: bot requests one or more bare fabricators from the user in a

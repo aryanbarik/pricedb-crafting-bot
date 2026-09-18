@@ -1,0 +1,54 @@
+jest.mock('../Inventory', () => ({ __esModule: true, default: jest.fn() }));
+
+import { chooseMetal, isEligible } from '../WeaponBank';
+
+const emptyMetal = () => ({ '5000;6': [] as string[], '5001;6': [] as string[], '5002;6': [] as string[] });
+
+describe('weapon bank eligibility', () => {
+    const bot = {
+        craftWeapons: ['18;6', '42;6'],
+        schema: { getItemByDefindex: (id: number) => ({ capabilities: { can_killstreakify: id === 18 } }) }
+    } as any;
+    const weapon = (sku: string, overrides: Record<string, unknown> = {}) => ({
+        tradable: true,
+        name: 'Rocket Launcher',
+        market_name: 'Rocket Launcher',
+        getSKU: () => ({ sku }),
+        ...overrides
+    });
+
+    test('allows only plain tradable Unique weapons with Killstreak Kits', () => {
+        expect(isEligible(weapon('18;6'), bot)).toBe(true);
+        expect(isEligible(weapon('42;6'), bot)).toBe(false);
+        expect(isEligible(weapon('18;11'), bot)).toBe(false);
+        expect(isEligible(weapon('18;6;uncraftable'), bot)).toBe(false);
+        expect(isEligible(weapon('18;6;kt-1'), bot)).toBe(false);
+        expect(isEligible(weapon('18;6', { tradable: false }), bot)).toBe(false);
+        expect(isEligible(weapon('18;6', { name: 'Renamed Rocket Launcher' }), bot)).toBe(false);
+    });
+});
+
+describe('weapon bank metal balancing', () => {
+    test('pays one scrap for two weapons', () => {
+        const payer = { ...emptyMetal(), '5000;6': ['scrap-1'] };
+        expect(chooseMetal(payer, emptyMetal(), 1)).toEqual({ paid: ['scrap-1'], change: [] });
+    });
+
+    test('uses refined and returns exact change', () => {
+        const payer = { ...emptyMetal(), '5002;6': ['ref-1'] };
+        const change = { ...emptyMetal(), '5001;6': ['rec-1', 'rec-2'], '5000;6': ['scrap-1', 'scrap-2'] };
+        expect(chooseMetal(payer, change, 1)).toEqual({
+            paid: ['ref-1'], change: ['scrap-1', 'scrap-2', 'rec-1', 'rec-2']
+        });
+    });
+
+    test('rejects payment when exact change is unavailable', () => {
+        const payer = { ...emptyMetal(), '5002;6': ['ref-1'] };
+        expect(() => chooseMetal(payer, emptyMetal(), 1)).toThrow('exact change');
+    });
+
+    test('uses reclaimed metal without change for six weapons', () => {
+        const payer = { ...emptyMetal(), '5001;6': ['rec-1'] };
+        expect(chooseMetal(payer, emptyMetal(), 3)).toEqual({ paid: ['rec-1'], change: [] });
+    });
+});
