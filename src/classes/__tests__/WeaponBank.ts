@@ -1,24 +1,29 @@
 jest.mock('../Inventory', () => ({ __esModule: true, default: jest.fn() }));
 
 import { chooseMetal, isEligible } from '../WeaponBank';
+import Bot from '../Bot';
+import { EconItem } from '@tf2autobot/tradeoffer-manager';
 
 const emptyMetal = () => ({ '5000;6': [] as string[], '5001;6': [] as string[], '5002;6': [] as string[] });
 
 describe('weapon bank eligibility', () => {
     const bot = {
         craftWeapons: ['18;6', '22;6', '42;6', '140;6', '159;6'],
-        schema: { getItemByDefindex: (id: number) => ({
-            item_name: id === 22 ? 'Festive Rocket Launcher' : 'Rocket Launcher',
-            capabilities: { can_killstreakify: true }
-        }) }
-    } as any;
-    const weapon = (sku: string, overrides: Record<string, unknown> = {}) => ({
-        tradable: true,
-        name: 'Rocket Launcher',
-        market_name: 'Rocket Launcher',
-        getSKU: () => ({ sku }),
-        ...overrides
-    });
+        schema: {
+            getItemByDefindex: (id: number) => ({
+                item_name: id === 22 ? 'Festive Rocket Launcher' : 'Rocket Launcher',
+                capabilities: { can_killstreakify: true }
+            })
+        }
+    } as unknown as Bot;
+    const weapon = (sku: string, overrides: Record<string, unknown> = {}) =>
+        ({
+            tradable: true,
+            name: 'Rocket Launcher',
+            market_name: 'Rocket Launcher',
+            getSKU: () => ({ sku }),
+            ...overrides
+        } as unknown as EconItem);
 
     test('allows only plain tradable Unique weapons with Killstreak Kits', () => {
         expect(isEligible(weapon('18;6'), bot)).toBe(true);
@@ -46,7 +51,8 @@ describe('weapon bank metal balancing', () => {
         const payer = { ...emptyMetal(), '5002;6': ['ref-1'] };
         const change = { ...emptyMetal(), '5001;6': ['rec-1', 'rec-2'], '5000;6': ['scrap-1', 'scrap-2'] };
         expect(chooseMetal(payer, change, 1)).toEqual({
-            paid: ['ref-1'], change: ['scrap-1', 'scrap-2', 'rec-1', 'rec-2']
+            paid: ['ref-1'],
+            change: ['scrap-1', 'scrap-2', 'rec-1', 'rec-2']
         });
     });
 
