@@ -16,7 +16,17 @@ export interface BankCatalog {
 
 const METAL: Record<string, number> = { '5000;6': 1, '5001;6': 3, '5002;6': 9 };
 const MAX_WEAPONS = 50;
-const NO_KIT_WEAPONS = new Set([42, 140, 159]); // Sandvich, Wrangler, Dalokohs Bar
+// Fail closed: targets found in current Steam Market Killstreak Kit listings (18 Sep 2026),
+// plus Widowmaker and Lollichop, verified on their individual Steam listing pages.
+// The schema's can_killstreakify flag alone also includes drinks, lunchboxes, boots, etc.
+const KIT_TARGET_DEFINDEXES = new Set<number>([
+    35, 36, 37, 38, 39, 40, 41, 43, 44, 45, 56, 61, 127, 128, 130, 131, 132, 141, 142, 153, 154, 155, 171, 172, 173,
+    214, 215, 220, 221, 224, 225, 228, 230, 232, 239, 304, 305, 307, 308, 310, 312, 317, 325, 326, 327, 329, 331, 348,
+    349, 351, 355, 356, 357, 401, 402, 404, 406, 411, 412, 413, 414, 415, 416, 424, 425, 426, 441, 442, 444, 447, 448,
+    449, 450, 457, 460, 461, 482, 513, 525, 526, 527, 528, 588, 589, 593, 594, 595, 609, 648, 649, 656, 730, 739, 740,
+    741, 751, 752, 772, 773, 775, 811, 812, 813, 996, 997, 998, 1092, 1098, 1099, 1103, 1104, 1150, 1151, 1153, 1178,
+    1181
+]);
 
 function rawSku(item: EconItem, bot: Bot): string {
     return item.getSKU(bot.schema, false, false, false, false, []).sku;
@@ -28,7 +38,7 @@ export function isEligible(item: EconItem, bot: Bot): boolean {
     if (!/^\d+;6$/.test(sku) || item.name !== item.market_name) return false;
     if (!bot.craftWeapons.includes(sku)) return false;
     const defindex = Number(sku.split(';')[0]);
-    if (NO_KIT_WEAPONS.has(defindex)) return false;
+    if (!KIT_TARGET_DEFINDEXES.has(defindex)) return false;
     const schemaItem = bot.schema.getItemByDefindex(defindex);
     if (schemaItem?.item_name?.startsWith('Festive ')) return false;
     if (item.descriptions?.some((description: { value?: string }) => description.value?.startsWith('Halloween:')))

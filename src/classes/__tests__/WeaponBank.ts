@@ -8,7 +8,7 @@ const emptyMetal = () => ({ '5000;6': [] as string[], '5001;6': [] as string[], 
 
 describe('weapon bank eligibility', () => {
     const bot = {
-        craftWeapons: ['18;6', '22;6', '42;6', '140;6', '159;6'],
+        craftWeapons: ['414;6', '527;6', '739;6', '22;6', '42;6', '46;6', '140;6', '159;6', '405;6'],
         schema: {
             getItemByDefindex: (id: number) => ({
                 item_name: id === 22 ? 'Festive Rocket Launcher' : 'Rocket Launcher',
@@ -25,19 +25,23 @@ describe('weapon bank eligibility', () => {
             ...overrides
         } as unknown as EconItem);
 
-    test('allows only plain tradable Unique weapons with Killstreak Kits', () => {
-        expect(isEligible(weapon('18;6'), bot)).toBe(true);
+    test('allows only plain tradable Unique weapons with listed Killstreak Kits', () => {
+        expect(isEligible(weapon('414;6'), bot)).toBe(true);
+        expect(isEligible(weapon('527;6'), bot)).toBe(true);
+        expect(isEligible(weapon('739;6'), bot)).toBe(true);
+        expect(isEligible(weapon('42;6'), bot)).toBe(false);
+        expect(isEligible(weapon('46;6'), bot)).toBe(false);
         expect(isEligible(weapon('140;6'), bot)).toBe(false);
         expect(isEligible(weapon('159;6'), bot)).toBe(false);
+        expect(isEligible(weapon('405;6'), bot)).toBe(false);
         expect(isEligible(weapon('22;6'), bot)).toBe(false);
-        expect(isEligible(weapon('18;6', { descriptions: [{ value: 'Halloween: Exorcism' }] }), bot)).toBe(false);
-        expect(isEligible(weapon('18;6', { descriptions: [{ value: 'A normal description' }] }), bot)).toBe(true);
-        expect(isEligible(weapon('42;6'), bot)).toBe(false);
-        expect(isEligible(weapon('18;11'), bot)).toBe(false);
-        expect(isEligible(weapon('18;6;uncraftable'), bot)).toBe(false);
-        expect(isEligible(weapon('18;6;kt-1'), bot)).toBe(false);
-        expect(isEligible(weapon('18;6', { tradable: false }), bot)).toBe(false);
-        expect(isEligible(weapon('18;6', { name: 'Renamed Rocket Launcher' }), bot)).toBe(false);
+        expect(isEligible(weapon('414;6', { descriptions: [{ value: 'Halloween: Exorcism' }] }), bot)).toBe(false);
+        expect(isEligible(weapon('414;6', { descriptions: [{ value: 'A normal description' }] }), bot)).toBe(true);
+        expect(isEligible(weapon('414;11'), bot)).toBe(false);
+        expect(isEligible(weapon('414;6;uncraftable'), bot)).toBe(false);
+        expect(isEligible(weapon('414;6;kt-1'), bot)).toBe(false);
+        expect(isEligible(weapon('414;6', { tradable: false }), bot)).toBe(false);
+        expect(isEligible(weapon('414;6', { name: 'Renamed Rocket Launcher' }), bot)).toBe(false);
     });
 });
 
