@@ -3118,7 +3118,7 @@ export default class MyHandler extends Handler {
                                                 this.bot.sendMessage(offer.partner, `⚠️ Couldn't self-fill fabricator ${fabId}: ${err.message}`);
                                             }
                                         } else if (result.kitId) {
-                                            log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${result.kitId}`);
+                                            log.info(`[craftingService] Craft succeeded for fab ${fabId} — kit ${result.kitId} — partner ${partnerSteamID64}`);
                                             resultKitIds.push(result.kitId);
                                             this.craftingInFlightIds.add(result.kitId);
                                             this.reconcileSelfFilledComponents(result.selfFilledIds);
