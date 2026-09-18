@@ -2754,9 +2754,9 @@ export default class MyHandler extends Handler {
                     }
 
                     const craftingService = offer.data('craftingService') as
-                        | { phase: 'intake'; fabricatorAssetIds: string[]; preTradeIds?: string[] }
+                        | { phase: 'intake'; fabricatorAssetIds: string[]; preTradeIds?: string[]; allowedWeaponIngredientAssetIds?: string[] }
                         | { phase: 'components'; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[] }
-                        | { phase?: undefined; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[]; adminSelfFill?: boolean }
+                        | { phase?: undefined; fabricatorAssetIds: string[]; componentAssetIds: string[]; kitAssetIds?: string[]; preTradeIds?: string[]; adminSelfFill?: boolean; allowedWeaponIngredientAssetIds?: string[] }
                         | undefined;
                     if (craftingService) {
                         const partnerSteamID64 = offer.partner.getSteamID64();
@@ -2843,9 +2843,9 @@ export default class MyHandler extends Handler {
                                 });
 
                                 if (newFabsFromDiff.length === 1) {
-                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0], offer.id);
+                                    void this.handleCraftingIntake(offer.partner, newFabsFromDiff[0], offer.id, craftingService.allowedWeaponIngredientAssetIds);
                                 } else {
-                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff, offer.id);
+                                    void this.handleCraftingIntakeBatch(offer.partner, newFabsFromDiff, offer.id, craftingService.allowedWeaponIngredientAssetIds);
                                 }
                             };
 
@@ -3477,7 +3477,8 @@ export default class MyHandler extends Handler {
      * and sends a follow-up offer requesting whatever subset they have (partial fulfillment is
      * fine; the existing craft pipeline already tolerates unfilled slots).
      */
-    private async handleCraftingIntake(partner: SteamID, fab: any, intakeOfferId?: string): Promise<void> {
+    private async handleCraftingIntake(partner: SteamID, fab: any, intakeOfferId?: string, allowedWeaponIngredientAssetIds?: string[]): Promise<void> {
+        const allowedIngredientIds = allowedWeaponIngredientAssetIds === undefined ? null : new Set(allowedWeaponIngredientAssetIds);
         const partnerSteamID64 = partner.getSteamID64();
         this.heldIntakeFabricators.delete(String(fab.id));
         // See fetchTradeUrlToken: every offer this method sends is initiated by us, not the
@@ -3613,7 +3614,7 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake: excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
-                    results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)));
+                    results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)).filter(id => allowedIngredientIds === null || allowedIngredientIds.has(id)));
                 }
                 return results;
             };
@@ -3622,7 +3623,7 @@ export default class MyHandler extends Handler {
                 fab as any,
                 (sku, tradableOnly) => excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)),
                 lookupKillstreakWeapon,
-                (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly)
+                (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly).filter(kit => allowedIngredientIds === null || allowedIngredientIds.has(kit.id))
             );
 
             if (targetWeaponDefindex !== null && result.missing.some(m => m.includes('weapon'))) {
@@ -3726,7 +3727,8 @@ export default class MyHandler extends Handler {
      * usedIds Set so the same owned item can't be requested for two different fabricators' slots.
      * Sends one combined follow-up offer instead of one per fabricator.
      */
-    private async handleCraftingIntakeBatch(partner: SteamID, fabs: any[], intakeOfferId?: string): Promise<void> {
+    private async handleCraftingIntakeBatch(partner: SteamID, fabs: any[], intakeOfferId?: string, allowedWeaponIngredientAssetIds?: string[]): Promise<void> {
+        const allowedIngredientIds = allowedWeaponIngredientAssetIds === undefined ? null : new Set(allowedWeaponIngredientAssetIds);
         const partnerSteamID64 = partner.getSteamID64();
         const fabIds = fabs.map(fab => String(fab.id));
         fabIds.forEach(id => this.heldIntakeFabricators.delete(id));
@@ -3823,7 +3825,7 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake (batch): excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
-                    results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)));
+                    results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)).filter(id => allowedIngredientIds === null || allowedIngredientIds.has(id)));
                 }
                 return results;
             };
@@ -3859,7 +3861,7 @@ export default class MyHandler extends Handler {
                     fab as any,
                     (sku, tradableOnly) => excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)),
                     lookupKillstreakWeapon,
-                    (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly),
+                    (tier, tradableOnly) => this.killstreakKitCandidates(theirInventory, tier, tradableOnly).filter(kit => allowedIngredientIds === null || allowedIngredientIds.has(kit.id)),
                     usedIds
                 );
 

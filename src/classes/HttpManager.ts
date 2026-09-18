@@ -294,11 +294,12 @@ export default class HttpManager {
                     return;
                 }
 
-                const { steamId, tradeUrl, fabricatorAssetIds, sourcing } = req.body as {
+                const { steamId, tradeUrl, fabricatorAssetIds, sourcing, allowedWeaponIngredientAssetIds } = req.body as {
                     steamId?: string;
                     tradeUrl?: string;
                     fabricatorAssetIds?: string[];
                     sourcing?: 'customer' | 'depot';
+                    allowedWeaponIngredientAssetIds?: string[];
                 };
 
                 if (!steamId || typeof steamId !== 'string') {
@@ -316,6 +317,15 @@ export default class HttpManager {
                     fabricatorAssetIds.some(id => typeof id !== 'string')
                 ) {
                     res.status(400).json({ success: false, error: 'Missing fabricatorAssetIds' });
+                    return;
+                }
+                if (allowedWeaponIngredientAssetIds !== undefined && (
+                    !Array.isArray(allowedWeaponIngredientAssetIds) ||
+                    allowedWeaponIngredientAssetIds.length > 1000 ||
+                    allowedWeaponIngredientAssetIds.some(id => typeof id !== 'string' || !/^\d{1,20}$/.test(id)) ||
+                    new Set(allowedWeaponIngredientAssetIds).size !== allowedWeaponIngredientAssetIds.length
+                )) {
+                    res.status(400).json({ success: false, error: 'Invalid weapon ingredient selection.' });
                     return;
                 }
                 // 'depot' asks the bot to supply the components itself. That spends inventory the bot
@@ -385,7 +395,7 @@ export default class HttpManager {
                               preTradeIds,
                               adminSelfFill: true
                           }
-                        : { phase: 'intake', fabricatorAssetIds, preTradeIds }
+                        : { phase: 'intake', fabricatorAssetIds, preTradeIds, allowedWeaponIngredientAssetIds }
                 );
                 const count = fabricatorAssetIds.length;
                 const many = count > 1;
