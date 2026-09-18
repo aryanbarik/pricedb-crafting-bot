@@ -9,6 +9,7 @@ import Options from './Options';
 import Bot from './Bot';
 import ApiCart from './Carts/ApiCart';
 import { parseTradeUrl } from '../lib/tools/parseTradeUrl';
+import SteamID from 'steamid';
 
 export default class HttpManager {
     /**
@@ -263,6 +264,19 @@ export default class HttpManager {
                     error: errorMsg
                 });
             }
+        });
+
+        // Use the same pairing and return flow as the Steam chat command.
+        this.app.post('/api/crafting/killstreakify', this.validateApiKey.bind(this), (req, res) => {
+            const steamId = req.body?.steamId;
+            if (!this.bot || typeof steamId !== 'string' || !/^7656119\d{10}$/.test(steamId)) {
+                res.status(400).json({ success: false, error: 'A valid Steam ID is required.' });
+                return;
+            }
+            void this.bot.handler.handleKillstreakifyCommand(new SteamID(steamId)).catch(error => {
+                log.error('[killstreakifyService] Website request failed:', error);
+            });
+            res.status(202).json({ success: true });
         });
 
         // Website crafting endpoint: bot requests one or more bare fabricators from the user in a
