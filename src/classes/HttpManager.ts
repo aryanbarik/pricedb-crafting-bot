@@ -268,16 +268,53 @@ export default class HttpManager {
         });
 
         // Use the same pairing and return flow as the Steam chat command.
-        this.app.post('/api/crafting/killstreakify', this.validateApiKey.bind(this), (req, res) => {
+        this.app.get('/api/crafting/killstreakify/:steamId', this.validateApiKey.bind(this), async (req, res) => {
+            const steamId = req.params.steamId;
+            if (!this.bot || !/^7656119\d{10}$/.test(steamId)) {
+                res.status(400).json({ success: false, error: 'A valid Steam ID is required.' });
+                return;
+            }
+            try {
+                const pairs = await this.bot.handler.getKillstreakifyCatalog(new SteamID(steamId));
+                res.json({ success: true, pairs });
+            } catch (error) {
+                log.warn('[killstreakifyService] Could not load selection catalog:', error);
+                res.status(503).json({ success: false, error: 'Could not load eligible Kits and weapons.' });
+            }
+        });
+
+        this.app.post('/api/crafting/killstreakify', this.validateApiKey.bind(this), async (req, res) => {
             const steamId = req.body?.steamId;
             if (!this.bot || typeof steamId !== 'string' || !/^7656119\d{10}$/.test(steamId)) {
                 res.status(400).json({ success: false, error: 'A valid Steam ID is required.' });
                 return;
             }
-            void this.bot.handler.handleKillstreakifyCommand(new SteamID(steamId)).catch(error => {
+            const pairs = req.body?.pairs as Array<{ kitAssetId?: unknown; weaponAssetId?: unknown }> | undefined;
+            if (pairs !== undefined && (
+                !Array.isArray(pairs) || pairs.length === 0 || pairs.length > 100 ||
+                pairs.some(pair =>
+                    typeof pair !== 'object' || pair === null ||
+                    typeof pair.kitAssetId !== 'string' || !/^\d{1,20}$/.test(pair.kitAssetId) ||
+                    (pair.weaponAssetId !== undefined &&
+                        (typeof pair.weaponAssetId !== 'string' || !/^\d{1,20}$/.test(pair.weaponAssetId)))
+                )
+            )) {
+                res.status(400).json({ success: false, error: 'Select valid Killstreak Kit pairs.' });
+                return;
+            }
+            try {
+                await this.bot.handler.handleKillstreakifyCommand(
+                    new SteamID(steamId), '!',
+                    pairs as Array<{ kitAssetId: string; weaponAssetId?: string }> | undefined
+                );
+                res.status(202).json({ success: true });
+            } catch (error) {
                 log.error('[killstreakifyService] Website request failed:', error);
-            });
-            res.status(202).json({ success: true });
+                res.status(400).json({
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Could not start Killstreakify.'
+                });
+            }
         });
 
         this.app.get('/api/weapons/catalog/:steamId', this.validateApiKey.bind(this), async (req, res) => {

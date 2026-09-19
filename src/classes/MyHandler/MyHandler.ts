@@ -4000,13 +4000,74 @@ export default class MyHandler extends Handler {
     }
 
 
+    async getKillstreakifyCatalog(partner: SteamID): Promise<Array<{
+        kitAssetId: string;
+        weaponAssetId?: string;
+        kitName: string;
+        weaponName: string;
+    }>> {
+        const inventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
+        await inventory.fetch();
+        const rawById = new Map(inventory.getRawItems.map(item => [item.id, item]));
+        const usedIds = new Set<string>();
+        const result: Array<{
+            kitAssetId: string;
+            weaponAssetId?: string;
+            kitName: string;
+            weaponName: string;
+        }> = [];
+        for (const sku of Object.keys(inventory.getItems)) {
+            const defindex = parseInt(sku.split(';')[0], 10);
+            if (defindex !== 6527 && defindex !== 6523) continue;
+            const targetMatch = sku.match(/;td-(\d+)/);
+            const rawTargetDefindex = targetMatch ? parseInt(targetMatch[1], 10) : null;
+            if (rawTargetDefindex === null) continue;
+            const targetDefindex = fixItem(
+                { defindex: rawTargetDefindex, quality: 6 } as any,
+                this.bot.schema
+            ).defindex;
+            for (const kitAssetId of inventory.findBySKU(sku, true)) {
+                if (usedIds.has(kitAssetId)) continue;
+                const kit = rawById.get(kitAssetId);
+                const kitName = kit?.market_name ?? kit?.name ?? 'Killstreak Kit';
+                if (isBaseWeaponDefindex(targetDefindex, this.bot.schema)) {
+                    usedIds.add(kitAssetId);
+                    const schemaItem = this.bot.schema.getItemByDefindex(targetDefindex);
+                    result.push({
+                        kitAssetId,
+                        kitName,
+                        weaponName: (schemaItem?.item_name ?? `Weapon #${targetDefindex}`) + ' (bot stock)'
+                    });
+                    continue;
+                }
+                const weaponSku = SKU.fromObject({ defindex: targetDefindex, quality: 6 });
+                const weaponAssetId = inventory.findBySKU(weaponSku, true).find(id => !usedIds.has(id));
+                if (!weaponAssetId) continue;
+                const weapon = rawById.get(weaponAssetId);
+                usedIds.add(kitAssetId);
+                usedIds.add(weaponAssetId);
+                result.push({
+                    kitAssetId,
+                    weaponAssetId,
+                    kitName,
+                    weaponName: weapon?.market_name ?? weapon?.name ?? `Weapon #${targetDefindex}`
+                });
+            }
+        }
+        return result;
+    }
+
     /**
      * Customer-facing !killstreakify command. It requests each tradable Killstreak Kit alongside
      * its matching craftable Unique weapon, then applies only the pairs that actually arrive in
      * the accepted trade. A counteroffer is safe: removed kits or weapons are simply absent from
      * the Steam receipt and every unmatched received item is returned unchanged.
      */
-    async handleKillstreakifyCommand(partner: SteamID, prefix = '!'): Promise<void> {
+    async handleKillstreakifyCommand(
+        partner: SteamID,
+        prefix = '!',
+        requestedPairs?: Array<{ kitAssetId: string; weaponAssetId?: string }>
+    ): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
         this.bot.sendMessage(partner, '🔍 Scanning your inventory for Killstreak Kits, one moment...');
 
@@ -4034,10 +4095,10 @@ export default class MyHandler extends Handler {
         }
 
         const usedIds = new Set<string>();
-        const pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
+        let pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
         for (const sku of Object.keys(theirInventory.getItems)) {
             const defindex = parseInt(sku.split(';')[0], 10);
-            if (!KS_KIT_DEFINDEXES.includes(defindex)) continue;
+            if (defindex !== 6527 && defindex !== 6523) continue;
 
             const targetMatch = sku.match(/;td-(\d+)/);
             const rawTargetDefindex = targetMatch ? parseInt(targetMatch[1], 10) : null;
@@ -4066,6 +4127,16 @@ export default class MyHandler extends Handler {
             }
         }
 
+
+        if (requestedPairs !== undefined) {
+            if (requestedPairs.length === 0) throw new Error('Select at least one weapon to Killstreakify.');
+            const pairByKey = new Map(pairs.map(pair => [`${pair.kitId}:${pair.weaponId ?? ''}`, pair]));
+            const keys = requestedPairs.map(pair => `${pair.kitAssetId}:${pair.weaponAssetId ?? ''}`);
+            if (new Set(keys).size !== keys.length || keys.some(key => !pairByKey.has(key))) {
+                throw new Error('A selected Kit or weapon is no longer available. Refresh the list and try again.');
+            }
+            pairs = keys.map(key => pairByKey.get(key) as { kitId: string; weaponId?: string; targetDefindex: number });
+        }
         if (pairs.length === 0) {
             this.bot.sendMessage(
                 partner,
@@ -4133,7 +4204,10 @@ export default class MyHandler extends Handler {
         for (const kit of receivedItems) {
             const kitId = String(kit.id);
             const normalizedKitDefindex = fixItem({ defindex: kit.def_index, quality: 6 } as any, this.bot.schema).defindex;
-            if (usedIds.has(kitId) || !KS_KIT_DEFINDEXES.includes(normalizedKitDefindex)) continue;
+            if (
+                usedIds.has(kitId) ||
+                (normalizedKitDefindex !== 6527 && normalizedKitDefindex !== 6523)
+            ) continue;
             const kitSku = this.bot.inventoryManager.getInventory.findByAssetid(kitId);
             const resolution = resolveKitTarget(kit, kitSku, this.bot.schema);
             if (resolution.targetDefindex === null) {
