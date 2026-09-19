@@ -300,11 +300,18 @@ export default class HttpManager {
                 return;
             }
             const { steamId, tradeUrl, sellAssetIds, buyAssetIds } = req.body as {
-                steamId?: string; tradeUrl?: string; sellAssetIds?: string[]; buyAssetIds?: string[];
+                steamId?: string;
+                tradeUrl?: string;
+                sellAssetIds?: string[];
+                buyAssetIds?: string[];
             };
-            if (typeof steamId !== 'string' || typeof tradeUrl !== 'string' ||
-                !Array.isArray(sellAssetIds) || !Array.isArray(buyAssetIds) ||
-                [...sellAssetIds, ...buyAssetIds].some(id => typeof id !== 'string')) {
+            if (
+                typeof steamId !== 'string' ||
+                typeof tradeUrl !== 'string' ||
+                !Array.isArray(sellAssetIds) ||
+                !Array.isArray(buyAssetIds) ||
+                [...sellAssetIds, ...buyAssetIds].some(id => typeof id !== 'string')
+            ) {
                 res.status(400).json({ success: false, error: 'Invalid weapon selection.' });
                 return;
             }
@@ -318,14 +325,12 @@ export default class HttpManager {
             }
         });
 
-        // Website crafting endpoint: bot requests one or more bare fabricators from the user in a
-        // SINGLE combined offer (previously the website called this once per fabricator, producing
-        // one Steam trade offer per item — annoying for customers with multi-item orders and the
-        // reason for the BOT_REQUEST_SPACING_MS rate-limit dance on the website side). Once accepted,
-        // the bot reads each fabricator's real recipe (it can only do this once it owns the items) and
-        // sends follow-up offers requesting whatever matching components the user owns — see
-        // onTradeOfferChanged's `phase === 'intake'` handling in MyHandler.ts, which already batches
-        // via handleCraftingIntakeBatch when more than one new fabricator shows up in the diff.
+        // Current website callers provide exact ingredient IDs derived from Steam recipe data, so
+        // one offer receives both the Fabricators and ingredients. componentAssetIds stays optional:
+        // older callers retain the Fabricator-first offer and separate matched-ingredients fallback.
+        // After a combined offer is accepted, only the crafted-result return offer remains.
+        // This also makes rolling deployments safe across website and bot revisions.
+        // The protected API boundary prevents browsers from supplying arbitrary component IDs.
         this.app.post('/api/crafting/request-offer', this.validateApiKey.bind(this), async (req, res) => {
             try {
                 if (!this.bot) {
@@ -333,10 +338,18 @@ export default class HttpManager {
                     return;
                 }
 
-                const { steamId, tradeUrl, fabricatorAssetIds, sourcing, allowedWeaponIngredientAssetIds } = req.body as {
+                const {
+                    steamId,
+                    tradeUrl,
+                    fabricatorAssetIds,
+                    componentAssetIds,
+                    sourcing,
+                    allowedWeaponIngredientAssetIds
+                } = req.body as {
                     steamId?: string;
                     tradeUrl?: string;
                     fabricatorAssetIds?: string[];
+                    componentAssetIds?: string[];
                     sourcing?: 'customer' | 'depot';
                     allowedWeaponIngredientAssetIds?: string[];
                 };
@@ -353,17 +366,29 @@ export default class HttpManager {
                     !fabricatorAssetIds ||
                     !Array.isArray(fabricatorAssetIds) ||
                     fabricatorAssetIds.length === 0 ||
-                    fabricatorAssetIds.some(id => typeof id !== 'string')
+                    fabricatorAssetIds.some(id => typeof id !== 'string' || !/^\d{1,20}$/.test(id)) ||
+                    new Set(fabricatorAssetIds).size !== fabricatorAssetIds.length
                 ) {
                     res.status(400).json({ success: false, error: 'Missing fabricatorAssetIds' });
                     return;
                 }
-                if (allowedWeaponIngredientAssetIds !== undefined && (
-                    !Array.isArray(allowedWeaponIngredientAssetIds) ||
-                    allowedWeaponIngredientAssetIds.length > 1000 ||
-                    allowedWeaponIngredientAssetIds.some(id => typeof id !== 'string' || !/^\d{1,20}$/.test(id)) ||
-                    new Set(allowedWeaponIngredientAssetIds).size !== allowedWeaponIngredientAssetIds.length
-                )) {
+                if (
+                    componentAssetIds !== undefined &&
+                    (!Array.isArray(componentAssetIds) ||
+                        componentAssetIds.some(id => typeof id !== 'string' || !/^\d{1,20}$/.test(id)) ||
+                        new Set(componentAssetIds).size !== componentAssetIds.length ||
+                        componentAssetIds.some(id => fabricatorAssetIds.includes(id)))
+                ) {
+                    res.status(400).json({ success: false, error: 'Invalid componentAssetIds' });
+                    return;
+                }
+                if (
+                    allowedWeaponIngredientAssetIds !== undefined &&
+                    (!Array.isArray(allowedWeaponIngredientAssetIds) ||
+                        allowedWeaponIngredientAssetIds.length > 1000 ||
+                        allowedWeaponIngredientAssetIds.some(id => typeof id !== 'string' || !/^\d{1,20}$/.test(id)) ||
+                        new Set(allowedWeaponIngredientAssetIds).size !== allowedWeaponIngredientAssetIds.length)
+                ) {
                     res.status(400).json({ success: false, error: 'Invalid weapon ingredient selection.' });
                     return;
                 }
@@ -381,10 +406,16 @@ export default class HttpManager {
                     return;
                 }
 
-                // Steam trade offers are capped at 255 items per side, but nothing in this crafting
-                // service flow legitimately produces an order anywhere near that — treat a large batch
-                // as a bad request rather than silently truncating or chunking into multiple offers
-                // (which would defeat the point of combining them into one).
+                // Steam caps each side at 255 items. Keep a small safety margin and reject an
+                // oversized request instead of silently splitting the customer's order.
+                const combinedItemCount = fabricatorAssetIds.length + (componentAssetIds?.length ?? 0);
+                if (combinedItemCount > 250) {
+                    res.status(400).json({
+                        success: false,
+                        error: `Too many items in one crafting request (${combinedItemCount} > 250)`
+                    });
+                    return;
+                }
                 const MAX_FABRICATORS_PER_OFFER = 50;
                 if (fabricatorAssetIds.length > MAX_FABRICATORS_PER_OFFER) {
                     res.status(400).json({
@@ -396,18 +427,22 @@ export default class HttpManager {
 
                 // Snapshot bot's GC backpack before creating the offer so the crafting pipeline
                 // can compute the backpack diff after the user accepts.
-                const preTradeIds = ((this.bot.tf2 as any).backpack as any[] ?? []).map((i: any) => String(i.id));
+                const preTradeIds = (((this.bot.tf2 as any).backpack as any[]) ?? []).map((i: any) => String(i.id));
 
                 // @tf2autobot/tradeoffer-manager@2.20.6's createOffer(tradeUrl) has a bug: it does
                 // `url.searchParams.get(partner)` instead of `url.searchParams.get('partner')`, using
                 // the whole trade URL string as the query-param name — always returns null, so
                 // SteamID.fromIndividualAccountID(null) throws "Cannot read properties of null
-                // (reading 'toString')". Sidestep it entirely by passing the steamId we already have
-                // and pulling just the token out of the trade URL ourselves.
+                // (reading 'toString')". Pass the known SteamID and extract only the token instead.
                 const token = new URL(tradeUrl).searchParams.get('token') ?? undefined;
+                const isCombinedCustomerOffer = !wantsDepot && componentAssetIds !== undefined;
                 const offer = this.bot.manager.createOffer(steamId, token);
                 const theirDict: Record<string, number> = {};
                 for (const assetId of fabricatorAssetIds) {
+                    offer.addTheirItem({ appid: 440, contextid: '2', assetid: assetId });
+                    theirDict[assetId] = 1;
+                }
+                for (const assetId of componentAssetIds ?? []) {
                     offer.addTheirItem({ appid: 440, contextid: '2', assetid: assetId });
                     theirDict[assetId] = 1;
                 }
@@ -434,12 +469,23 @@ export default class HttpManager {
                               preTradeIds,
                               adminSelfFill: true
                           }
+                        : isCombinedCustomerOffer
+                        ? {
+                              fabricatorAssetIds,
+                              componentAssetIds,
+                              kitAssetIds: [],
+                              preTradeIds
+                          }
                         : { phase: 'intake', fabricatorAssetIds, preTradeIds, allowedWeaponIngredientAssetIds }
                 );
                 const count = fabricatorAssetIds.length;
                 const many = count > 1;
                 const subject = many ? `your ${count} fabricators` : 'your fabricator';
-                const followUp = wantsDepot
+                const followUp = isCombinedCustomerOffer
+                    ? `This includes the matching ingredients. I'll craft and return the ${
+                          many ? 'results' : 'result'
+                      }!`
+                    : wantsDepot
                     ? `I'll fill ${many ? 'them' : 'it'} from depot stock and send the ${many ? 'kits' : 'kit'} back!`
                     : `I'll read ${many ? 'their recipes' : 'its recipe'} and follow up with the parts needed!`;
                 offer.setMessage(`Please accept this offer to send ${subject} — ${followUp}`);
@@ -452,13 +498,19 @@ export default class HttpManager {
                 }
 
                 log.info(
-                    `[craftingService] Sent ${wantsDepot ? 'depot' : 'intake'} request-offer to ${steamId}: ` +
-                        `offer ${offer.id}, ${count} fabricator(s) [${fabricatorAssetIds.join(', ')}]`
+                    `[craftingService] Sent ${
+                        isCombinedCustomerOffer ? 'combined' : wantsDepot ? 'depot' : 'intake'
+                    } request-offer to ${steamId}: ` +
+                        `offer ${offer.id}, ${count} fabricator(s) [${fabricatorAssetIds.join(', ')}], ` +
+                        `${componentAssetIds?.length ?? 0} component(s)`
                 );
                 res.json({ success: true, offerId: offer.id });
             } catch (error) {
                 log.error('Error in /api/crafting/request-offer:', error);
-                res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Internal error' });
+                res.status(500).json({
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Internal error'
+                });
             }
         });
     }
