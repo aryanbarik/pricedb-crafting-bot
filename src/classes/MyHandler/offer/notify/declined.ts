@@ -212,6 +212,10 @@ export default function declined(offer: TradeOffer, bot: Bot): void {
     } else if (offerReason.reason === 'HALTED') {
         const custom = opt.customMessage.decline.halted;
         reply = custom ? custom : declined + ' because I am not operational right now. Please come back later.';
+    } else if (offerReason.reason === 'CRAFTING_WEBSITE_ONLY') {
+        reply =
+            declined +
+            ' because crafting requests must start at https://fabricators.tf. Select your Fabricators there and use the trade offer sent by the bot.';
     } else if (offerReason.reason === 'CONTAINS_KEYS_ON_BOTH_SIDES') {
         const custom = opt.customMessage.decline.containsKeysOnBothSides;
         reply = custom

@@ -888,6 +888,15 @@ export default class MyHandler extends Handler {
                 );
                 const keyCount = otherItems.length - componentItems.length;
 
+                // Website craft requests are bot-created outgoing offers and never pass through
+                // onNewTradeOffer. An incoming Fabricator offer was created directly in Steam.
+                // Keep that admin convenience, but require customers to start on the website so
+                // ingredient selection, order tracking, and return callbacks are attached first.
+                if (!isAdmin) {
+                    offer.log('info', `[craftingService] Declining direct Fabricator offer from ${partnerSteamID}; website request required`);
+                    return { action: 'decline', reason: 'CRAFTING_WEBSITE_ONLY' };
+                }
+
                 // PAYMENT GATE (currently disabled — open pilot period).
                 // To re-enable paid-only access, restore this whitelist check and remove the `true` below.
                 // const isWhitelisted = isAdmin || (this.opt.craftingServiceWhitelist ?? []).includes(partnerSteamID);
