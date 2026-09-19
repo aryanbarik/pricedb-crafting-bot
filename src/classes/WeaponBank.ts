@@ -1,4 +1,5 @@
 import { EconItem } from '@tf2autobot/tradeoffer-manager';
+import SKU from '@tf2autobot/tf2-sku';
 import SteamID from 'steamid';
 import Bot from './Bot';
 import Inventory from './Inventory';
@@ -12,6 +13,7 @@ export interface BankCatalog {
     ours: BankItem[];
     yourMetal: Record<string, number>;
     ourMetal: Record<string, number>;
+    duplicateAssetIds: string[];
 }
 
 const METAL: Record<string, number> = { '5000;6': 1, '5001;6': 3, '5002;6': 9 };
@@ -72,6 +74,35 @@ async function inventories(bot: Bot, steamId: string): Promise<{ yours: Inventor
     return { yours, ours: bot.inventoryManager.getInventory };
 }
 
+/** Mirrors !donateweps: preserve one plain Unique copy unless a tradable Strange copy exists. */
+export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot): string[] {
+    const tradable = items.filter(item => item.tradable).map(item => {
+        const sku = rawSku(item, bot);
+        const parsed = SKU.fromString(sku);
+        return { item, parsed, baseSku: String(parsed.defindex) + ';6' };
+    });
+    const strangeWeaponSkus = new Set(
+        tradable
+            .filter(
+                ({ parsed, baseSku }) =>
+                    bot.craftWeapons.includes(baseSku) && (parsed.quality === 11 || parsed.quality2 === 11)
+            )
+            .map(({ baseSku }) => baseSku)
+    );
+    const bySku = new Map<string, string[]>();
+    for (const { item } of tradable) {
+        if (!isEligible(item, bot)) continue;
+        const baseSku = rawSku(item, bot);
+        const ids = bySku.get(baseSku) ?? [];
+        ids.push(item.id);
+        bySku.set(baseSku, ids);
+    }
+    const result: string[] = [];
+    bySku.forEach((ids, sku) => result.push(...ids.slice(strangeWeaponSkus.has(sku) ? 0 : 1)));
+    return result;
+}
+
+
 export async function getBankCatalog(bot: Bot, steamId: string): Promise<BankCatalog> {
     const { yours, ours } = await inventories(bot, steamId);
     const list = (inventory: Inventory, isOurs: boolean): BankItem[] =>
@@ -83,7 +114,8 @@ export async function getBankCatalog(bot: Bot, steamId: string): Promise<BankCat
         yours: list(yours, false),
         ours: list(ours, true),
         yourMetal: counts(metalAssets(yours, bot, false)),
-        ourMetal: counts(metalAssets(ours, bot, true))
+        ourMetal: counts(metalAssets(ours, bot, true)),
+        duplicateAssetIds: duplicateWeaponAssetIds(yours.getRawItems, bot)
     };
 }
 

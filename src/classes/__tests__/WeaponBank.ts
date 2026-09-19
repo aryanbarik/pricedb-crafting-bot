@@ -1,6 +1,6 @@
 jest.mock('../Inventory', () => ({ __esModule: true, default: jest.fn() }));
 
-import { chooseMetal, isEligible } from '../WeaponBank';
+import { chooseMetal, duplicateWeaponAssetIds, isEligible } from '../WeaponBank';
 import Bot from '../Bot';
 import { EconItem } from '@tf2autobot/tradeoffer-manager';
 
@@ -42,6 +42,24 @@ describe('weapon bank eligibility', () => {
         expect(isEligible(weapon('414;6;kt-1'), bot)).toBe(false);
         expect(isEligible(weapon('414;6', { tradable: false }), bot)).toBe(false);
         expect(isEligible(weapon('414;6', { name: 'Renamed Rocket Launcher' }), bot)).toBe(false);
+    });
+
+    test('keeps one Unique copy and marks the remaining copies as duplicates', () => {
+        const items = [
+            weapon('414;6', { id: 'unique-1' }),
+            weapon('414;6', { id: 'unique-2' }),
+            weapon('414;6', { id: 'unique-3' })
+        ];
+        expect(duplicateWeaponAssetIds(items, bot)).toEqual(['unique-2', 'unique-3']);
+    });
+
+    test('marks every Unique copy as duplicate when a tradable Strange copy exists', () => {
+        const items = [
+            weapon('414;6', { id: 'unique-1' }),
+            weapon('414;6', { id: 'unique-2' }),
+            weapon('414;11', { id: 'strange-1' })
+        ];
+        expect(duplicateWeaponAssetIds(items, bot)).toEqual(['unique-1', 'unique-2']);
     });
 });
 
