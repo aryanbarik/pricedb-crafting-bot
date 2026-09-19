@@ -7,6 +7,7 @@ import Inventory from './Inventory';
 export interface BankItem {
     assetId: string;
     name: string;
+    protectedItem: boolean;
 }
 export interface BankCatalog {
     yours: BankItem[];
@@ -14,6 +15,7 @@ export interface BankCatalog {
     yourMetal: Record<string, number>;
     ourMetal: Record<string, number>;
     duplicateAssetIds: string[];
+    duplicateAssetIdsIncludingProtected: string[];
 }
 
 const METAL: Record<string, number> = { '5000;6': 1, '5001;6': 3, '5002;6': 9 };
@@ -34,10 +36,15 @@ function rawSku(item: EconItem, bot: Bot): string {
     return item.getSKU(bot.schema, false, false, false, false, []).sku;
 }
 
-export function isEligible(item: EconItem, bot: Bot): boolean {
+export function isProtectedItem(item: EconItem): boolean {
+    return item.name !== item.market_name ||
+        !!item.descriptions?.some((description: { value?: string }) => description.value?.slice(0, 10) === 'Gift from:');
+}
+
+export function isEligible(item: EconItem, bot: Bot, allowProtected = false): boolean {
     if (!item.tradable) return false;
     const sku = rawSku(item, bot);
-    if (!/^\d+;6$/.test(sku) || item.name !== item.market_name) return false;
+    if (!/^\d+;6$/.test(sku) || (!allowProtected && isProtectedItem(item))) return false;
     if (!bot.craftWeapons.includes(sku)) return false;
     const defindex = Number(sku.split(';')[0]);
     if (!KIT_TARGET_DEFINDEXES.has(defindex)) return false;
@@ -75,7 +82,7 @@ async function inventories(bot: Bot, steamId: string): Promise<{ yours: Inventor
 }
 
 /** Mirrors !donateweps: preserve one plain Unique copy unless a tradable Strange copy exists. */
-export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot): string[] {
+export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot, allowProtected = false): string[] {
     const tradable = items.filter(item => item.tradable).map(item => {
         const sku = rawSku(item, bot);
         const parsed = SKU.fromString(sku);
@@ -91,7 +98,7 @@ export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot): string[] {
     );
     const bySku = new Map<string, string[]>();
     for (const { item } of tradable) {
-        if (!isEligible(item, bot)) continue;
+        if (!isEligible(item, bot, allowProtected)) continue;
         const baseSku = rawSku(item, bot);
         const ids = bySku.get(baseSku) ?? [];
         ids.push(item.id);
@@ -107,15 +114,16 @@ export async function getBankCatalog(bot: Bot, steamId: string): Promise<BankCat
     const { yours, ours } = await inventories(bot, steamId);
     const list = (inventory: Inventory, isOurs: boolean): BankItem[] =>
         inventory.getRawItems
-            .filter(item => available(item, bot, isOurs) && isEligible(item, bot))
-            .map(item => ({ assetId: item.id, name: item.market_name ?? item.name }))
+            .filter(item => available(item, bot, isOurs) && isEligible(item, bot, true))
+            .map(item => ({ assetId: item.id, name: item.market_name ?? item.name, protectedItem: isProtectedItem(item) }))
             .sort((a, b) => a.name.localeCompare(b.name) || a.assetId.localeCompare(b.assetId));
     return {
         yours: list(yours, false),
         ours: list(ours, true),
         yourMetal: counts(metalAssets(yours, bot, false)),
         ourMetal: counts(metalAssets(ours, bot, true)),
-        duplicateAssetIds: duplicateWeaponAssetIds(yours.getRawItems, bot)
+        duplicateAssetIds: duplicateWeaponAssetIds(yours.getRawItems, bot),
+        duplicateAssetIdsIncludingProtected: duplicateWeaponAssetIds(yours.getRawItems, bot, true)
     };
 }
 
@@ -156,7 +164,8 @@ export async function sendBankOffer(
     steamId: string,
     tradeUrl: string,
     sellAssetIds: string[],
-    buyAssetIds: string[]
+    buyAssetIds: string[],
+    allowProtected = false
 ): Promise<string> {
     if (!/^7656119\d{10}$/.test(steamId)) throw new Error('Invalid Steam ID.');
     const url = new URL(tradeUrl);
@@ -181,7 +190,7 @@ export async function sendBankOffer(
     const validate = (inventory: Inventory, ids: string[], isOurs: boolean): EconItem[] =>
         ids.map(id => {
             const item = inventory.getRawItems.find(candidate => candidate.id === id);
-            if (!item || !available(item, bot, isOurs) || !isEligible(item, bot)) {
+            if (!item || !available(item, bot, isOurs) || !isEligible(item, bot, allowProtected)) {
                 throw new Error('A selected weapon is no longer available or eligible. Refresh the list.');
             }
             return item;

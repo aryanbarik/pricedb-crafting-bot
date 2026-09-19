@@ -67,6 +67,7 @@ import {
     FABRICATOR_DEFINDEXES
 } from '../../lib/fabricatorSlots';
 import { fixItem, isBaseWeaponDefindex } from '../../lib/items';
+import { isProtectedItem } from '../WeaponBank';
 import { resolveKitTarget, resolveKitBatchTargets } from '../../lib/kitTarget';
 
 const filterReasons = (reasons: string[]) => {
@@ -4005,6 +4006,7 @@ export default class MyHandler extends Handler {
         weaponAssetId?: string;
         kitName: string;
         weaponName: string;
+        protectedItem: boolean;
     }>> {
         const inventory = new Inventory(partner, this.bot, 'their', this.bot.boundInventoryGetter);
         await inventory.fetch();
@@ -4015,6 +4017,7 @@ export default class MyHandler extends Handler {
             weaponAssetId?: string;
             kitName: string;
             weaponName: string;
+            protectedItem: boolean;
         }> = [];
         for (const sku of Object.keys(inventory.getItems)) {
             const defindex = parseInt(sku.split(';')[0], 10);
@@ -4026,7 +4029,8 @@ export default class MyHandler extends Handler {
                 { defindex: rawTargetDefindex, quality: 6 } as any,
                 this.bot.schema
             ).defindex;
-            for (const kitAssetId of inventory.findBySKU(sku, true)) {
+            for (const kitAssetId of inventory.findBySKU(sku, true)
+                .sort((a, b) => Number(isProtectedItem(rawById.get(a)!)) - Number(isProtectedItem(rawById.get(b)!)))) {
                 if (usedIds.has(kitAssetId)) continue;
                 const kit = rawById.get(kitAssetId);
                 const kitName = kit?.market_name ?? kit?.name ?? 'Killstreak Kit';
@@ -4036,12 +4040,15 @@ export default class MyHandler extends Handler {
                     result.push({
                         kitAssetId,
                         kitName,
-                        weaponName: (schemaItem?.item_name ?? `Weapon #${targetDefindex}`) + ' (bot stock)'
+                        weaponName: (schemaItem?.item_name ?? `Weapon #${targetDefindex}`) + ' (bot stock)',
+                        protectedItem: !!kit && isProtectedItem(kit)
                     });
                     continue;
                 }
                 const weaponSku = SKU.fromObject({ defindex: targetDefindex, quality: 6 });
-                const weaponAssetId = inventory.findBySKU(weaponSku, true).find(id => !usedIds.has(id));
+                const weaponAssetId = inventory.findBySKU(weaponSku, true)
+                    .filter(id => !usedIds.has(id))
+                    .sort((a, b) => Number(isProtectedItem(rawById.get(a)!)) - Number(isProtectedItem(rawById.get(b)!)))[0];
                 if (!weaponAssetId) continue;
                 const weapon = rawById.get(weaponAssetId);
                 usedIds.add(kitAssetId);
@@ -4050,7 +4057,8 @@ export default class MyHandler extends Handler {
                     kitAssetId,
                     weaponAssetId,
                     kitName,
-                    weaponName: weapon?.market_name ?? weapon?.name ?? `Weapon #${targetDefindex}`
+                    weaponName: weapon?.market_name ?? weapon?.name ?? `Weapon #${targetDefindex}`,
+                    protectedItem: (!!kit && isProtectedItem(kit)) || (!!weapon && isProtectedItem(weapon))
                 });
             }
         }
@@ -4066,7 +4074,8 @@ export default class MyHandler extends Handler {
     async handleKillstreakifyCommand(
         partner: SteamID,
         prefix = '!',
-        requestedPairs?: Array<{ kitAssetId: string; weaponAssetId?: string }>
+        requestedPairs?: Array<{ kitAssetId: string; weaponAssetId?: string }>,
+        allowProtected = false
     ): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
         this.bot.sendMessage(partner, '🔍 Scanning your inventory for Killstreak Kits, one moment...');
@@ -4094,6 +4103,7 @@ export default class MyHandler extends Handler {
             return;
         }
 
+        const rawById = new Map(theirInventory.getRawItems.map(item => [item.id, item]));
         const usedIds = new Set<string>();
         let pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
         for (const sku of Object.keys(theirInventory.getItems)) {
@@ -4110,6 +4120,8 @@ export default class MyHandler extends Handler {
 
             for (const kitId of theirInventory.findBySKU(sku, true)) {
                 if (usedIds.has(kitId)) continue;
+                const kit = rawById.get(kitId);
+                if (!allowProtected && kit && isProtectedItem(kit)) continue;
                 if (isBaseWeaponDefindex(targetDefindex, this.bot.schema)) {
                     usedIds.add(kitId);
                     pairs.push({ kitId, targetDefindex });
@@ -4119,7 +4131,11 @@ export default class MyHandler extends Handler {
                 // Exact plain Unique + craftable SKU: never request a Non-Craftable weapon, a
                 // decorated weapon, or an existing Killstreak weapon as the kit's target.
                 const weaponSku = SKU.fromObject({ defindex: targetDefindex, quality: 6 });
-                const weaponId = theirInventory.findBySKU(weaponSku, true).find(id => !usedIds.has(id));
+                const weaponId = theirInventory.findBySKU(weaponSku, true).find(id => {
+                    if (usedIds.has(id)) return false;
+                    const weapon = rawById.get(id);
+                    return allowProtected || !weapon || !isProtectedItem(weapon);
+                });
                 if (!weaponId) continue;
                 usedIds.add(kitId);
                 usedIds.add(weaponId);

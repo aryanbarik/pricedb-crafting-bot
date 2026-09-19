@@ -42,6 +42,10 @@ describe('weapon bank eligibility', () => {
         expect(isEligible(weapon('414;6;kt-1'), bot)).toBe(false);
         expect(isEligible(weapon('414;6', { tradable: false }), bot)).toBe(false);
         expect(isEligible(weapon('414;6', { name: 'Renamed Rocket Launcher' }), bot)).toBe(false);
+        expect(isEligible(weapon('414;6', { name: 'Renamed Rocket Launcher' }), bot, true)).toBe(true);
+        const gifted = weapon('414;6', { descriptions: [{ value: 'Gift from: A Friend' }] });
+        expect(isEligible(gifted, bot)).toBe(false);
+        expect(isEligible(gifted, bot, true)).toBe(true);
     });
 
     test('keeps one Unique copy and marks the remaining copies as duplicates', () => {

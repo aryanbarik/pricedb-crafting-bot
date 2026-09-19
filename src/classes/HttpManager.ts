@@ -290,6 +290,11 @@ export default class HttpManager {
                 return;
             }
             const pairs = req.body?.pairs as Array<{ kitAssetId?: unknown; weaponAssetId?: unknown }> | undefined;
+            const allowProtected = req.body?.allowRenamedGiftedItems;
+            if (allowProtected !== undefined && typeof allowProtected !== 'boolean') {
+                res.status(400).json({ success: false, error: 'Invalid renamed or gifted item setting.' });
+                return;
+            }
             if (pairs !== undefined && (
                 !Array.isArray(pairs) || pairs.length === 0 || pairs.length > 100 ||
                 pairs.some(pair =>
@@ -305,7 +310,8 @@ export default class HttpManager {
             try {
                 await this.bot.handler.handleKillstreakifyCommand(
                     new SteamID(steamId), '!',
-                    pairs as Array<{ kitAssetId: string; weaponAssetId?: string }> | undefined
+                    pairs as Array<{ kitAssetId: string; weaponAssetId?: string }> | undefined,
+                    allowProtected === true
                 );
                 res.status(202).json({ success: true });
             } catch (error) {
@@ -336,24 +342,26 @@ export default class HttpManager {
                 res.status(503).json({ success: false, error: 'Bot is not initialized.' });
                 return;
             }
-            const { steamId, tradeUrl, sellAssetIds, buyAssetIds } = req.body as {
+            const { steamId, tradeUrl, sellAssetIds, buyAssetIds, allowRenamedGiftedItems } = req.body as {
                 steamId?: string;
                 tradeUrl?: string;
                 sellAssetIds?: string[];
                 buyAssetIds?: string[];
+                allowRenamedGiftedItems?: boolean;
             };
             if (
                 typeof steamId !== 'string' ||
                 typeof tradeUrl !== 'string' ||
                 !Array.isArray(sellAssetIds) ||
                 !Array.isArray(buyAssetIds) ||
+                (allowRenamedGiftedItems !== undefined && typeof allowRenamedGiftedItems !== 'boolean') ||
                 [...sellAssetIds, ...buyAssetIds].some(id => typeof id !== 'string')
             ) {
                 res.status(400).json({ success: false, error: 'Invalid weapon selection.' });
                 return;
             }
             try {
-                const offerId = await sendBankOffer(this.bot, steamId, tradeUrl, sellAssetIds, buyAssetIds);
+                const offerId = await sendBankOffer(this.bot, steamId, tradeUrl, sellAssetIds, buyAssetIds, allowRenamedGiftedItems === true);
                 res.json({ success: true, offerId });
             } catch (error) {
                 const message = error instanceof Error ? error.message : 'Could not send the weapon trade.';
