@@ -41,7 +41,7 @@ import CraftingJournal from '../../lib/craftingJournal';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
 import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
-import { hasExcludedHalloweenSpell, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
+import { hasExcludedHalloweenSpell, isExcludedCraftingReskinDefindex, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
 
 import { noiseMakers } from '../../lib/data';
 import { sendAlert } from '../DiscordWebhook/export';
@@ -3630,6 +3630,10 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake: excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
+                    if (isExcludedCraftingReskinDefindex(skuDefindex)) {
+                        log.debug(`[craftingService] Intake: excluding promotional reskin SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        continue;
+                    }
                     results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)).filter(id => allowedIngredientIds === null || allowedIngredientIds.has(id)));
                 }
                 return results;
@@ -3841,6 +3845,10 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake (batch): excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
+                    if (isExcludedCraftingReskinDefindex(skuDefindex)) {
+                        log.debug(`[craftingService] Intake (batch): excluding promotional reskin SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                        continue;
+                    }
                     results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)).filter(id => allowedIngredientIds === null || allowedIngredientIds.has(id)));
                 }
                 return results;
@@ -4029,6 +4037,7 @@ export default class MyHandler extends Handler {
                 { defindex: rawTargetDefindex, quality: 6 } as any,
                 this.bot.schema
             ).defindex;
+            if (isExcludedCraftingReskinDefindex(rawTargetDefindex) || isExcludedCraftingReskinDefindex(targetDefindex)) continue;
             for (const kitAssetId of inventory.findBySKU(sku, true)
                 .sort((a, b) => Number(isProtectedItem(rawById.get(a)!)) - Number(isProtectedItem(rawById.get(b)!)))) {
                 if (usedIds.has(kitAssetId)) continue;
@@ -4117,6 +4126,7 @@ export default class MyHandler extends Handler {
                 continue;
             }
             const targetDefindex = fixItem({ defindex: rawTargetDefindex, quality: 6 } as any, this.bot.schema).defindex;
+            if (isExcludedCraftingReskinDefindex(rawTargetDefindex) || isExcludedCraftingReskinDefindex(targetDefindex)) continue;
 
             for (const kitId of theirInventory.findBySKU(sku, true)) {
                 if (usedIds.has(kitId)) continue;
@@ -4835,6 +4845,7 @@ export default class MyHandler extends Handler {
             if (isNaN(rawTarget)) continue;
 
             const targetDefindex = fixItem({ defindex: rawTarget, quality: 6 } as any, this.bot.schema).defindex;
+            if (isExcludedCraftingReskinDefindex(rawTarget) || isExcludedCraftingReskinDefindex(targetDefindex)) continue;
             const targetIsBaseWeapon = isBaseWeaponDefindex(targetDefindex, this.bot.schema);
             for (const id of theirInventory.findBySKU(sku, tradableOnly)) {
                 results.push({ id, targetDefindex, targetIsBaseWeapon });

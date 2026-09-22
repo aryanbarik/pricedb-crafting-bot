@@ -7,6 +7,25 @@ import Bot from '../classes/Bot';
 // used by spellsData in lib/data.ts.
 const EXCLUDED_HALLOWEEN_SPELLS = new Set(['pumpkin bombs', 'halloween fire', 'exorcism']);
 
+// Promotional reskins must never be consumed as automatic crafting inputs. They are technically
+// valid recipe weapons, but are worth more than their ordinary equivalents. This also blocks Kits
+// targeting them, preventing the service from creating a Killstreak reskin and consuming it later.
+const EXCLUDED_CRAFTING_RESKIN_DEFINDEXES = new Set([
+    160, // Lugermorph
+    294, // Lugermorph (Poker Night promotional variant)
+    161, // Big Kill
+    298, // Iron Curtain
+    727, // Black Rose
+    1100, // Bread Bite
+    30665, // Shooting Star
+    30666, // C.A.P.P.E.R
+    30667 // Batsaber
+]);
+
+export function isExcludedCraftingReskinDefindex(defindex: number): boolean {
+    return EXCLUDED_CRAFTING_RESKIN_DEFINDEXES.has(defindex);
+}
+
 /**
  * Checks a weapon's raw Steam trade-asset descriptions for any of the 3 excluded Halloween
  * Spells. Mirrors the exact parsing Inventory.ts's own highValue() uses to find a spell
