@@ -6,6 +6,7 @@ import { HighValue } from './Options';
 import Bot from './Bot';
 import { noiseMakers, spellsData, killstreakersData, sheensData } from '../lib/data';
 import Pricelist from './Pricelist';
+import { isRobotPartSku } from '../lib/robotPartListingPolicy';
 
 export default class Inventory {
     private readonly steamID: SteamID;
@@ -136,6 +137,32 @@ export default class Inventory {
                 }
             }
         }
+    }
+
+    /** Reconcile tradable robot-part IDs against a successful TF2 GetPlayerItems snapshot. */
+    reconcileRobotPartStock(actualBySku: Map<string, Set<string>>): string[] {
+        const changed = new Set<string>();
+
+        for (const sku of Object.keys(this.tradable)) {
+            if (!isRobotPartSku(sku) || !/^570[0-7];6(?:;uncraftable)?$/.test(sku)) continue;
+
+            for (const id of this.findBySKU(sku, true)) {
+                if (actualBySku.get(sku)?.has(id)) continue;
+                this.removeItem(id);
+                changed.add(sku);
+            }
+        }
+
+        actualBySku.forEach((ids, sku) => {
+            for (const id of ids) {
+                if (this.findBySKU(sku, true).includes(id)) continue;
+                this.removeItem(id); // In case the cached copy was marked non-tradable.
+                this.addItem(sku, id);
+                changed.add(sku);
+            }
+        });
+
+        return [...changed];
     }
 
     fetch(): Promise<void> {

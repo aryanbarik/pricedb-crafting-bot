@@ -42,6 +42,8 @@ import InventoryCostBasis from './InventoryCostBasis';
 
 import log from '../lib/logger';
 import { refreshAll as refreshAllCompetitiveBuyPrices } from '../lib/pricer/competitiveBuyPricer';
+import { fetchRobotPartSteamStock } from '../lib/robotPartSteamStock';
+import { isRobotPartSku } from '../lib/robotPartListingPolicy';
 import Bans, { IsBanned } from '../lib/bans';
 import { sendStats } from './DiscordWebhook/export';
 
@@ -898,9 +900,7 @@ export default class Bot {
     }
 
     startAutoRefreshListings(): void {
-        let pricelistLength = 0;
-
-        this.autoRefreshListingsInterval = setInterval(() => {
+        const run = (): void => {
             const createListingsEnabled = this.options.miscSettings.createListings.enable;
 
             if (this.halted) {
@@ -925,7 +925,6 @@ export default class Bot {
                 return;
             }
 
-            pricelistLength = 0;
             log.debug('Running automatic check for missing/mismatch listings...');
 
             const listings: { [sku: string]: Listing[] } = {};
@@ -943,6 +942,36 @@ export default class Bot {
                     const inventoryManager = this.inventoryManager;
                     const inventory = inventoryManager.getInventory;
                     const isFilterCantAfford = this.options.pricelist.filterCantAfford.enable;
+
+                    // Trades and GC crafts can change stock without changing a price. Refresh the
+                    // inventory before comparing buy-listing descriptions so %current_stock% and
+                    // %amount_trade% are based on the latest available Steam inventory snapshot.
+                    let stockRefreshed = false;
+                    try {
+                        await inventory.fetch();
+                        stockRefreshed = true;
+                    } catch {
+                        log.warn(
+                            'Could not refresh inventory for buy-listing stock descriptions; retaining cached counts'
+                        );
+                    }
+
+                    let robotPartStockRefreshed = false;
+                    if (this.manager.apiKey && this.client.steamID) {
+                        try {
+                            const actual = await fetchRobotPartSteamStock(
+                                this.client.steamID.getSteamID64(),
+                                this.manager.apiKey
+                            );
+                            const changedSkus = inventory.reconcileRobotPartStock(actual);
+                            if (changedSkus.length > 0) {
+                                log.warn(`Corrected stale robot-part inventory counts for ${changedSkus.join(', ')}`);
+                            }
+                            robotPartStockRefreshed = true;
+                        } catch {
+                            log.warn('Could not verify robot-part stock with Steam; retaining cached counts');
+                        }
+                    }
 
                     this.listingManager.listings.forEach(listing => {
                         let listingSKU = listing.getSKU();
@@ -1018,23 +1047,36 @@ export default class Bot {
                         });
 
                         if (_listings) {
+                            let needsCheck = false;
                             _listings.forEach(listing => {
                                 if (_listings.length === 1 && listing.intent === 0 && amountAvailable > entry.min) {
                                     log.debug(`Missing sell order listings: ${priceKey}`);
+                                    needsCheck = true;
                                 } else if (
                                     listing.intent === 0 &&
                                     listing.currencies.toValue(keyPrice) !== entry.buy.toValue(keyPrice)
                                 ) {
                                     log.debug(`Buying price for ${priceKey} not updated`);
+                                    needsCheck = true;
                                 } else if (
                                     listing.intent === 1 &&
                                     listing.currencies.toValue(keyPrice) !== entry.sell.toValue(keyPrice)
                                 ) {
                                     log.debug(`Selling price for ${priceKey} not updated`);
-                                } else {
-                                    delete pricelist[priceKey];
+                                    needsCheck = true;
+                                } else if (
+                                    listing.intent === 0 &&
+                                    (stockRefreshed || (robotPartStockRefreshed && isRobotPartSku(priceKey)))
+                                ) {
+                                    // A correct price does not imply a correct stock note. Let
+                                    // checkByPriceKey compare the rendered details with backpack.tf.
+                                    needsCheck = true;
                                 }
                             });
+
+                            if (!needsCheck) {
+                                delete pricelist[priceKey];
+                            }
 
                             continue;
                         }
@@ -1079,13 +1121,15 @@ export default class Bot {
                     } else {
                         log.debug('❌ Nothing to refresh.');
                     }
-
-                    pricelistLength = pricelistCount;
                 })().catch(error_ => {
                     log.error('Auto-refresh listings task failed:', error_);
                 });
             });
-        }, (pricelistLength > 4000 ? 60 : 30) * 60 * 1000);
+        };
+
+        clearInterval(this.autoRefreshListingsInterval);
+        this.autoRefreshListingsInterval = setInterval(run, 30 * 60 * 1000);
+        run();
     }
 
     private get sendStatsEnabled(): boolean {
