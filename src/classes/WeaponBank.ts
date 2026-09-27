@@ -20,6 +20,7 @@ export interface BankCatalog {
 
 const METAL: Record<string, number> = { '5000;6': 1, '5001;6': 3, '5002;6': 9 };
 const MAX_WEAPONS = 50;
+const FREE_WEAPON_BANK_ADMIN = '76561198138534634';
 // Fail closed: targets found in current Steam Market Killstreak Kit listings (18 Sep 2026),
 // plus Widowmaker and Lollichop, verified on their individual Steam listing pages.
 // The schema's can_killstreakify flag alone also includes drinks, lunchboxes, boots, etc.
@@ -37,8 +38,10 @@ function rawSku(item: EconItem, bot: Bot): string {
 }
 
 export function isProtectedItem(item: EconItem): boolean {
-    return item.name !== item.market_name ||
-        !!item.descriptions?.some((description: { value?: string }) => description.value?.slice(0, 10) === 'Gift from:');
+    return (
+        item.name !== item.market_name ||
+        !!item.descriptions?.some((description: { value?: string }) => description.value?.slice(0, 10) === 'Gift from:')
+    );
 }
 
 export function isEligible(item: EconItem, bot: Bot, allowProtected = false): boolean {
@@ -83,11 +86,13 @@ async function inventories(bot: Bot, steamId: string): Promise<{ yours: Inventor
 
 /** Mirrors !donateweps: preserve one plain Unique copy unless a tradable Strange copy exists. */
 export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot, allowProtected = false): string[] {
-    const tradable = items.filter(item => item.tradable).map(item => {
-        const sku = rawSku(item, bot);
-        const parsed = SKU.fromString(sku);
-        return { item, parsed, baseSku: String(parsed.defindex) + ';6' };
-    });
+    const tradable = items
+        .filter(item => item.tradable)
+        .map(item => {
+            const sku = rawSku(item, bot);
+            const parsed = SKU.fromString(sku);
+            return { item, parsed, baseSku: String(parsed.defindex) + ';6' };
+        });
     const strangeWeaponSkus = new Set(
         tradable
             .filter(
@@ -109,13 +114,16 @@ export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot, allowProtec
     return result;
 }
 
-
 export async function getBankCatalog(bot: Bot, steamId: string): Promise<BankCatalog> {
     const { yours, ours } = await inventories(bot, steamId);
     const list = (inventory: Inventory, isOurs: boolean): BankItem[] =>
         inventory.getRawItems
             .filter(item => available(item, bot, isOurs) && isEligible(item, bot, true))
-            .map(item => ({ assetId: item.id, name: item.market_name ?? item.name, protectedItem: isProtectedItem(item) }))
+            .map(item => ({
+                assetId: item.id,
+                name: item.market_name ?? item.name,
+                protectedItem: isProtectedItem(item)
+            }))
             .sort((a, b) => a.name.localeCompare(b.name) || a.assetId.localeCompare(b.assetId));
     return {
         yours: list(yours, false),
@@ -184,7 +192,9 @@ export async function sendBankOffer(
     )
         throw new Error('Select 1 to 50 distinct weapons.');
     const net = buyAssetIds.length - sellAssetIds.length;
-    if (net % 2 !== 0) throw new Error('The net weapon count must be even because each weapon costs 0.5 scrap.');
+    const freeAdminWithdrawal = steamId === FREE_WEAPON_BANK_ADMIN && net > 0;
+    if (!freeAdminWithdrawal && net % 2 !== 0)
+        throw new Error('The net weapon count must be even because each weapon costs 0.5 scrap.');
 
     const { yours, ours } = await inventories(bot, steamId);
     const validate = (inventory: Inventory, ids: string[], isOurs: boolean): EconItem[] =>
@@ -199,12 +209,13 @@ export async function sendBankOffer(
     const buying = validate(ours, buyAssetIds, true);
     const yourMetal = metalAssets(yours, bot, false);
     const ourMetal = metalAssets(ours, bot, true);
-    const metal =
-        net > 0
-            ? chooseMetal(yourMetal, ourMetal, net / 2)
-            : net < 0
-            ? chooseMetal(ourMetal, yourMetal, -net / 2)
-            : { paid: [], change: [] };
+    const metal = freeAdminWithdrawal
+        ? { paid: [], change: [] }
+        : net > 0
+        ? chooseMetal(yourMetal, ourMetal, net / 2)
+        : net < 0
+        ? chooseMetal(ourMetal, yourMetal, -net / 2)
+        : { paid: [], change: [] };
     const byId = new Map([...yours.getRawItems, ...ours.getRawItems].map(item => [item.id, item]));
     const giveIds = [...buying.map(item => item.id), ...(net < 0 ? metal.paid : metal.change)];
     const receiveIds = [...selling.map(item => item.id), ...(net > 0 ? metal.paid : metal.change)];
@@ -228,7 +239,11 @@ export async function sendBankOffer(
     offer.data('dict', dict);
     offer.data('isApiTrade', true);
     offer.data('weaponBank', true);
-    offer.setMessage('Weapon bank: 0.5 scrap per weapon. Check every item before accepting.');
+    offer.setMessage(
+        freeAdminWithdrawal
+            ? 'Weapon bank: admin withdrawal. Check every item before accepting.'
+            : 'Weapon bank: 0.5 scrap per weapon. Check every item before accepting.'
+    );
     const status = await bot.trades.sendOffer(offer);
     if (status === 'pending') await bot.trades.acceptConfirmation(offer);
     return offer.id;
