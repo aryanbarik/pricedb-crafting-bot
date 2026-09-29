@@ -11,6 +11,7 @@ import ApiCart from './Carts/ApiCart';
 import { parseTradeUrl } from '../lib/tools/parseTradeUrl';
 import SteamID from 'steamid';
 import { getBankCatalog, sendBankOffer } from './WeaponBank';
+import { getMvmSellCatalog, sendMvmSellOffer } from './MvmSell';
 
 export default class HttpManager {
     /**
@@ -295,21 +296,28 @@ export default class HttpManager {
                 res.status(400).json({ success: false, error: 'Invalid renamed or gifted item setting.' });
                 return;
             }
-            if (pairs !== undefined && (
-                !Array.isArray(pairs) || pairs.length === 0 || pairs.length > 100 ||
-                pairs.some(pair =>
-                    typeof pair !== 'object' || pair === null ||
-                    typeof pair.kitAssetId !== 'string' || !/^\d{1,20}$/.test(pair.kitAssetId) ||
-                    (pair.weaponAssetId !== undefined &&
-                        (typeof pair.weaponAssetId !== 'string' || !/^\d{1,20}$/.test(pair.weaponAssetId)))
-                )
-            )) {
+            if (
+                pairs !== undefined &&
+                (!Array.isArray(pairs) ||
+                    pairs.length === 0 ||
+                    pairs.length > 100 ||
+                    pairs.some(
+                        pair =>
+                            typeof pair !== 'object' ||
+                            pair === null ||
+                            typeof pair.kitAssetId !== 'string' ||
+                            !/^\d{1,20}$/.test(pair.kitAssetId) ||
+                            (pair.weaponAssetId !== undefined &&
+                                (typeof pair.weaponAssetId !== 'string' || !/^\d{1,20}$/.test(pair.weaponAssetId)))
+                    ))
+            ) {
                 res.status(400).json({ success: false, error: 'Select valid Killstreak Kit pairs.' });
                 return;
             }
             try {
                 await this.bot.handler.handleKillstreakifyCommand(
-                    new SteamID(steamId), '!',
+                    new SteamID(steamId),
+                    '!',
                     pairs as Array<{ kitAssetId: string; weaponAssetId?: string }> | undefined,
                     allowProtected === true
                 );
@@ -320,6 +328,60 @@ export default class HttpManager {
                     success: false,
                     error: error instanceof Error ? error.message : 'Could not start Killstreakify.'
                 });
+            }
+        });
+
+        this.app.get('/api/mvm-sell/catalog/:steamId', this.validateApiKey.bind(this), async (req, res) => {
+            if (!this.bot) {
+                res.status(503).json({ success: false, error: 'Bot is not initialized.' });
+                return;
+            }
+            try {
+                res.json({ success: true, items: await getMvmSellCatalog(this.bot, req.params.steamId) });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Could not load eligible MvM items.';
+                log.warn('[mvmSell] Catalog failed:', message);
+                res.status(400).json({ success: false, error: message });
+            }
+        });
+
+        this.app.post('/api/mvm-sell/offer', this.validateApiKey.bind(this), async (req, res) => {
+            if (!this.bot) {
+                res.status(503).json({ success: false, error: 'Bot is not initialized.' });
+                return;
+            }
+            const { steamId, tradeUrl, assetIds } = req.body as {
+                steamId?: string;
+                tradeUrl?: string;
+                assetIds?: string[];
+            };
+            if (
+                typeof steamId !== 'string' ||
+                typeof tradeUrl !== 'string' ||
+                !Array.isArray(assetIds) ||
+                assetIds.some(id => typeof id !== 'string' || !/^d{1,20}$/.test(id))
+            ) {
+                res.status(400).json({ success: false, error: 'Invalid MvM sale selection.' });
+                return;
+            }
+            try {
+                const result = await sendMvmSellOffer(this.bot, steamId, tradeUrl, assetIds);
+                log.info(
+                    '[mvmSell] Sent offer ' +
+                        result.offerId +
+                        ' to ' +
+                        steamId +
+                        ': ' +
+                        assetIds.length +
+                        ' item(s), ' +
+                        result.payoutScrap +
+                        ' scrap'
+                );
+                res.json({ success: true, ...result });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Could not send the MvM sale offer.';
+                log.warn('[mvmSell] Offer rejected:', message);
+                res.status(400).json({ success: false, error: message });
             }
         });
 
@@ -361,7 +423,14 @@ export default class HttpManager {
                 return;
             }
             try {
-                const offerId = await sendBankOffer(this.bot, steamId, tradeUrl, sellAssetIds, buyAssetIds, allowRenamedGiftedItems === true);
+                const offerId = await sendBankOffer(
+                    this.bot,
+                    steamId,
+                    tradeUrl,
+                    sellAssetIds,
+                    buyAssetIds,
+                    allowRenamedGiftedItems === true
+                );
                 res.json({ success: true, offerId });
             } catch (error) {
                 const message = error instanceof Error ? error.message : 'Could not send the weapon trade.';
