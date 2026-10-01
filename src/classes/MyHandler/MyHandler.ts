@@ -61,6 +61,9 @@ import {
     decodeFabricatorSlots,
     buildCraftComponents,
     findPartnerComponents,
+    findBotComponents,
+    getItemAttrValue,
+    GCBackpackItem,
     extractTargetWeaponName,
     PartnerKitCandidate,
     KS_KIT_DEFINDEXES,
@@ -69,6 +72,7 @@ import {
 import { fixItem, isBaseWeaponDefindex } from '../../lib/items';
 import { isProtectedItem } from '../WeaponBank';
 import { resolveKitTarget, resolveKitBatchTargets } from '../../lib/kitTarget';
+import { findDepotBasicKitPair } from '../../lib/depotKitPair';
 
 const filterReasons = (reasons: string[]) => {
     const filtered = new Set(reasons);
@@ -3102,21 +3106,39 @@ export default class MyHandler extends Handler {
                                     };
                                     attemptSend(3);
                                 };
-                                const craftNext = (): void => {
+                                const craftNext = async (): Promise<void> => {
                                     if (planIndex >= craftPlan.length) {
                                         void sendResults();
                                         return;
                                     }
                                     const { fabId, componentIds } = craftPlan[planIndex++];
                                     log.debug(`[craftingService] Crafting fab ${fabId} (${planIndex}/${craftPlan.length}) with ${componentIds.length} component(s)`);
+                                    let appliedDepotWeaponIds: string[] = [];
+                                    if (selfFill) {
+                                        try {
+                                            appliedDepotWeaponIds = await this.prepareDepotTierOneWeapons(fabId, allNewIds);
+                                        } catch (err) {
+                                            const message = (err as Error).message;
+                                            log.warn(`[craftingService] Depot kit application failed for fab ${fabId}: ${message}`);
+                                            failedFabIds.push(fabId);
+                                            this.bot.sendMessage(offer.partner, `⚠️ Couldn't prepare a depot weapon for fabricator ${fabId}: ${message}`);
+                                            void craftNext();
+                                            return;
+                                        }
+                                    }
                                     // Rebuilt per fab rather than once per plan: an earlier craft in
                                     // this same plan may have already spent some of the bot's stock.
                                     const craftOptions = {
                                         componentIds,
                                         selfFill,
-                                        excludeIds: selfFill ? this.buildSelfFillExcludeIds(allNewIds) : undefined
+                                        // Keep the just-created weapon reserved from other jobs, but let
+                                        // THIS fabricator use it as its intended ingredient.
+                                        excludeIds: selfFill
+                                            ? this.buildSelfFillExcludeIds(allNewIds).filter(id => !appliedDepotWeaponIds.includes(id))
+                                            : undefined
                                     };
                                     this.bot.tf2gc.craftFabricator(fabId, craftOptions, (err, result) => {
+                                        appliedDepotWeaponIds.forEach(id => this.craftingInFlightIds.delete(id));
                                         if (err || !result) {
                                             log.warn(`[craftingService] Craft failed for fab ${fabId}: ${err?.message ?? 'no result'}`);
                                             failedFabIds.push(fabId);
@@ -3173,11 +3195,11 @@ export default class MyHandler extends Handler {
                                                 );
                                             }
                                         }
-                                        craftNext();
+                                        void craftNext();
                                     });
                                 };
 
-                                craftNext();
+                                void craftNext();
                             };
 
                             // Kit application path: apply unapplied KS Kits to plain weapons, then craft fabs.
@@ -4901,7 +4923,7 @@ export default class MyHandler extends Handler {
      * donated stock, or a partial fill would hand the customer's own items back as "leftovers"
      * twice over.
      */
-    private buildSelfFillExcludeIds(currentTradeIds: string[]): string[] {
+    private buildSelfFillExcludeIds(currentTradeIds: string[], excludeKits = true): string[] {
         const exclude = new Set<string>(currentTradeIds);
 
         this.craftingInFlightIds.forEach(id => exclude.add(id));
@@ -4912,10 +4934,15 @@ export default class MyHandler extends Handler {
         const backpack: any[] = ((this.bot.tf2 as any).backpack as any[]) ?? [];
 
         // A fabricator can never fill a slot, and a Killstreak Kit is a recipe's OUTPUT rather than
-        // an input. Neither should ever be selected, and both are valuable enough that relying on
-        // slot matching alone to skip them is not worth the risk.
+        // an input. The depot pre-application path opts Kits back in solely to select a safe pair.
         for (const item of backpack) {
-            if (FABRICATOR_DEFINDEXES.includes(item.def_index) || KS_KIT_DEFINDEXES.includes(item.def_index)) {
+            const normalizedDefindex = item.def_index >= 5726 && item.def_index <= 5801
+                ? fixItem({ defindex: item.def_index, quality: 6 } as any, this.bot.schema).defindex
+                : item.def_index;
+            if (
+                FABRICATOR_DEFINDEXES.includes(item.def_index) ||
+                (excludeKits && KS_KIT_DEFINDEXES.includes(normalizedDefindex))
+            ) {
                 exclude.add(String(item.id));
             }
         }
@@ -4940,6 +4967,114 @@ export default class MyHandler extends Handler {
         });
 
         return [...exclude];
+    }
+
+    /** Turn depot-owned Basic Kits into the tier-1 weapons a Specialized Fabricator actually eats. */
+    private async prepareDepotTierOneWeapons(fabId: string, currentTradeIds: string[]): Promise<string[]> {
+        const backpack = ((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? [];
+        const fabricator = backpack.find(item => String(item.id) === fabId);
+        if (!fabricator) return [];
+
+        // Only apply an irreversible Kit when the existing stock covers every OTHER ingredient.
+        // A shortage of robot parts should leave the Kit and plain weapon untouched.
+        const excluded = new Set(this.buildSelfFillExcludeIds(currentTradeIds));
+        const { missing } = findBotComponents(fabricator, backpack, { excludeIds: excluded, allowPartial: true });
+        const tierOneShortages = missing.map(part => part.match(/^(\d+)× kt-1 killstreak weapon$/));
+        if (tierOneShortages.some(match => match === null)) return [];
+        const needed = tierOneShortages.reduce((sum, match) => sum + Number(match?.[1] ?? 0), 0);
+        if (needed === 0) return [];
+
+        const inventory = this.bot.inventoryManager.getInventory;
+        const rawById = new Map(inventory.getRawItems.map(item => [String(item.id), item]));
+        const appliedIds: string[] = [];
+
+        for (let index = 0; index < needed; index++) {
+            const available = ((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? [];
+            const pairExcluded = new Set(this.buildSelfFillExcludeIds(currentTradeIds, false));
+            const pair = findDepotBasicKitPair(
+                available,
+                pairExcluded,
+                kit =>
+                    kit.def_index === 6527 ||
+                    (kit.def_index >= 5726 && kit.def_index <= 5801 &&
+                        fixItem({ defindex: kit.def_index, quality: 6 } as any, this.bot.schema).defindex === 6527),
+                kit => {
+                    const id = String(kit.id);
+                    const raw = rawById.get(id);
+                    // Kit market names include their target weapon, so name !== market_name is
+                    // normal here; the protected-weapon heuristic does not apply to Kits.
+                    if (!raw?.tradable || this.bot.trades.isInTrade(id)) return null;
+                    return resolveKitTarget(kit, inventory.findByAssetid(id), this.bot.schema).targetDefindex;
+                },
+                weapon => {
+                    const id = String(weapon.id);
+                    const raw = rawById.get(id);
+                    const sku = inventory.findByAssetid(id);
+                    return (
+                        !!raw?.tradable &&
+                        sku === `${weapon.def_index};6` &&
+                        !isProtectedItem(raw) &&
+                        !hasExcludedHalloweenSpell(raw) &&
+                        !isExcludedCraftingReskinDefindex(weapon.def_index) &&
+                        !isFestiveWeaponDefindex(weapon.def_index, this.bot) &&
+                        !this.bot.trades.isInTrade(id)
+                    );
+                }
+            );
+            if (!pair) {
+                log.warn(`[craftingService] Depot fab ${fabId}: no safe Basic Kit/plain weapon pair for tier-1 slot`);
+                break;
+            }
+
+            this.craftingInFlightIds.add(pair.kitId);
+            this.craftingInFlightIds.add(pair.weaponId);
+            log.info(`[craftingService] Depot fab ${fabId}: applying Basic Kit ${pair.kitId} to weapon ${pair.weaponId}`);
+            let resultId: string;
+            try {
+                resultId = await new Promise<string>((resolve, reject) => {
+                    this.bot.tf2gc.applyKSKit(pair.kitId, pair.weaponId, (err, id) => {
+                        if (err || !id) reject(err ?? new Error('Kit application returned no weapon'));
+                        else resolve(id);
+                    });
+                });
+                const result = (((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? []).find(
+                    item => String(item.id) === resultId
+                );
+                if (
+                    !result ||
+                    result.def_index !== pair.targetDefindex ||
+                    result.flag_cannot_craft ||
+                    getItemAttrValue(result, 2025) !== 1
+                ) {
+                    throw new Error(`Kit application result ${resultId} is not a craftable tier-1 target weapon`);
+                }
+            } catch (err) {
+                // A GC timeout is ambiguous: the tool may have applied despite a lost event.
+                // Keep the source IDs reserved until a restart or manual reconciliation rather
+                // than offering them in another trade on the basis of a stale Steam cache.
+                appliedIds.forEach(id => this.craftingInFlightIds.delete(id));
+                this.bot.messageAdmins(
+                    `⚠️ Depot Kit application for fab ${fabId} is uncertain (kit ${pair.kitId}, weapon ${pair.weaponId}): ${(err as Error).message}. Inspect GC inventory before reusing either item.`,
+                    []
+                );
+                throw err;
+            }
+
+            const kitSku = inventory.findByAssetid(pair.kitId);
+            inventory.removeItem(pair.kitId);
+            inventory.removeItem(pair.weaponId);
+            const tierOneSku = `${pair.targetDefindex};6;kt-1`;
+            inventory.addItem(tierOneSku, resultId);
+            this.craftingInFlightIds.delete(pair.kitId);
+            this.craftingInFlightIds.delete(pair.weaponId);
+            this.craftingInFlightIds.add(resultId);
+            if (kitSku) this.bot.listings.checkByPriceKey({ priceKey: kitSku });
+            this.bot.listings.checkByPriceKey({ priceKey: `${pair.targetDefindex};6` });
+            log.info(`[craftingService] Depot fab ${fabId}: Basic Kit applied -> tier-1 weapon ${resultId}`);
+            appliedIds.push(resultId);
+        }
+
+        return appliedIds;
     }
 
     // Called once a trade's items are on their way back to their owner. Anything that failed to send
