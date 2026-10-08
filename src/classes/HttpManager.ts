@@ -78,6 +78,35 @@ export default class HttpManager {
         this.app.get('/health', (req, res) => res.send('OK'));
         this.app.get('/uptime', (req, res) => res.json({ uptime: process.uptime() }));
 
+        // Recovery path for a held crafting return. The journal binds the asset IDs to the
+        // customer; callers cannot use this endpoint to send arbitrary inventory.
+        this.app.post('/api/crafting/return-held', this.validateApiKey.bind(this), async (req, res) => {
+            const { sourceOfferId, steamId, assetIds, skipStoredToken } = req.body as {
+                sourceOfferId?: string;
+                steamId?: string;
+                assetIds?: string[];
+                skipStoredToken?: boolean;
+            };
+            if (
+                typeof sourceOfferId !== 'string' || !/^\d+$/.test(sourceOfferId) ||
+                typeof steamId !== 'string' || !/^\d{17}$/.test(steamId) ||
+                !Array.isArray(assetIds) || assetIds.length === 0 || assetIds.length > 50 ||
+                assetIds.some(id => typeof id !== 'string' || !/^\d+$/.test(id)) ||
+                new Set(assetIds).size !== assetIds.length ||
+                (skipStoredToken !== undefined && typeof skipStoredToken !== 'boolean')
+            ) {
+                res.status(400).json({ success: false, error: 'Invalid held-return request' });
+                return;
+            }
+            try {
+                const result = await this.bot.handler.returnHeldJournalSubset(sourceOfferId, steamId, assetIds, skipStoredToken);
+                res.status(result.startsWith('✅') ? 200 : 409).json({ success: result.startsWith('✅'), result });
+            } catch (err) {
+                log.error('Error in /api/crafting/return-held:', err);
+                res.status(500).json({ success: false, error: (err as Error).message });
+            }
+        });
+
         // Trade status endpoint - get status of a specific trade offer
         this.app.get('/api/trade/status/:offerId', this.validateApiKey.bind(this), async (req, res) => {
             try {

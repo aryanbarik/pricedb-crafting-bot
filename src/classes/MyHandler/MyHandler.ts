@@ -675,6 +675,42 @@ export default class MyHandler extends Handler {
             .map(item => String(item.assetid))
             .filter(id => this.isCraftingAssetReserved(id));
         if (reservedGiveIds.length > 0) {
+            const giveIds = offer.itemsToGive.map(item => String(item.assetid));
+            const adminRecoveryJob = this.bot.isAdmin(offer.partner) && offer.itemsToReceive.length === 0 &&
+                giveIds.length === reservedGiveIds.length && new Set(giveIds).size === giveIds.length
+                ? this.craftingJournal.open().find(job =>
+                    job.stage === 'held' && giveIds.every(id => job.returnAssetIds.includes(id))
+                )
+                : undefined;
+            if (adminRecoveryJob) {
+                offer.data('notify', true);
+                offer.data('dict', this.craftingDict(giveIds, []));
+                offer.data('manualCraftingCustody', {
+                    sourceOfferId: adminRecoveryJob.offerId,
+                    customerSteamId: adminRecoveryJob.partnerSteamId,
+                    assetIds: giveIds
+                });
+                offer.log('warn', `Accepting admin custody of ${giveIds.length} held item(s) for customer ${adminRecoveryJob.partnerSteamId}; manual return required`);
+                return { action: 'accept', reason: 'CRAFTING_ADMIN_CUSTODY' };
+            }
+            // An owner may reclaim the entire held return by initiating the trade themselves.
+            // This is useful when Steam rejects every bot-initiated return offer. Require an
+            // exact match so no other customer's property or partial job is released.
+            const heldJob = this.craftingJournal.open().find(job =>
+                job.stage === 'held' &&
+                job.partnerSteamId === offer.partner.getSteamID64() &&
+                job.returnAssetIds.length === giveIds.length &&
+                offer.itemsToReceive.length === 0 &&
+                new Set(giveIds).size === giveIds.length &&
+                giveIds.every(id => job.returnAssetIds.includes(id))
+            );
+            if (heldJob) {
+                offer.data('notify', true);
+                offer.data('dict', this.craftingDict(giveIds, []));
+                offer.data('craftingServiceReturn', { assetIds: giveIds, sourceOfferId: heldJob.offerId });
+                offer.log('info', `Accepting owner-initiated return of ${giveIds.length} held crafting item(s) for ${heldJob.offerId}`);
+                return { action: 'accept', reason: 'CRAFTING_HELD_OWNER_RETURN' };
+            }
             offer.log('warn', `Refusing offer containing customer-owned crafting assets: ${reservedGiveIds.join(', ')}`);
             return { action: 'decline', reason: 'CRAFTING_RESERVED_ITEMS' };
         }
@@ -2720,6 +2756,14 @@ export default class MyHandler extends Handler {
                             this.craftingJournal.update(deliveredCraftingReturn.sourceOfferId, { stage: 'completed' });
                         }
                         this.releaseCraftingInFlight(deliveredCraftingReturn.assetIds);
+                    }
+                    const manualCustody = offer.data('manualCraftingCustody') as
+                        | { sourceOfferId: string; customerSteamId: string; assetIds: string[] }
+                        | undefined;
+                    if (manualCustody) {
+                        const note = `Admin received ${manualCustody.assetIds.length} customer-owned crafting item(s) from job ${manualCustody.sourceOfferId} for ${manualCustody.customerSteamId}. Return them to the customer manually; the journal remains held until delivery is confirmed. IDs: ${manualCustody.assetIds.join(', ')}`;
+                        log.warn(`[craftingService] ${note}`);
+                        this.bot.messageAdmins(`⚠️ ${note}`, []);
                     }
 
                     // Auto sell and buy keys if ref < minimum
@@ -5282,7 +5326,7 @@ export default class MyHandler extends Handler {
     // wrongly treated as a "partial fill" that already consumed its components, when they're
     // actually still sitting untouched in the backpack — leaving them permanently untracked and
     // unreturned until manually recovered here. Wired to the admin-only !returnitems command.
-    async forceReturnItems(partnerSteamID64: string, assetIds: string[]): Promise<string> {
+    async forceReturnItems(partnerSteamID64: string, assetIds: string[], skipStoredToken = false): Promise<string> {
         // On 2026-08-10 this reported all 28 of a customer's fabricators as absent while Steam's
         // inventory API showed every one of them present — the GC session had lapsed hours earlier.
         // The recovery tool reading the same stale cache as the bug it recovers from is worth
@@ -5296,7 +5340,7 @@ export default class MyHandler extends Handler {
         }
 
         const partner = new SteamID(partnerSteamID64);
-        const token = await fetchTradeUrlToken(partnerSteamID64);
+        const token = skipStoredToken ? undefined : await fetchTradeUrlToken(partnerSteamID64);
         const returnOffer = this.bot.manager.createOffer(partner, token);
         this.prepareCraftingOffer(returnOffer, stillOwned, []);
         stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
@@ -5310,13 +5354,25 @@ export default class MyHandler extends Handler {
             // Offer 9293465568 reported "✅ Returned 28 item(s)" and was auto-cancelled 15 minutes
             // later with every one of those items still in the bot.
             return (
-                `✅ Sent ${stillOwned.length} item(s) to ${partnerSteamID64} — not returned until they accept, and the offer expires in 15 min` +
+                `✅ Sent offer ${returnOffer.id} with ${stillOwned.length} item(s) to ${partnerSteamID64} — not returned until they accept, and the offer expires in 15 min` +
                 (missing.length > 0 ? ` (skipped ${missing.length} not in backpack: ${missing.join(', ')})` : '') +
                 `.`
             );
         } catch (err) {
             return `❌ Failed to return item(s) to ${partnerSteamID64}: ${this.describeSendError(err)}.`;
         }
+    }
+
+    /** Send only assets recorded as owed to this customer in a held crafting job. */
+    async returnHeldJournalSubset(sourceOfferId: string, partnerSteamID64: string, assetIds: string[], skipStoredToken = false): Promise<string> {
+        const job = this.craftingJournal.get(sourceOfferId);
+        if (!job || job.stage !== 'held' || job.partnerSteamId !== partnerSteamID64) {
+            return '❌ No matching held crafting job for this customer.';
+        }
+        if (assetIds.length === 0 || assetIds.some(id => !job.returnAssetIds.includes(id))) {
+            return '❌ Every requested asset ID must belong to the held return for this job.';
+        }
+        return this.forceReturnItems(partnerSteamID64, assetIds, skipStoredToken);
     }
 
     /**
