@@ -717,7 +717,7 @@ export default class Bot {
         }
     }
 
-    private scheduleManncoStoreRetry(): void {
+    private scheduleManncoStoreRetry(delayMs = 15 * 60 * 1000): void {
         if (this.halted || this.manncoStoreRetryTimeout || this.manncoStoreManager.isReady) return;
 
         this.manncoStoreRetryTimeout = setTimeout(() => {
@@ -728,7 +728,7 @@ export default class Bot {
                     log.warn('Mannco.store background initialization failed; retrying in 15 minutes:', err);
                     this.scheduleManncoStoreRetry();
                 });
-        }, 15 * 60 * 1000);
+        }, delayMs);
     }
 
     private addListener(
@@ -1597,38 +1597,19 @@ export default class Bot {
                                         }
                                     });
 
-                                    let rateLimitAttempts = 0;
-                                    const initialiseManncoStore = (): void => {
-                                        void this.activateManncoStore()
-                                            .then(() => cb(null))
-                                            .catch(err => {
-                                                if (!(err instanceof ManncoRateLimitError)) {
-                                                    cb(err as Error);
-                                                    return;
-                                                }
-
-                                                if (rateLimitAttempts++ < 3) {
-                                                    log.warn(
-                                                        `Mannco.store login rate limited; retrying in ${Math.ceil(
-                                                            err.retryAfterMs / 1000
-                                                        )} seconds (${rateLimitAttempts}/3).`
-                                                    );
-                                                    this.manncoStoreRetryTimeout = setTimeout(() => {
-                                                        this.manncoStoreRetryTimeout = null;
-                                                        initialiseManncoStore();
-                                                    }, err.retryAfterMs);
-                                                    return;
-                                                }
-
-                                                log.warn(
-                                                    'Mannco.store remains rate limited after four login attempts; ' +
-                                                        'continuing startup and retrying initialization every 15 minutes.'
-                                                );
-                                                this.scheduleManncoStoreRetry();
-                                                cb(null);
-                                            });
-                                    };
-                                    initialiseManncoStore();
+                                    void this.activateManncoStore()
+                                        .then(() => cb(null))
+                                        .catch(err => {
+                                            if (!(err instanceof ManncoRateLimitError)) {
+                                                cb(err as Error);
+                                                return;
+                                            }
+                                            log.warn(
+                                                `Mannco.store login rate limited; continuing startup and retrying in ${Math.ceil(err.retryAfterMs / 1000)} seconds.`
+                                            );
+                                            this.scheduleManncoStoreRetry(err.retryAfterMs);
+                                            cb(null);
+                                        });
                                 },
                                 (cb: Callback): void => {
                                     if (this.options.skipUpdateProfileSettings) {
