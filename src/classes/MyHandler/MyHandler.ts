@@ -676,21 +676,20 @@ export default class MyHandler extends Handler {
             .filter(id => this.isCraftingAssetReserved(id));
         if (reservedGiveIds.length > 0) {
             const giveIds = offer.itemsToGive.map(item => String(item.assetid));
-            const adminRecoveryJob = this.bot.isAdmin(offer.partner) && offer.itemsToReceive.length === 0 &&
-                giveIds.length === reservedGiveIds.length && new Set(giveIds).size === giveIds.length
-                ? this.craftingJournal.open().find(job =>
-                    job.stage === 'held' && giveIds.every(id => job.returnAssetIds.includes(id))
-                )
-                : undefined;
-            if (adminRecoveryJob) {
+            if (this.bot.isAdmin(offer.partner)) {
+                const jobs = this.craftingJournal.open()
+                    .map(job => ({
+                        sourceOfferId: job.offerId,
+                        customerSteamId: job.partnerSteamId,
+                        assetIds: reservedGiveIds.filter(id =>
+                            job.returnAssetIds.includes(id) || job.receivedAssetIds.includes(id) || job.fabricatorAssetIds.includes(id)
+                        )
+                    }))
+                    .filter(job => job.assetIds.length > 0);
                 offer.data('notify', true);
-                offer.data('dict', this.craftingDict(giveIds, []));
-                offer.data('manualCraftingCustody', {
-                    sourceOfferId: adminRecoveryJob.offerId,
-                    customerSteamId: adminRecoveryJob.partnerSteamId,
-                    assetIds: giveIds
-                });
-                offer.log('warn', `Accepting admin custody of ${giveIds.length} held item(s) for customer ${adminRecoveryJob.partnerSteamId}; manual return required`);
+                offer.data('dict', this.craftingDict(giveIds, offer.itemsToReceive.map(item => String(item.assetid))));
+                offer.data('manualCraftingCustody', { assetIds: reservedGiveIds, jobs });
+                offer.log('warn', `Accepting admin offer with ${reservedGiveIds.length} reserved crafting item(s); manual custody recorded for ${jobs.length} job(s)`);
                 return { action: 'accept', reason: 'CRAFTING_ADMIN_CUSTODY' };
             }
             // An owner may reclaim the entire held return by initiating the trade themselves.
@@ -2758,10 +2757,11 @@ export default class MyHandler extends Handler {
                         this.releaseCraftingInFlight(deliveredCraftingReturn.assetIds);
                     }
                     const manualCustody = offer.data('manualCraftingCustody') as
-                        | { sourceOfferId: string; customerSteamId: string; assetIds: string[] }
+                        | { assetIds: string[]; jobs: { sourceOfferId: string; customerSteamId: string; assetIds: string[] }[] }
                         | undefined;
                     if (manualCustody) {
-                        const note = `Admin received ${manualCustody.assetIds.length} customer-owned crafting item(s) from job ${manualCustody.sourceOfferId} for ${manualCustody.customerSteamId}. Return them to the customer manually; the journal remains held until delivery is confirmed. IDs: ${manualCustody.assetIds.join(', ')}`;
+                        const jobs = manualCustody.jobs.map(job => `${job.sourceOfferId} for ${job.customerSteamId}: ${job.assetIds.join(', ')}`).join('; ');
+                        const note = `Admin received ${manualCustody.assetIds.length} reserved crafting item(s) in offer ${offer.id}. Jobs: ${jobs || 'none recorded'}. Return customer items manually; journals remain held until delivery is confirmed. IDs: ${manualCustody.assetIds.join(', ')}`;
                         log.warn(`[craftingService] ${note}`);
                         this.bot.messageAdmins(`⚠️ ${note}`, []);
                     }
