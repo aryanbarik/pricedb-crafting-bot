@@ -19,6 +19,26 @@ export interface FIFOEntry {
     diffVersion?: number;
 }
 
+export interface FIFOPrice {
+    keys: number;
+    metal: number;
+}
+
+export function getFifoCostBasis(entry: Pick<FIFOEntry, 'costKeys' | 'costMetal' | 'diffKeys' | 'diffMetal'>): FIFOPrice {
+    return {
+        keys: entry.costKeys - entry.diffKeys,
+        metal: entry.costMetal - entry.diffMetal
+    };
+}
+
+export function calculateFifoProfit(
+    sell: FIFOPrice,
+    entry: Pick<FIFOEntry, 'costKeys' | 'costMetal' | 'diffKeys' | 'diffMetal'>
+): FIFOPrice {
+    const cost = getFifoCostBasis(entry);
+    return { keys: sell.keys - cost.keys, metal: sell.metal - cost.metal };
+}
+
 /**
  * Manages inventory cost basis using FIFO (First In, First Out) accounting
  * Tracks pricelist costs with distributed overpay/underpay for accurate profit calculation
@@ -232,9 +252,9 @@ export default class InventoryCostBasis {
         let totalMetal = 0;
 
         for (const entry of this.fifoEntries) {
-            // Actual cost basis = pricelist cost minus distributed diff (positive diff means we paid less)
-            totalKeys += entry.costKeys - entry.diffKeys;
-            totalMetal += entry.costMetal - entry.diffMetal;
+            const cost = getFifoCostBasis(entry);
+            totalKeys += cost.keys;
+            totalMetal += cost.metal;
         }
 
         return { keys: totalKeys, metal: totalMetal };

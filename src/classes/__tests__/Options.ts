@@ -29,6 +29,9 @@ test('Parsing Options', () => {
     let result = Options.loadOptions({ steamAccountName: 'abc123' });
     expect(result.steamAccountName).toBe('abc123');
     expect(result.autokeys.minKeys).toBe(3);
+    expect(result.discordWebhook.commandCards.get).toBe(true);
+    expect(result.discordWebhook.commandCards.autokeys).toBe(true);
+    expect(result.discordWebhook.commandCards.version).toBe(true);
     expect(result.normalize.festivized.our).toBeFalsy();
     expect(result.normalize.festivized.their).toBeFalsy();
 
@@ -188,6 +191,36 @@ test('loads custom pricer options', () => {
     expect(result.customPricerUrl).toEqual('');
     result = Options.loadOptions({ steamAccountName: 'abc123', customPricerUrl: 'https://custom-pricer.example.com' });
     expect(result.customPricerUrl).toEqual('https://custom-pricer.example.com');
+});
+
+test('validates skipItemsInTrade cancelOfferAfterMinutes', () => {
+    let result = Options.loadOptions({ steamAccountName: 'abc123' });
+    expect(result.miscSettings.skipItemsInTrade.cancelOfferAfterMinutes).toBe(0);
+
+    result = Options.loadOptions({
+        steamAccountName: 'abc123',
+        miscSettings: { skipItemsInTrade: { cancelOfferAfterMinutes: 2 } }
+    });
+    expect(result.miscSettings.skipItemsInTrade.cancelOfferAfterMinutes).toBe(2);
+
+    const optionsPath = Options.getOptionsPath('abc123');
+    const invalidValues = [-1, 1.5, 'two'];
+    invalidValues.forEach(cancelOfferAfterMinutes => {
+        const invalidOptions = {
+            ...defaultOptions,
+            miscSettings: {
+                ...defaultOptions.miscSettings,
+                skipItemsInTrade: {
+                    ...defaultOptions.miscSettings.skipItemsInTrade,
+                    cancelOfferAfterMinutes
+                }
+            }
+        };
+        writeFileSync(optionsPath, JSON.stringify(invalidOptions, null, 4), { encoding: 'utf8' });
+
+        expect(() => Options.loadOptions({ steamAccountName: 'abc123' })).toThrow();
+    });
+    cleanPath(path.dirname(optionsPath));
 });
 
 test('loads journal.tf options', () => {

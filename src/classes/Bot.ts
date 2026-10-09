@@ -69,6 +69,9 @@ type EasyCopyPasteInstance = {
 
 const EasyCopyPasteCtor = EasyCopyPaste as unknown as new () => EasyCopyPasteInstance;
 
+// Temporary kill switch for the PriceDB Store / crit.tf integration.
+const PRICEDB_STORE_ENABLED = false;
+
 type PriceDBListingEvent = { id: string };
 type PriceDBInventoryRefreshedEvent = { itemCount: number; refreshCount: number };
 
@@ -230,8 +233,6 @@ export default class Bot {
 
     public autoRefreshListingsInterval: NodeJS.Timeout;
 
-    public lastTimeCallingDoPoll: Date;
-
     /**
      * Resets the reconnection state and clears any pending reconnection timeout
      */
@@ -342,10 +343,10 @@ export default class Bot {
             useAccessToken: !this.options.steamApiKey, // https://github.com/DoctorMcKay/node-steam-tradeoffer-manager/wiki/Access-Tokens
             language: 'en',
             pollInterval: -1,
+            minimumPollInterval: 5 * 1000, // set minimum between doPoll() calls
             cancelTime: 15 * 60 * 1000,
             pendingCancelTime: 1.5 * 60 * 1000,
-            globalAssetCache: true,
-            assetCacheMaxItems: 50
+            globalAssetCache: false
         });
 
         // ECP --START--
@@ -792,7 +793,7 @@ export default class Bot {
 
                 this.messageAdmins(
                     'version',
-                    `⚠️ Update available! Current: v${process.env.BOT_VERSION}, Latest: v${latestVersion}.` +
+                    `⚠️ Update available! Current: ${process.env.BOT_VERSION_LABEL}, Latest: PDB-${latestVersion}.` +
                         `\n\n📰 Check discord (https://pricedb.io/discord) for release notes` +
                         (updateMessage ? `\n\n💬 Update message: ${updateMessage}` : ''),
                     []
@@ -1207,6 +1208,8 @@ export default class Bot {
         this.addListener(this.community, 'confKeyNeeded', this.onConfKeyNeeded.bind(this), false);
 
         this.addListener(this.manager, 'pollData', this.handler.onPollData.bind(this.handler), false);
+        this.addListener(this.manager, 'pollSuccess', this.trades.onPollSuccess.bind(this.trades), false);
+        this.addListener(this.manager, 'pollFailure', this.trades.onPollFailure.bind(this.trades), false);
         this.addListener(this.manager, 'newOffer', this.trades.onNewOffer.bind(this.trades), true);
         this.addListener(this.manager, 'sentOfferChanged', this.trades.onOfferChanged.bind(this.trades), true);
         this.addListener(this.manager, 'receivedOfferChanged', this.trades.onOfferChanged.bind(this.trades), true);
@@ -1485,11 +1488,12 @@ export default class Bot {
                                 },
                                 (cb: Callback): void => {
                                     if (
+                                        !PRICEDB_STORE_ENABLED ||
                                         !this.options.pricedbStoreApiKey ||
                                         !this.options.miscSettings.pricedbStore.enable
                                     ) {
                                         log.debug(
-                                            'Skipping PriceDB Store Manager initialization (not configured or disabled)'
+                                            'Skipping PriceDB Store Manager initialization (temporarily disabled, not configured, or disabled)'
                                         );
                                         cb(null);
                                         return;
@@ -1687,7 +1691,7 @@ export default class Bot {
                             .catch(err => callback(err as Error));
                     },
                     (callback: Callback): void => {
-                        void this.setupTradeOfferUrl()
+                        this.setupTradeOfferUrl()
                             .then(() => callback(null))
                             .catch(err => callback(err as Error));
                     }
@@ -1709,10 +1713,11 @@ export default class Bot {
                         return;
                     }
 
+                    void this.checkTradeProtectionAcknowledged();
                     this.manager.pollInterval = 10 * 1000;
                     this.setReady = true;
                     this.handler.onReady();
-                    this.lastTimeCallingDoPoll = dayjs().toDate();
+                    this.trades.startPollWatchdog();
                     this.manager.doPoll();
                     this.startVersionChecker();
                     this.initResetCacheInterval();
@@ -2071,6 +2076,26 @@ export default class Bot {
         files.writeFile(tradeOfferUrlPath, tradeOfferUrl, false).catch(() => {
             log.error('Error saving Trade Offer Url.');
         });
+    }
+
+    // Reference: https://github.com/tf2-automatic/tf2-automatic/blob/9b98d2e5b6e3b0b9d0b82651debada7d2fd57b99/apps/bot/src/bot/bot.service.ts#L601
+    private async checkTradeProtectionAcknowledged(): Promise<void> {
+        const path = this.handler.getPaths.files.tradeProtectionAcknowledge;
+        const alreadyAcknowledge = (await files.readFile(path, true).catch(() => null)) as boolean;
+
+        if (!alreadyAcknowledge) {
+            // This should only be done once
+            this.community.acknowledgeTradeProtection(err => {
+                if (err) {
+                    log.warn('Error on acknowledgeTradeProtection', err);
+                    return;
+                }
+
+                files.writeFile(path, true, true).catch(err => {
+                    log.error('Error saving Trade Protection Acknowlege file', err);
+                });
+            });
+        }
     }
 
     sendMessage(steamID: SteamID | string, message: string): void {

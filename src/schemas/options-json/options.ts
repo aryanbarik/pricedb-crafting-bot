@@ -370,6 +370,12 @@ export const optionsSchema: jsonschema.Schema = {
                 messages: {
                     type: 'boolean'
                 },
+                offerMessages: {
+                    type: 'boolean'
+                },
+                unfriendMessage: {
+                    type: 'boolean'
+                },
                 greeting: {
                     type: 'boolean'
                 },
@@ -380,7 +386,7 @@ export const optionsSchema: jsonschema.Schema = {
                     type: 'boolean'
                 }
             },
-            required: ['messages', 'greeting', 'commands', 'adminCommands'],
+            required: ['messages', 'offerMessages', 'unfriendMessage', 'greeting', 'commands', 'adminCommands'],
             additionalProperties: false
         },
         steamConnection: {
@@ -490,7 +496,18 @@ export const optionsSchema: jsonschema.Schema = {
                     additionalProperties: false
                 },
                 skipItemsInTrade: {
-                    $ref: '#/definitions/only-enable'
+                    type: 'object',
+                    properties: {
+                        enable: {
+                            type: 'boolean'
+                        },
+                        cancelOfferAfterMinutes: {
+                            type: 'integer',
+                            minimum: 0
+                        }
+                    },
+                    required: ['enable', 'cancelOfferAfterMinutes'],
+                    additionalProperties: false
                 },
                 weaponsAsCurrency: {
                     type: 'object',
@@ -1713,6 +1730,42 @@ export const optionsSchema: jsonschema.Schema = {
                     type: 'string',
                     pattern: '^[0-9]+$'
                 },
+                commandCards: {
+                    type: 'object',
+                    properties: {
+                        enable: { type: 'boolean' },
+                        text: { type: 'boolean' },
+                        showQualityBorders: { type: 'boolean' },
+                        pure: { type: 'boolean' },
+                        rate: { type: 'boolean' },
+                        price: { type: 'boolean' },
+                        get: { type: 'boolean' },
+                        autokeys: { type: 'boolean' },
+                        version: { type: 'boolean' },
+                        sku: { type: 'boolean' },
+                        stock: { type: 'boolean' },
+                        pricelist: { type: 'boolean' },
+                        trade: { type: 'boolean' },
+                        stats: { type: 'boolean' }
+                    },
+                    required: [
+                        'enable',
+                        'text',
+                        'showQualityBorders',
+                        'pure',
+                        'rate',
+                        'price',
+                        'get',
+                        'autokeys',
+                        'version',
+                        'sku',
+                        'stock',
+                        'pricelist',
+                        'trade',
+                        'stats'
+                    ],
+                    additionalProperties: false
+                },
                 tradeSummary: {
                     type: 'object',
                     properties: {
@@ -1763,9 +1816,27 @@ export const optionsSchema: jsonschema.Schema = {
                             },
                             required: ['enable', 'itemSkus', 'tradeValueInRef'],
                             additionalProperties: false
+                        },
+                        tradeCard: {
+                            type: 'object',
+                            properties: {
+                                enable: {
+                                    type: 'boolean'
+                                },
+                                showQualityBorders: {
+                                    type: 'boolean'
+                                },
+                                maxItemsPerSide: {
+                                    type: 'number',
+                                    minimum: 1,
+                                    maximum: 8
+                                }
+                            },
+                            required: ['enable', 'showQualityBorders', 'maxItemsPerSide'],
+                            additionalProperties: false
                         }
                     },
-                    required: ['enable', 'url', 'misc', 'mentionOwner'],
+                    required: ['enable', 'url', 'misc', 'mentionOwner', 'tradeCard'],
                     additionalProperties: false
                 },
                 declinedTrade: {

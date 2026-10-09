@@ -12,7 +12,7 @@ export async function apiRequest<B>({
     method: Method;
     url: string;
     params?: Record<string, any>;
-    data?: Record<string, any>;
+    data?: Record<string, any> | FormData;
     headers?: Record<string, unknown>;
     signal?: AbortSignal;
     apiToken?: string;

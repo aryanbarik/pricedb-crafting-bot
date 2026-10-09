@@ -9,6 +9,7 @@ import Bot from '../../Bot';
 import { Discord, Stock } from '../../Options';
 import { pure, timeNow, uptime, testPriceKey } from '../../../lib/tools/export';
 import getAttachmentName from '../../../lib/tools/getAttachmentName';
+import type { StockCardEntry } from '../../DiscordWebhook/tradeCard/renderStockCards';
 
 type Misc = 'time' | 'uptime' | 'pure' | 'rate' | 'owner' | 'discord' | 'stock';
 type CraftUncraft = 'craftweapon' | 'uncraftweapon';
@@ -20,13 +21,16 @@ export default class MiscCommands {
 
     links(steamID: SteamID): void {
         const botSteamID = this.bot.client.steamID.getSteamID64();
+        const manncoStoreLink = this.bot.manncoStoreManager
+            ? `\nMannco.store: <https://mannco.store/store/${botSteamID}>`
+            : '';
 
         this.bot.sendMessage(
             steamID,
-                `Steam: <https://steamcommunity.com/profiles/${botSteamID}>` +
+            `Steam: <https://steamcommunity.com/profiles/${botSteamID}>` +
                 `\nBackpack.tf: <https://backpack.tf/u/${botSteamID}>` +
                 `\nRep.tf: <https://rep.tf/${botSteamID}>` +
-                `\nMannco.store: <https://mannco.store/store/${botSteamID}>` +
+                manncoStoreLink +
                 `\nTrade Offer URL: <${this.bot.tradeOfferUrl}>`
         );
     }
@@ -59,6 +63,10 @@ export default class MiscCommands {
             this.bot.sendMessage(steamID, custom ? custom.replace(/%uptime%/g, botUptime) : botUptime);
         } else if (command === 'pure') {
             const pureStock = pure.stock(this.bot);
+            if (steamID.redirectAnswerTo instanceof DiscordMessage && this.bot.discordBot) {
+                void this.bot.discordBot.sendPureStockAnswer(steamID.redirectAnswerTo, pure.currPure(this.bot));
+                return;
+            }
             this.bot.sendMessage(
                 steamID,
                 custom
@@ -69,6 +77,16 @@ export default class MiscCommands {
             const key = this.bot.pricelist.getKeyPrices;
             const keySellRate = key.sell.toString();
             const keyBuyRate = key.buy.toString();
+
+            if (steamID.redirectAnswerTo instanceof DiscordMessage && this.bot.discordBot && !custom) {
+                void this.bot.discordBot.sendRateAnswer(
+                    steamID.redirectAnswerTo,
+                    keyBuyRate,
+                    keySellRate,
+                    key.src === 'manual' ? 'Manual' : this.bot.pricelist.isUseCustomPricer ? 'Custom pricer' : 'PriceDB'
+                );
+                return;
+            }
 
             this.bot.sendMessage(
                 steamID,
@@ -167,14 +185,27 @@ export default class MiscCommands {
                         });
                     }
 
-                    reply += assetids.length > 0 ? '\n\nAssetids:\n- ' + assetids.join('\n- ') : '';
+                    const assetIdText = assetids.length > 0 ? 'Assetids:\n- ' + assetids.join('\n- ') : '';
+                    reply += assetIdText ? `\n\n${assetIdText}` : '';
+                    if (steamID.redirectAnswerTo instanceof DiscordMessage && this.bot.discordBot) {
+                        const entry: StockCardEntry = { sku, name, amount: itemDicts.length };
+                        void this.bot.discordBot.sendStockGalleryAnswer(
+                            steamID.redirectAnswerTo,
+                            [entry],
+                            'Item Stock',
+                            reply,
+                            assetIdText || undefined
+                        );
+                        return;
+                    }
+
                     return this.bot.sendMessage(steamID, reply);
                 }
             }
 
             const inventory = this.bot.inventoryManager.getInventory;
             const dict = inventory.getItems;
-            const items: { amount: number; name: string }[] = [];
+            const items: StockCardEntry[] = [];
 
             for (const sku in dict) {
                 if (!Object.prototype.hasOwnProperty.call(dict, sku)) {
@@ -186,6 +217,7 @@ export default class MiscCommands {
                 }
 
                 items.push({
+                    sku,
                     name: this.bot.schema.getName(SKU.fromString(sku), false),
                     amount: dict[sku].length
                 });
@@ -205,20 +237,24 @@ export default class MiscCommands {
                 return diff;
             });
 
-            const pure = [
+            const pure: StockCardEntry[] = [
                 {
+                    sku: '5021;6',
                     name: 'Mann Co. Supply Crate Key',
                     amount: inventory.getAmount({ priceKey: '5021;6', includeNonNormalized: false })
                 },
                 {
+                    sku: '5002;6',
                     name: 'Refined Metal',
                     amount: inventory.getAmount({ priceKey: '5002;6', includeNonNormalized: false })
                 },
                 {
+                    sku: '5001;6',
                     name: 'Reclaimed Metal',
                     amount: inventory.getAmount({ priceKey: '5001;6', includeNonNormalized: false })
                 },
                 {
+                    sku: '5000;6',
                     name: 'Scrap Metal',
                     amount: inventory.getAmount({ priceKey: '5000;6', includeNonNormalized: false })
                 }
@@ -234,7 +270,7 @@ export default class MiscCommands {
             const parsedCount = parsed.length;
 
             for (let i = 0; i < parsedCount; i++) {
-                if (stock.length > max) {
+                if (stock.length >= max) {
                     left += parsed[i].amount;
                 } else {
                     stock.push(`${parsed[i].name}: ${parsed[i].amount}`);
@@ -252,6 +288,16 @@ export default class MiscCommands {
                 reply += `,\nand ${left} other ${pluralize('item', left)}`;
             }
 
+            if (steamID.redirectAnswerTo instanceof DiscordMessage && this.bot.discordBot && !custom) {
+                void this.bot.discordBot.sendStockGalleryAnswer(
+                    steamID.redirectAnswerTo,
+                    parsed.slice(0, max),
+                    'Inventory Stock',
+                    reply
+                );
+                return;
+            }
+
             this.bot.sendMessage(steamID, reply);
         }
     }
@@ -265,15 +311,32 @@ export default class MiscCommands {
             }
         }
 
-        const weaponStock = this.getWeaponsStock(
+        const weaponEntries = this.getWeaponsStock(
             opt.showOnlyExist,
             type === 'craftweapon' ? this.bot.craftWeapons : this.bot.uncraftWeapons
         );
 
+        const weaponStock = weaponEntries.map(item => `${item.name}: ${item.amount}`);
+        const custom = opt.customReply.have;
+        if (
+            steamID.redirectAnswerTo instanceof DiscordMessage &&
+            this.bot.discordBot &&
+            weaponEntries.length > 0 &&
+            !custom
+        ) {
+            await this.bot.discordBot.sendStockGalleryAnswer(
+                steamID.redirectAnswerTo,
+                weaponEntries,
+                type === 'craftweapon' ? 'Craft Weapons' : 'Uncraft Weapons',
+                `📃 Here's a list of all ${
+                    type === 'craftweapon' ? 'craft' : 'uncraft'
+                } weapons stock in my inventory:\n\n${weaponStock.join(', \n')}`
+            );
+            return;
+        }
+
         let reply: string;
         if (weaponStock.length > 15) {
-            const custom = opt.customReply.have;
-
             reply = custom
                 ? custom.replace(/%list%/g, '')
                 : `📃 Here's a list of all ${
@@ -299,7 +362,6 @@ export default class MiscCommands {
 
             return;
         } else if (weaponStock.length > 0) {
-            const custom = opt.customReply.have;
             reply = custom
                 ? custom.replace(/%list%/g, weaponStock.join(', \n'))
                 : `📃 Here's a list of all ${
@@ -332,8 +394,8 @@ export default class MiscCommands {
         );
     }
 
-    private getWeaponsStock(showOnlyExist: boolean, weapons: string[]): string[] {
-        const items: { amount: number; name: string }[] = [];
+    private getWeaponsStock(showOnlyExist: boolean, weapons: string[]): StockCardEntry[] {
+        const items: StockCardEntry[] = [];
         const inventory = this.bot.inventoryManager.getInventory;
 
         if (showOnlyExist) {
@@ -341,6 +403,7 @@ export default class MiscCommands {
                 const amount = inventory.getAmount({ priceKey: sku, includeNonNormalized: false });
                 if (amount > 0) {
                     items.push({
+                        sku,
                         name: this.bot.schema.getName(SKU.fromString(sku), false),
                         amount: amount
                     });
@@ -350,6 +413,7 @@ export default class MiscCommands {
             weapons.forEach(sku => {
                 const amount = inventory.getAmount({ priceKey: sku, includeNonNormalized: false });
                 items.push({
+                    sku,
                     name: this.bot.schema.getName(SKU.fromString(sku), false),
                     amount: amount
                 });
@@ -370,15 +434,7 @@ export default class MiscCommands {
             return diff;
         });
 
-        const stock: string[] = [];
-        const itemsCount = items.length;
-
-        if (itemsCount > 0) {
-            for (let i = 0; i < itemsCount; i++) {
-                stock.push(`${items[i].name}: ${items[i].amount}`);
-            }
-        }
-        return stock;
+        return items;
     }
 
     async pricedbGroup(steamID: SteamID): Promise<void> {

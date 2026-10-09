@@ -9,6 +9,8 @@ import { Currency } from '../types/TeamFortress2';
 export const DEFAULTS: JsonOptions = {
     globalDisable: {
         messages: false,
+        offerMessages: false,
+        unfriendMessage: false,
         greeting: false,
         commands: false,
         adminCommands: false
@@ -57,7 +59,8 @@ export const DEFAULTS: JsonOptions = {
             useSeparateKeyRates: false
         },
         skipItemsInTrade: {
-            enable: true
+            enable: true,
+            cancelOfferAfterMinutes: 0
         },
         weaponsAsCurrency: {
             enable: true,
@@ -560,6 +563,22 @@ export const DEFAULTS: JsonOptions = {
         displayName: '',
         avatarURL: '',
         embedColor: '9171753',
+        commandCards: {
+            enable: true,
+            text: true,
+            showQualityBorders: true,
+            pure: true,
+            rate: true,
+            price: true,
+            get: true,
+            autokeys: true,
+            version: true,
+            sku: true,
+            stock: true,
+            pricelist: true,
+            trade: true,
+            stats: true
+        },
         tradeSummary: {
             enable: true,
             url: [],
@@ -575,6 +594,11 @@ export const DEFAULTS: JsonOptions = {
                 itemSkus: [],
                 tradeValueInRef: 0,
                 withEscrow: true
+            },
+            tradeCard: {
+                enable: true,
+                showQualityBorders: true,
+                maxItemsPerSide: 8
             }
         },
         declinedTrade: {
@@ -1216,10 +1240,16 @@ interface OnlyEnable {
     enable?: boolean;
 }
 
+interface SkipItemsInTrade extends OnlyEnable {
+    cancelOfferAfterMinutes?: number;
+}
+
 // ------------ Global Disable ------------
 
 interface GlobalDisable {
     messages?: boolean;
+    offerMessages?: boolean;
+    unfriendMessage?: boolean;
     greeting?: boolean;
     commands?: boolean;
     adminCommands?: boolean;
@@ -1301,7 +1331,7 @@ interface MiscSettings {
     counterOffer?: Counteroffer;
     addFriends?: OnlyEnable;
     sendGroupInvite?: OnlyEnable;
-    skipItemsInTrade?: OnlyEnable;
+    skipItemsInTrade?: SkipItemsInTrade;
     weaponsAsCurrency?: WeaponsAsCurrency;
     itemsOnBothSides?: OnlyEnable;
     checkUses?: CheckUses;
@@ -1749,6 +1779,7 @@ interface DiscordWebhook {
     displayName?: string;
     avatarURL?: string;
     embedColor?: string;
+    commandCards?: CommandCards;
     tradeSummary?: TradeSummaryDW;
     declinedTrade?: DeclinedTradeDW;
     offerReview?: OfferReviewDW;
@@ -1759,10 +1790,40 @@ interface DiscordWebhook {
     sendTf2Events?: SendTf2Events;
 }
 
+/** Cards sent in response to Discord bot commands; webhook trade cards are configured separately. */
+interface CommandCards extends OnlyEnable {
+    /** Components V2 text responses such as !get and !version. */
+    text?: boolean;
+    /** Outline item tiles in their TF2 quality colour. */
+    showQualityBorders?: boolean;
+    pure?: boolean;
+    rate?: boolean;
+    price?: boolean;
+    /** Rich response for !get; false restores the full legacy entry output. */
+    get?: boolean;
+    /** Rich response for !autokeys; false restores the legacy status diagram. */
+    autokeys?: boolean;
+    /** Rich response for !version; false restores the legacy update messages. */
+    version?: boolean;
+    sku?: boolean;
+    stock?: boolean;
+    pricelist?: boolean;
+    trade?: boolean;
+    stats?: boolean;
+}
+
 interface TradeSummaryDW extends OnlyEnable {
     url?: string[];
     misc?: MiscTradeSummary;
     mentionOwner?: MentionOwner;
+    tradeCard?: TradeCard;
+}
+
+interface TradeCard extends OnlyEnable {
+    /** Outline each tile in its TF2 quality colour. */
+    showQualityBorders?: boolean;
+    /** Tiles drawn per side before the rest collapse into a "+N more" chip. */
+    maxItemsPerSide?: number;
 }
 
 interface DeclinedTradeDW extends OnlyEnable {

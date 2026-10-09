@@ -14,6 +14,8 @@ import { getPricer } from './lib/pricer/pricer';
 import { loadOptions } from './classes/Options';
 
 process.env.BOT_VERSION = BOT_VERSION as string;
+// Keep BOT_VERSION semver-valid for update checks. This label is only for people-facing output.
+process.env.BOT_VERSION_LABEL = `PDB-${BOT_VERSION}`;
 
 import fs from 'fs';
 import path from 'path';
@@ -108,7 +110,7 @@ ON_DEATH({ uncaughtException: true })((signalOrErr, origin: string | Error) => {
                 (!botReady
                     ? ' failed to start properly, this is most likely a temporary error. See the log:'
                     : ' crashed! Please create an issue with the following log:'),
-            `package.version: ${process.env.BOT_VERSION || undefined}; node: ${process.version} ${process.platform} ${
+            `package.version: ${process.env.BOT_VERSION_LABEL || undefined}; node: ${process.version} ${process.platform} ${
                 process.arch
             }}`,
             'Stack trace:',
@@ -133,7 +135,7 @@ ON_DEATH({ uncaughtException: true })((signalOrErr, origin: string | Error) => {
                         description: errorMessage,
                         color: '16711680',
                         footer: {
-                            text: `${String(new Date(Date.now()))} • v${process.env.BOT_VERSION}`
+                            text: `${String(new Date(Date.now()))} • ${process.env.BOT_VERSION_LABEL}`
                         }
                     }
                 ]

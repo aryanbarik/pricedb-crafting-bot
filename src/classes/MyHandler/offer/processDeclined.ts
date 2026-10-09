@@ -380,7 +380,7 @@ export function sendToAdmin(
                 tSum.showDetailedTimeTaken,
                 tSum.showTimeTakenInMS
             )}` +
-            `\n\nVersion ${process.env.BOT_VERSION}`,
+            `\n\nVersion ${process.env.BOT_VERSION_LABEL}`,
         []
     );
 }

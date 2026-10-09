@@ -3,12 +3,76 @@ import Bot from '../../classes/Bot';
 import SKU from '@tf2autobot/tf2-sku';
 import { ValueDiff, replace, testPriceKey } from '../tools/export';
 
-const pureEmoji = new Map<string, string>();
+export const pureEmoji = new Map<string, string>();
 pureEmoji
     .set('5021;6', '<:tf2key:813050393793658930>')
     .set('5002;6', '<:tf2refined:813050808605212672>')
     .set('5001;6', '<:tf2reclaimed:813048057352421417>')
     .set('5000;6', '<:tf2scrap:813048057577996348>');
+
+export interface NetOverpay {
+    /** Positive when the partner overpaid us, negative when we underpaid. */
+    scrap: number;
+    keyRate: number;
+}
+
+/**
+ * How far the trade landed either side of even, in scrap.
+ *
+ * Returns null when the offer carries no value data at all — admin trades and
+ * gifts, where "profit" is not a meaningful figure.
+ */
+export function getNetOverpay(offer: TradeOffer, bot: Bot): NetOverpay | null {
+    const tradeValue = offer.data('value') as ItemsValue | undefined;
+    if (!tradeValue) {
+        return null;
+    }
+
+    return {
+        scrap: (tradeValue.their?.total ?? 0) - (tradeValue.our?.total ?? 0),
+        keyRate: tradeValue.rate ?? bot.pricelist.getKeyPrice.metal
+    };
+}
+
+/**
+ * Overpay only reads as profit on an offer we received and accepted. On offers
+ * the bot itself constructed, the two sides are our own numbers on both ends.
+ */
+export function isNetOverpayRelevant(type: string, isOfferSent: boolean | undefined): boolean {
+    return ['summary-accepted', 'review-admin'].includes(type) && !isOfferSent;
+}
+
+/**
+ * The `3 → 2/5` note that follows an item in a summary.
+ *
+ * The direction is the non-obvious part. By the time a `summary-accepted` is
+ * built the inventory *already reflects the completed trade*, so the reported
+ * stock is the new one and the old is reconstructed from it — `current + amount`
+ * for what we gave away, `current - amount` for what came in. An in-process
+ * summary is the mirror image: the reported stock is the old one and the new is
+ * projected. Any other type describes no change and gets a bare count.
+ */
+export function stockChangeText(bot: Bot, priceKey: string, which: string, type: string, amount: number): string {
+    const entry = bot.pricelist.getPriceBySkuOrAsset({ priceKey, onlyEnabled: false });
+    const currentStock = bot.inventoryManager.getInventory.getAmount({
+        priceKey,
+        includeNonNormalized: true,
+        tradableOnly: true
+    });
+
+    const accepted = type === 'summary-accepted';
+    const inProcess = ['review-admin', 'summary-accepting', 'summary-countering'].includes(type);
+
+    const ours = which === 'our';
+    const direction = ours ? 1 : -1;
+    const oldStock = accepted ? currentStock + direction * amount : currentStock;
+    const newStock = inProcess ? currentStock - direction * amount : currentStock;
+
+    const limit = entry ? `/${entry.max}` : '';
+
+    const transition = accepted || inProcess ? `${oldStock} → ` : '';
+    return `${transition}${newStock}${limit}`;
+}
 
 export function summarizeToChat(
     offer: TradeOffer,
@@ -192,28 +256,10 @@ function getSummary(
         const name = properName ? generateName : replace.itemName(generateName || 'unknown');
 
         if (showStockChanges) {
-            let oldStock: number | null = 0;
-            const currentStock = bot.inventoryManager.getInventory.getAmount({
-                priceKey,
-                includeNonNormalized: true,
-                tradableOnly: true
-            });
-
-            const summaryAccepted = ['summary-accepted'].includes(type);
-            const summaryInProcess = ['review-admin', 'summary-accepting', 'summary-countering'].includes(type);
-
-            if (summaryAccepted || summaryInProcess) {
-                oldStock =
-                    which === 'our'
-                        ? summaryInProcess
-                            ? currentStock
-                            : currentStock + amount
-                        : summaryInProcess
-                        ? currentStock
-                        : currentStock - amount;
-            } else {
-                oldStock = currentStock;
-            }
+            // Extracted rather than inlined twice: the Discord trade summary
+            // builds the same note from its own item list, and the two must not
+            // be able to drift apart.
+            const stock = stockChangeText(bot, priceKey, which, type, amount);
 
             if (withLink && isTF2Items) {
                 summary.push(
@@ -223,32 +269,12 @@ function getSummary(
                                 ? pureEmoji.get(sku)
                                 : name
                             : name
-                    }](https://pricedb.io/item/${sku})${amount > 1 ? ` x${amount}` : ''} (${
-                        (summaryAccepted || summaryInProcess) && oldStock !== null ? `${oldStock} → ` : ''
-                    }${
-                        which === 'our'
-                            ? summaryInProcess
-                                ? currentStock - amount
-                                : currentStock
-                            : summaryInProcess
-                            ? currentStock + amount
-                            : currentStock
-                    }${entry ? `/${entry.max}` : ''})`
+                    }](https://pricedb.io/item/${sku})${amount > 1 ? ` x${amount}` : ''} (${stock})`
                 );
             } else {
                 summary.push(
                     `${name}${amount > 1 ? ` x${amount}` : ''}${
-                        ['review-partner', 'declined'].includes(type)
-                            ? ''
-                            : ` (${(summaryAccepted || summaryInProcess) && oldStock !== null ? `${oldStock} → ` : ''}${
-                                  which === 'our'
-                                      ? summaryInProcess
-                                          ? currentStock - amount
-                                          : currentStock
-                                      : summaryInProcess
-                                      ? currentStock + amount
-                                      : currentStock
-                              }${entry ? `/${entry.max}` : ''})`
+                        ['review-partner', 'declined'].includes(type) ? '' : ` (${stock})`
                     }`
                 );
             }

@@ -1,0 +1,45 @@
+NotoEmoji-Subset.ttf
+====================
+
+A 15-glyph subset of Google's Noto Emoji, used only for the attribute
+pictographs on the accepted-trade card (see
+src/classes/DiscordWebhook/tradeCard/itemAttributes.ts).
+
+Monochrome on purpose. A colour emoji font (COLR/CBDT) paints its own palette
+and cannot be tinted, which would cost the killstreak icon its sheen colour and
+the spell icons their per-spell hues. Monochrome glyphs are ordinary outlines,
+so canvas `fillStyle` applies.
+
+Licensed under the SIL Open Font License 1.1 — see NotoEmoji-LICENSE.txt.
+
+Rebuilding
+----------
+
+Source: https://github.com/google/fonts/raw/main/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf
+
+    fonttools varLib.instancer 'NotoEmoji[wght].ttf' wght=400 -o NotoEmoji-400.ttf
+    pyftsubset NotoEmoji-400.ttf \
+        --unicodes="2B50,2728,1F525,26A1,1F32A,2668,1F4AB,1F4A5,1F300,1F527,1F3A8,1F463,1F50A,1F383,1F47B" \
+        --output-file=NotoEmoji-Subset.ttf
+
+The codepoints, in that order:
+
+    2B50  star            killstreak, Basic tier
+    2728  sparkles        killstreak, Specialized tier
+    1F525 fire            Fire Horns killstreaker / Halloween Fire spell
+    26A1  high voltage    Cerebral Discharge killstreaker
+    1F32A tornado         Tornado killstreaker
+    2668  hot springs     Flames killstreaker
+    1F4AB dizzy           Singularity killstreaker
+    1F4A5 collision       Incinerator killstreaker
+    1F300 cyclone         Hypno-Beam killstreaker
+    1F527 wrench          strange parts
+    1F3A8 palette         the five paint spells
+    1F463 footprints      the seven footprint spells
+    1F50A speaker         Voices from Below
+    1F383 jack-o-lantern  Pumpkin Bombs
+    1F47B ghost           Exorcism
+
+Adding a glyph means adding its codepoint above and re-running both commands;
+skia draws nothing at all for a codepoint the font does not map, so a missing
+one costs an icon rather than producing a tofu box.

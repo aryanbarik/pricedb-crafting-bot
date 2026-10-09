@@ -28,7 +28,7 @@ export default async function sendReview(offer: TradeOffer, bot: Bot, meta: Meta
     const isNotifyTradePartner = opt.steamChat.notifyTradePartner.onOfferForReview;
 
     // Notify partner and admin that the offer is waiting for manual review
-    if (isNotifyTradePartner) {
+    if (!opt.globalDisable.offerMessages && isNotifyTradePartner) {
         if (
             reasons.includes('⬜_BANNED_CHECK_FAILED') ||
             reasons.includes('⬜_ESCROW_CHECK_FAILED') ||
@@ -191,7 +191,7 @@ export async function sendToAdmin(
         `\n${cTTotalItems} ${currentItems}${slots !== undefined ? `/${slots}` : ''}` +
         `\n${cTPureStock} ${t.pure.stock(bot).join(', ').toString()}` +
         `\n\n ⚠️ Send "${prefix}accept ${offer.id}" to accept or "${prefix}decline ${offer.id}" to decline this offer.` +
-        `\n\nVersion ${process.env.BOT_VERSION}`;
+        `\n\nVersion ${process.env.BOT_VERSION_LABEL}`;
 
     const message = message1 + message2 + message3 + message4;
 

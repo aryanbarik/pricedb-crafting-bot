@@ -43,7 +43,7 @@ export function stock(bot: Bot): string[] {
     return pureStock;
 }
 
-interface CurrentPure {
+export interface CurrentPure {
     key: number;
     scrap: number;
     rec: number;

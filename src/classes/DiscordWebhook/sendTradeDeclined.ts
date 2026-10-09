@@ -79,7 +79,7 @@ export default async function sendTradeDeclined(
                 author: {
                     name: `${details.personaName}`,
                     url: links.steam,
-                    icon_url: details.avatarFull as string
+                    icon_url: details.avatarFull
                 },
                 description:
                     `⛔ An offer sent by ${declinedDescription ? partnerNameNoFormat : 'us'} was declined ${
@@ -149,8 +149,8 @@ export default async function sendTradeDeclined(
                     }
                 ],
                 footer: {
-                    text: `#${offer.id} • ${offer.partner.toString()} • ${t.timeNow(bot.options).time} • v${
-                        process.env.BOT_VERSION
+                    text: `#${offer.id} • ${offer.partner.toString()} • ${t.timeNow(bot.options).time} • ${
+                        process.env.BOT_VERSION_LABEL
                     }`
                 }
             }

@@ -30,7 +30,7 @@ export default function sendPartnerMessage(
                         : 'https://steamcdn-a.akamaihd.net/steamcommunity/public/images/avatars/72/72f78b4c8cc1f62323f8a33f6d53e27db57c2252_full.jpg'
                 },
                 footer: {
-                    text: `Partner SteamID: ${steamID} • ${time} • v${process.env.BOT_VERSION}`
+                    text: `Partner SteamID: ${steamID} • ${time} • ${process.env.BOT_VERSION_LABEL}`
                 },
                 title: '',
                 description: `💬 ${msg}${their ? `\n\n${quickLinks(their.player_name, links)}` : ''}`,

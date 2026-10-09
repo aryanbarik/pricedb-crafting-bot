@@ -1,4 +1,4 @@
-import { sendWebhook } from './utils';
+import { sendWebhook, WebhookError, WebhookErrorData } from './utils';
 import { Webhook } from './interfaces';
 import log from '../../lib/logger';
 import { GetItemPriceResponse } from '../IPricer';
@@ -29,7 +29,7 @@ export default function sendFailedPriceUpdate(
                         : 'https://steamcdn-a.akamaihd.net/steamcommunity/public/images/avatars/3d/3dba19679c4a689b9d24fa300856cbf3d948d631_full.jpg'
                 },
                 footer: {
-                    text: `v${process.env.BOT_VERSION}`
+                    text: `${process.env.BOT_VERSION_LABEL}`
                 },
                 title: '',
                 description: `Error: "${err.message}"\ndata: ${JSON.stringify(data, null, 4)}`,
@@ -50,6 +50,10 @@ class PriceUpdateFailedQueue {
     static setURL(url: string) {
         this.url = url;
     }
+
+    private static sleepTime = 1500;
+
+    private static isRateLimited = false;
 
     private static isProcessing = false;
 
@@ -80,17 +84,25 @@ class PriceUpdateFailedQueue {
 
         this.isProcessing = true;
 
-        if (this.size() >= 5) {
-            await timersPromises.setTimeout(500);
+        await timersPromises.setTimeout(this.sleepTime);
+
+        if (this.isRateLimited) {
+            this.sleepTime = 1500;
+            this.isRateLimited = false;
         }
 
         sendWebhook(this.url, this.priceUpdate[sku], 'pricelist-update')
-            .catch(err => {
-                log.warn(`❌ Failed to send price update error for ${sku} to Discord: `, err);
+            .then(() => this.dequeue())
+            .catch((e: WebhookError) => {
+                log.warn(`❌ Failed to send price update error for ${sku} to Discord: `, e.err);
+                if (e?.err?.status === 429) {
+                    const retryAfter = (e.err.data as WebhookErrorData)?.retry_after;
+                    this.sleepTime = typeof retryAfter === 'number' ? retryAfter * 1000 + 100 : 3000;
+                    this.isRateLimited = true;
+                }
             })
             .finally(() => {
                 this.isProcessing = false;
-                this.dequeue();
                 void this.process();
             });
     }

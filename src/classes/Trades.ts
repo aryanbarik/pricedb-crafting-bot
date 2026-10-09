@@ -1,3 +1,4 @@
+import { counterOfferValue } from '../lib/tools/counterOfferValue';
 import TradeOfferManager, {
     TradeOffer,
     EconItem,
@@ -34,15 +35,38 @@ type HttpError = Error & { code?: string | number };
 
 const STEAM_RETRY_ATTEMPTS = 5;
 const STEAM_RETRY_BASE_DELAY_SECONDS = 5;
+const EXPIRED_OFFER_RETRY_DELAY_MS = 30 * 1000;
+const TRADE_POLL_WATCHDOG_INTERVAL_MS = 30 * 1000;
+const TRADE_POLL_STALE_MS = 2 * 60 * 1000;
+const TRADE_POLL_PROCESSING_STALE_MS = 5 * 60 * 1000;
+const TRADE_POLL_RECOVERY_ATTEMPTS = 2;
 
 export default class Trades {
-    private itemsInTrade: string[] = [];
+    private readonly itemsInTrade = new Map<string, Set<string>>();
+
+    private readonly reservedItemsByOffer = new Map<string, Set<string>>();
+
+    private readonly offerExpiryTimers = new Map<string, NodeJS.Timeout>();
+
+    private readonly expiringOffers = new Set<string>();
+
+    private reservationSequence = 0;
 
     private receivedOffers: string[] = [];
 
     private processingOffer = false;
 
     private pollCount = 0;
+
+    private lastPollSuccessAt = Date.now();
+
+    private pollFailureCount = 0;
+
+    private pollRecoveryAttempts = 0;
+
+    private pollRestartRequested = false;
+
+    private pollWatchdog: NodeJS.Timeout;
 
     private escrowCheckFailedCount = 0;
 
@@ -58,6 +82,77 @@ export default class Trades {
         this.bot = bot;
     }
 
+    startPollWatchdog(): void {
+        if (this.pollWatchdog !== undefined) {
+            return;
+        }
+
+        this.lastPollSuccessAt = Date.now();
+        this.pollWatchdog = setInterval(() => this.recoverStalledPoll(), TRADE_POLL_WATCHDOG_INTERVAL_MS);
+    }
+
+    stop(): void {
+        clearInterval(this.pollWatchdog);
+        this.pollWatchdog = undefined;
+    }
+
+    onPollSuccess(): void {
+        this.lastPollSuccessAt = Date.now();
+        this.pollFailureCount = 0;
+        this.pollRecoveryAttempts = 0;
+        this.pollRestartRequested = false;
+    }
+
+    onPollFailure(err: Error): void {
+        this.pollFailureCount++;
+        log.warn(`Trade offer poll failed (${this.pollFailureCount} consecutive):`, err);
+    }
+
+    private recoverStalledPoll(): void {
+        if (this.bot.isHalted) {
+            return;
+        }
+
+        const staleFor = Date.now() - this.lastPollSuccessAt;
+        const staleThreshold = this.processingOffer ? TRADE_POLL_PROCESSING_STALE_MS : TRADE_POLL_STALE_MS;
+        if (staleFor < staleThreshold) {
+            return;
+        }
+
+        if (this.pollRecoveryAttempts < TRADE_POLL_RECOVERY_ATTEMPTS) {
+            this.pollRecoveryAttempts++;
+            log.warn(
+                `Trade polling has had no successful poll for ${Math.round(staleFor / 1000)}s; forcing recovery poll ` +
+                    `(${this.pollRecoveryAttempts}/${TRADE_POLL_RECOVERY_ATTEMPTS}).`
+            );
+            this.bot.manager.pollInterval = 10 * 1000;
+            this.bot.manager.doPoll();
+            return;
+        }
+
+        if (this.pollRestartRequested) {
+            return;
+        }
+
+        const maintenanceDelay = getSteamMaintenanceDelay();
+        if (maintenanceDelay !== null) {
+            log.warn('Trade polling is stale, but Steam maintenance is active; deferring restart.');
+            return;
+        }
+
+        this.pollRestartRequested = true;
+        log.error(`Trade polling did not recover after ${this.pollRecoveryAttempts} forced polls; restarting bot.`);
+        void this.bot.botManager.restartProcess().then(restarted => {
+            if (!restarted) {
+                this.pollRestartRequested = false;
+                log.error('Trade polling recovery restart failed because PM2/Docker restart is unavailable.');
+            }
+        }).catch(err => {
+            this.pollRestartRequested = false;
+            log.error('Trade polling recovery restart failed:', err);
+        });
+    }
+
     onPollData(pollData: TradeOfferManager.PollData): void {
         this.bot.handler.onPollData(pollData);
     }
@@ -65,6 +160,12 @@ export default class Trades {
     setPollData(pollData: TradeOfferManager.PollData): void {
         const active = this.getActiveOffers(pollData);
         const activeOrCreatedNeedsConfirmation = active.sent.concat(active.received);
+
+        this.itemsInTrade.clear();
+        this.reservedItemsByOffer.clear();
+        this.offerExpiryTimers.forEach(timer => clearTimeout(timer));
+        this.offerExpiryTimers.clear();
+        this.expiringOffers.clear();
 
         // Go through all sent / received offers and mark the items as in trade
         const activeCount = activeOrCreatedNeedsConfirmation.length;
@@ -79,7 +180,7 @@ export default class Trades {
             const itemsCount = items.length;
 
             for (let i = 0; i < itemsCount; i++) {
-                this.setItemInTrade = items[i].assetid;
+                this.reserveItem(`offer:${id}`, items[i].assetid);
             }
         }
 
@@ -181,6 +282,15 @@ export default class Trades {
             }
         });
 
+        sent.forEach(offer => {
+            if (this.isExpiringOffer(offer)) {
+                this.reserveOfferItems(offer);
+                this.scheduleOfferExpiry(offer);
+            } else if (offer.isOurOffer) {
+                this.clearOfferExpiry(offer);
+            }
+        });
+
         const activeReceived = received.filter(offer => offer.state === TradeOfferManager.ETradeOfferState['Active']);
         const activeReceivedCount = activeReceived.length;
 
@@ -215,8 +325,7 @@ export default class Trades {
     }
 
     isInTrade(assetid: string): boolean {
-        const haveInTrade = this.itemsInTrade.some(v => assetid === v);
-        return haveInTrade;
+        return this.itemsInTrade.has(assetid);
     }
 
     getActiveOffer(steamID: SteamID): string | null {
@@ -304,9 +413,7 @@ export default class Trades {
 
     private enqueueOffer(offer: TradeOffer): void {
         if (!this.receivedOffers.includes(offer.id)) {
-            offer.itemsToGive.forEach(item => {
-                this.setItemInTrade = item.assetid;
-            });
+            this.reserveOfferItems(offer);
 
             offer.data('partner', offer.partner.getSteamID64());
 
@@ -370,9 +477,9 @@ export default class Trades {
             })
             .catch((err: Error) => {
                 log.error('Error occurred while handler was processing offer: ', err);
-                // No throw here, because handlerProcessOffer will not handle catch.
-                this.processingOffer = false;
-                this.processNextOffer();
+                // Release this queue head. A later successful poll will re-enqueue
+                // the offer if it is still active.
+                this.finishProcessingOffer(offer.id);
             });
     }
 
@@ -413,9 +520,7 @@ export default class Trades {
         }
 
         if (action === 'skip' || action === 'ignore') {
-            offer.itemsToGive.forEach(item => {
-                this.unsetItemInTrade = item.assetid;
-            });
+            this.releaseOfferItems(offer);
         }
 
         if (actionFunc === undefined) {
@@ -553,14 +658,7 @@ export default class Trades {
 
             log.debug('pollInterval re-enabled.');
             this.bot.manager.pollInterval = 10 * 1000;
-            const now = dayjs();
-            const timeDiffInMs = now.diff(this.bot.lastTimeCallingDoPoll);
-            if (timeDiffInMs >= 10000) {
-                // Make sure to call doPoll only if first time or last call is more than or equal to 10 seconds
-                this.bot.lastTimeCallingDoPoll = now.toDate();
-                log.debug('doPoll called.');
-                this.bot.manager.doPoll();
-            }
+            this.bot.manager.doPoll();
             return;
         }
 
@@ -584,12 +682,9 @@ export default class Trades {
             })
             .catch((err: Error) => {
                 log.warn(`Failed to get offer #${offerId}: `, err);
-                // After many retries we could not get the offer data
-
-                if (this.receivedOffers.length !== 1) {
-                    // Remove the offer from the queue and add it to the back of the queue
-                    this.receivedOffers.push(offerId);
-                }
+                // Do not leave one failed Steam request blocking every later offer.
+                // A later successful poll will re-enqueue this offer if it is active.
+                this.finishProcessingOffer(offerId);
             });
     }
 
@@ -626,7 +721,7 @@ export default class Trades {
                         });
                 }
 
-                if (offer.state !== TradeOfferManager.ETradeOfferState['Active']) {
+                if (!offer || offer.state !== TradeOfferManager.ETradeOfferState['Active']) {
                     // Offer is not active
                     return resolve(null);
                 }
@@ -898,8 +993,7 @@ export default class Trades {
                                 keys: tradeValues.their.keys,
                                 metal: Currencies.toRefined(tradeValues.their.scrap)
                             },
-                            rate: values.rate,
-                            rates: values.rates
+                            rate: keyRate
                         });
 
                         counter.data('dict', dataDict);
@@ -946,19 +1040,9 @@ export default class Trades {
                     const dataDict = offer.data('dict') as ItemsDict;
                     const prices = offer.data('prices') as Prices;
 
-                    // Use the current sell price for all keys, matching original Autobot behaviour.
-                    const liveKeyPrices = this.bot.pricelist.getKeyPrices;
-                    const keyPriceScrap = Currencies.toScrap(liveKeyPrices.sell.metal);
-                    const tradeValues = {
-                        our: {
-                            scrap: values.our.total - values.our.keys * keyPriceScrap,
-                            keys: values.our.keys
-                        },
-                        their: {
-                            scrap: values.their.total - values.their.keys * keyPriceScrap,
-                            keys: values.their.keys
-                        }
-                    };
+                    // Capture one sell rate and rebuild all totals from quantities and saved item prices.
+                    const keyRate = this.bot.pricelist.getKeyPrices.sell.metal;
+                    const keyPriceScrap = Currencies.toScrap(keyRate);
 
                     const isWACEnabled = opt.miscSettings.weaponsAsCurrency.enable;
                     const isUncraftEnabled = opt.miscSettings.weaponsAsCurrency.withUncraft;
@@ -979,7 +1063,13 @@ export default class Trades {
                             return (
                                 Object.keys(dataDict[side])
                                     .map(assetKey => {
-                                        if (prices[assetKey] === undefined && !puresWithKeys.includes(assetKey)) {
+                                        const isCurrencyWeapon =
+                                            isWACEnabled && weapons.includes(assetKey) && prices[assetKey] === undefined;
+                                        if (
+                                            prices[assetKey] === undefined &&
+                                            !puresWithKeys.includes(assetKey) &&
+                                            !isCurrencyWeapon
+                                        ) {
                                             hasMissingPrices = true;
                                             return 0;
                                         }
@@ -991,8 +1081,7 @@ export default class Trades {
 
                                         possibleKeyTrade = false; //Offer contains something other than pures
 
-                                        if (isWACEnabled && weapons.includes(assetKey))
-                                            return 0.5 * dataDict[side][assetKey];
+                                        if (isCurrencyWeapon) return 0.5 * dataDict[side][assetKey];
 
                                         return (
                                             dataDict[side][assetKey] *
@@ -1014,6 +1103,14 @@ export default class Trades {
                             )
                         );
                     }
+                    const tradeValues = counterOfferValue(
+                        dataDict,
+                        prices,
+                        keyRate,
+                        isWACEnabled ? weapons : [],
+                        showOnlyMetal
+                    );
+
                     if (possibleKeyTrade) {
                         NonPureWorth +=
                             keyDifference *
@@ -1028,15 +1125,12 @@ export default class Trades {
                             ? this.bot.craftWeapons.concat(this.bot.uncraftWeapons)
                             : this.bot.craftWeapons;
 
-                        const skusFromPricelist = Object.keys(this.bot.pricelist.getPrices);
-
-                        // return filtered weapons
-                        let filteredWeaponSkus = weaponSkus.filter(weaponSku => !skusFromPricelist.includes(weaponSku));
-
-                        if (filteredWeaponSkus.length === 0) {
-                            // but if nothing left, then just use all
-                            filteredWeaponSkus = weaponSkus;
-                        }
+                        // Only unpriced weapons may supply half-scrap change.
+                        const filteredWeaponSkus = weaponSkus.filter(
+                            weaponSku =>
+                                prices[weaponSku] === undefined &&
+                                this.bot.pricelist.getPrice({ priceKey: weaponSku, onlyEnabled: true }) === null
+                        );
 
                         const chosenWeaponSku = filteredWeaponSkus
                             .filter(weaponSku => theirItems[weaponSku] === undefined) // filter weapons that are not in their offer
@@ -1057,18 +1151,6 @@ export default class Trades {
                                 tradeValues['their'].scrap += 0.5;
                                 dataDict['their'][chosenWeaponSku] ??= 0;
                                 dataDict['their'][chosenWeaponSku] += 1;
-
-                                const isInPricelist = this.bot.pricelist.getPrice({
-                                    priceKey: chosenWeaponSku,
-                                    onlyEnabled: false
-                                });
-
-                                if (isInPricelist !== null) {
-                                    prices[chosenWeaponSku] = {
-                                        buy: isInPricelist.buy,
-                                        sell: isInPricelist.sell
-                                    };
-                                }
                             }
                         }
                     }
@@ -1334,10 +1416,8 @@ export default class Trades {
 
             const ourItems: TradeOfferManager.TradeOfferItem[] = [];
 
-            offer.itemsToGive.forEach(item => {
-                this.setItemInTrade = item.assetid;
-                ourItems.push(Trades.mapItem(item));
-            });
+            this.reserveOfferItems(offer);
+            offer.itemsToGive.forEach(item => ourItems.push(Trades.mapItem(item)));
 
             offer.data('_ourItems', ourItems);
 
@@ -1358,15 +1438,16 @@ export default class Trades {
                         'successfully created' + (status === 'pending' ? '; confirmation required' : '')
                     );
 
+                    this.moveReservationToOfferId(offer);
+                    this.scheduleOfferExpiry(offer);
+
                     return resolve(status);
                 })
                 .catch((err: Error) => {
                     const actionTime = dayjs().valueOf() - start;
                     offer.data('actionTime', actionTime);
 
-                    offer.itemsToGive.forEach(item => {
-                        this.unsetItemInTrade = item.assetid;
-                    });
+                    this.releaseOfferItems(offer);
                     return reject(err);
                 });
         });
@@ -1748,7 +1829,12 @@ export default class Trades {
                             if (!restarting) {
                                 return sendAlert('failedPM2', this.bot);
                             }
-                            this.bot.sendMessage(steamID, '🙇‍♂️ Sorry! Something went wrong. I am restarting myself...');
+                            if (this.bot.friends.isFriend(steamID)) {
+                                this.bot.sendMessage(
+                                    steamID,
+                                    '🙇‍♂️ Sorry! Something went wrong. I am restarting myself...'
+                                );
+                            }
                         })
                         .catch(err => {
                             log.warn('Error occurred while trying to restart: ', err);
@@ -1771,7 +1857,12 @@ export default class Trades {
                                 );
                             }
                             this.bot.messageAdmins(`🔄 Restarting...`, []);
-                            this.bot.sendMessage(steamID, '🙇‍♂️ Sorry! Something went wrong. I am restarting myself...');
+                            if (this.bot.friends.isFriend(steamID)) {
+                                this.bot.sendMessage(
+                                    steamID,
+                                    '🙇‍♂️ Sorry! Something went wrong. I am restarting myself...'
+                                );
+                            }
                         })
                         .catch(err => {
                             log.warn('Error occurred while trying to restart: ', err);
@@ -1812,9 +1903,11 @@ export default class Trades {
             // Offer is active
 
             // Mark items as in trade
-            offer.itemsToGive.forEach(item => {
-                this.setItemInTrade = item.id;
-            });
+            this.reserveOfferItems(offer);
+
+            if (this.isExpiringOffer(offer)) {
+                this.scheduleOfferExpiry(offer);
+            }
 
             if (offer.isOurOffer && offer.data('_ourItems') === undefined) {
                 // Items are not saved for sent offer, save them
@@ -1825,9 +1918,8 @@ export default class Trades {
             }
         } else {
             // Offer is not active and the items are no longer in trade
-            offer.itemsToGive.forEach(item => {
-                this.unsetItemInTrade = item.assetid;
-            });
+            this.releaseOfferItems(offer);
+            this.clearOfferExpiry(offer);
 
             // Unset items
             offer.data('_ourItems', undefined);
@@ -1943,23 +2035,177 @@ export default class Trades {
         }, 30 * 1000);
     }
 
-    private set setItemInTrade(assetid: string) {
-        const index = this.itemsInTrade.indexOf(assetid);
-
-        if (index === -1) {
-            this.itemsInTrade.push(assetid);
+    private getReservationKey(offer: TradeOffer): string {
+        const storedKey = offer.data('_reservationKey') as string | undefined;
+        if (offer.id !== null) {
+            const offerKey = `offer:${offer.id}`;
+            if (storedKey !== offerKey) {
+                this.moveReservationKey(storedKey, offerKey);
+                offer.data('_reservationKey', offerKey);
+            }
+            return offerKey;
         }
 
-        const fixDuplicate = new Set(this.itemsInTrade);
-        this.itemsInTrade = [...fixDuplicate];
+        if (storedKey !== undefined) {
+            return storedKey;
+        }
+
+        const key = `pending:${++this.reservationSequence}`;
+        offer.data('_reservationKey', key);
+        return key;
     }
 
-    private set unsetItemInTrade(assetid: string) {
-        const index = this.itemsInTrade.indexOf(assetid);
-
-        if (index !== -1) {
-            this.itemsInTrade.splice(index, 1);
+    private moveReservationToOfferId(offer: TradeOffer): void {
+        if (offer.id !== null) {
+            this.getReservationKey(offer);
         }
+    }
+
+    private moveReservationKey(previousKey: string | undefined, nextKey: string): void {
+        if (previousKey === undefined || previousKey === nextKey) {
+            return;
+        }
+
+        const offerItems = this.reservedItemsByOffer.get(previousKey);
+        if (offerItems === undefined) {
+            return;
+        }
+
+        let nextOfferItems = this.reservedItemsByOffer.get(nextKey);
+        if (nextOfferItems === undefined) {
+            nextOfferItems = new Set<string>();
+            this.reservedItemsByOffer.set(nextKey, nextOfferItems);
+        }
+
+        offerItems.forEach(assetid => {
+            nextOfferItems.add(assetid);
+            const reservations = this.itemsInTrade.get(assetid);
+            if (reservations !== undefined) {
+                reservations.delete(previousKey);
+                reservations.add(nextKey);
+            }
+        });
+        this.reservedItemsByOffer.delete(previousKey);
+    }
+
+    private reserveOfferItems(offer: TradeOffer): void {
+        const reservationKey = this.getReservationKey(offer);
+        offer.itemsToGive.forEach(item => this.reserveItem(reservationKey, item.assetid));
+    }
+
+    private reserveItem(reservationKey: string, assetid: string): void {
+        let offerItems = this.reservedItemsByOffer.get(reservationKey);
+        if (offerItems === undefined) {
+            offerItems = new Set<string>();
+            this.reservedItemsByOffer.set(reservationKey, offerItems);
+        }
+
+        if (offerItems.has(assetid)) {
+            return;
+        }
+
+        offerItems.add(assetid);
+
+        let reservations = this.itemsInTrade.get(assetid);
+        if (reservations === undefined) {
+            reservations = new Set<string>();
+            this.itemsInTrade.set(assetid, reservations);
+        }
+        reservations.add(reservationKey);
+    }
+
+    private releaseOfferItems(offer: TradeOffer): void {
+        const reservationKey = this.getReservationKey(offer);
+        const offerItems = this.reservedItemsByOffer.get(reservationKey);
+        if (offerItems === undefined) {
+            return;
+        }
+
+        offerItems.forEach(assetid => {
+            const reservations = this.itemsInTrade.get(assetid);
+            if (reservations === undefined) {
+                return;
+            }
+
+            reservations.delete(reservationKey);
+            if (reservations.size === 0) {
+                this.itemsInTrade.delete(assetid);
+            }
+        });
+        this.reservedItemsByOffer.delete(reservationKey);
+    }
+
+    private isActiveOffer(offer: TradeOffer): boolean {
+        return [
+            TradeOfferManager.ETradeOfferState['Active'],
+            TradeOfferManager.ETradeOfferState['CreatedNeedsConfirmation']
+        ].includes(offer.state);
+    }
+
+    private isExpiringOffer(offer: TradeOffer): boolean {
+        return (
+            this.bot.options.miscSettings.skipItemsInTrade.enable &&
+            this.bot.options.miscSettings.skipItemsInTrade.cancelOfferAfterMinutes > 0 &&
+            offer.isOurOffer &&
+            offer.data('handledByUs') === true &&
+            this.isActiveOffer(offer)
+        );
+    }
+
+    private scheduleOfferExpiry(offer: TradeOffer, retryDelay?: number): void {
+        if (!this.isExpiringOffer(offer)) {
+            return;
+        }
+
+        const reservationKey = this.getReservationKey(offer);
+        this.clearOfferExpiryByKey(reservationKey);
+
+        const createdAt =
+            offer.created instanceof Date && !isNaN(offer.created.valueOf()) ? offer.created.valueOf() : Date.now();
+        const deadline = createdAt + this.bot.options.miscSettings.skipItemsInTrade.cancelOfferAfterMinutes * 60 * 1000;
+        const delay = retryDelay === undefined ? Math.max(0, deadline - Date.now()) : retryDelay;
+
+        const timer = setTimeout(() => {
+            this.offerExpiryTimers.delete(reservationKey);
+            this.expireOffer(offer);
+        }, delay);
+        this.offerExpiryTimers.set(reservationKey, timer);
+    }
+
+    private expireOffer(offer: TradeOffer): void {
+        if (!this.isExpiringOffer(offer)) {
+            return;
+        }
+
+        const reservationKey = this.getReservationKey(offer);
+        if (this.expiringOffers.has(reservationKey)) {
+            return;
+        }
+
+        this.expiringOffers.add(reservationKey);
+        offer.log('info', 'cancelling expired outgoing offer');
+        offer.cancel(err => {
+            this.expiringOffers.delete(reservationKey);
+
+            if (err) {
+                log.warn(`Failed to cancel expired offer #${offer.id}: `, err);
+                // Keep the reservation until Steam confirms the offer is no longer active.
+                this.scheduleOfferExpiry(offer, EXPIRED_OFFER_RETRY_DELAY_MS);
+            }
+        });
+    }
+
+    private clearOfferExpiry(offer: TradeOffer): void {
+        this.clearOfferExpiryByKey(this.getReservationKey(offer));
+    }
+
+    private clearOfferExpiryByKey(reservationKey: string): void {
+        const timer = this.offerExpiryTimers.get(reservationKey);
+        if (timer !== undefined) {
+            clearTimeout(timer);
+            this.offerExpiryTimers.delete(reservationKey);
+        }
+        this.expiringOffers.delete(reservationKey);
     }
 
     static offerEquals(a: TradeOffer, b: TradeOffer): boolean {

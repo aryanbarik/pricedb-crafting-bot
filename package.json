@@ -1,10 +1,11 @@
 {
     "name": "tf2autobot-pricedb-io",
-    "version": "5.17.2",
-    "description": "Fully automated TF2 trading bot advertising on www.backpack.tf using prices from www.pricedb.io, Originally made by Nicklason.",
+    "version": "6.1.0",
+    "description": "Fully automated TF2 trading bot advertising on www.backpack.tf using prices from www.pricedb.io",
     "main": "dist/app.js",
     "scripts": {
         "release": "np --no-cleanup --no-publish",
+        "prebuild": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
         "build": "tsc -p .",
         "pretest": "npm run lint",
         "test": "jest",
@@ -21,15 +22,16 @@
         "type": "git",
         "url": "git+https://github.com/TF2-Price-DB/tf2autobot-pricedb.git"
     },
-    "author": "TF2Autobot/IdiNium",
+    "author": "TF2-Price-DB/OliverPerring",
     "license": "MIT",
     "bugs": {
         "url": "https://github.com/TF2-Price-DB/tf2autobot-pricedb/issues"
     },
     "updaterepo": true,
-    "updateMessage": "Automatic updates re-enabled. If updating from 5.16.x please follow the manual update instructions in the README.md file.",
+    "updateMessage": "Update with !updaterepo to 6.1.0 report issues in the pricedb discord!",
     "homepage": "https://github.com/TF2-Price-DB/tf2autobot-pricedb#readme",
     "dependencies": {
+        "@napi-rs/canvas": "^1.0.3",
         "@tf2autobot/bptf-listings": "github:Hexenum/node-bptf-listings",
         "@tf2autobot/bptf-login": "^2.5.1",
         "@tf2autobot/filter-axios-error": "^1.5.6",

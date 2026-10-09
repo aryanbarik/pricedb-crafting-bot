@@ -1,6 +1,8 @@
 {
     "globalDisable": {
         "messages": false,
+        "offerMessages": false,
+        "unfriendMessage": false,
         "greeting": false,
         "commands": false,
         "adminCommands": false
@@ -291,8 +293,8 @@
         }
     },
     "details": {
-        "buy": "I am buying your %name% for %price%, I have %current_stock% / %max_stock%.",
-        "sell": "I am selling my %name% for %price%, I am selling %amount_trade%.",
+        "buy": "I am buying your %name% for %price%, I have %current_stock% / %max_stock%. Visit %pricedb_item% to compare!",
+        "sell": "I am selling my %name% for %price%, I am selling %amount_trade%. Visit %pricedb_item% to compare!",
         "showAutokeys": true,
         "showBoldText": {
             "onPrice": false,
@@ -502,6 +504,18 @@
         "displayName": "",
         "avatarURL": "",
         "embedColor": "9171753",
+        "commandCards": {
+            "enable": true,
+            "text": true,
+            "showQualityBorders": true,
+            "pure": true,
+            "rate": true,
+            "price": true,
+            "sku": true,
+            "stock": true,
+            "pricelist": true,
+            "trade": true
+        },
         "tradeSummary": {
             "enable": true,
             "url": [],
@@ -517,6 +531,11 @@
                 "itemSkus": [],
                 "tradeValueInRef": 0,
                 "withEscrow": true
+            },
+            "tradeCard": {
+                "enable": true,
+                "showQualityBorders": true,
+                "maxItemsPerSide": 8
             }
         },
         "declinedTrade": {
