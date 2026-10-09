@@ -4373,6 +4373,18 @@ export default class MyHandler extends Handler {
         resultWeaponIds: string[]
     ): Promise<void> {
         const partnerSteamID64 = partner.getSteamID64();
+        if (resultWeaponIds.length > 0) {
+            // Applying kits changes asset IDs. Steam's trade inventory can remain at an
+            // intermediate batch snapshot until TF2 reconnects, rejecting the later outputs
+            // with EResult 26 even though the GC backpack already contains every result.
+            // Match the fabricator return path before constructing an offer from those IDs.
+            log.info(`[killstreakifyService] Refreshing the TF2 GC backpack before returning ${resultWeaponIds.length} modified weapon(s)`);
+            try {
+                await this.bot.tf2gc.forceFreshBackpack();
+            } catch (refreshErr) {
+                log.warn(`[killstreakifyService] Pre-return GC backpack refresh failed: ${(refreshErr as Error).message}`);
+            }
+        }
         const backpack = await this.freshGCBackpack();
         const ownedIds = new Set(backpack.map((item: any) => String(item.id)));
         const returnIds = [...new Set([
