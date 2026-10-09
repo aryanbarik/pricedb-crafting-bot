@@ -25,8 +25,9 @@ function fixture() {
     const handler = {
         bot: {
             tf2gc: {
-                forceFreshBackpack: jest.fn(async () => {
+                forceFreshBackpack: jest.fn(() => {
                     events.push('refresh');
+                    return Promise.resolve();
                 })
             },
             manager: {
@@ -38,9 +39,9 @@ function fixture() {
             trades: { sendOffer: jest.fn(() => Promise.resolve('sent')), acceptConfirmation: jest.fn() },
             messageAdmins: jest.fn()
         },
-        freshGCBackpack: jest.fn(async () => {
+        freshGCBackpack: jest.fn(() => {
             events.push('read');
-            return [{ id: 'result' }, { id: 'unmatched' }];
+            return Promise.resolve([{ id: 'result' }, { id: 'unmatched' }]);
         }),
         releaseCraftingInFlight: jest.fn(),
         craftingInFlightIds: new Set<string>(),
