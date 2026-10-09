@@ -3149,7 +3149,7 @@ export default class MyHandler extends Handler {
                                                 this.holdReturnItems(partnerSteamID64, returnIds);
                                                 this.bot.sendMessage(
                                                     offer.partner,
-                                                    `⚠️ Crafting complete but couldn't send results automatically. Contact the bot owner. Kit IDs: ${resultKitIds.join(', ')}`
+                                                    `⏳ Crafting is complete! Your items are safe with me. Steam may need a little time to update them before they can be traded. I'll retry automatically — please wait a little while; you don't need to resend anything.`
                                                 );
                                                 this.bot.messageAdmins(
                                                     `⚠️ [craftingService] Return offer to ${partnerSteamID64} failed after 3 attempts (${this.describeSendError(sendErr)}). ` +
@@ -3435,7 +3435,7 @@ export default class MyHandler extends Handler {
                                                     this.holdReturnItems(partnerSteamID64, kitOnlyReturnIds);
                                                     this.bot.sendMessage(
                                                         offer.partner,
-                                                        `⚠️ Crafting complete but I couldn't send your weapon just now — I'll retry automatically shortly, no action needed.`
+                                                        `⏳ Your Killstreak weapon is ready and safe with me! Steam may need a little time to update it before it can be traded. I'll retry automatically — please wait a little while; you don't need to resend anything.`
                                                     );
                                                 });
                                         };
@@ -4425,7 +4425,10 @@ export default class MyHandler extends Handler {
                     }
                     log.warn('[killstreakifyService] Failed to send return offer to ' + partnerSteamID64 + ': ' + this.describeSendError(sendErr));
                     this.holdReturnItems(partnerSteamID64, returnIds);
-                    this.bot.sendMessage(partner, '⚠️ Killstreakify completed but I could not return your items automatically. Contact the bot owner.');
+                    this.bot.sendMessage(
+                        partner,
+                        '⏳ Killstreakify has finished! Your items are safe with me. Steam may need a little time to update them before they can be traded. I\'ll retry automatically — please wait a little while; you don\'t need to resend anything.'
+                    );
                 });
         };
         attemptSend(3);
@@ -4757,7 +4760,7 @@ export default class MyHandler extends Handler {
                             this.holdReturnItems(partnerSteamID64, returnIds);
                             this.bot.sendMessage(
                                 partner,
-                                `⚠️ Strangifying complete but couldn't send results automatically. Contact the bot owner.`
+                                `⏳ Strangifying has finished! Your items are safe with me. Steam may need a little time to update them before they can be traded. I'll retry automatically — please wait a little while; you don't need to resend anything.`
                             );
                         });
                 };
