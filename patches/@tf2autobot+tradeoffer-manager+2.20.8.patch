@@ -1,0 +1,14 @@
+diff --git a/node_modules/@tf2autobot/tradeoffer-manager/lib/classes/TradeOffer.js b/node_modules/@tf2autobot/tradeoffer-manager/lib/classes/TradeOffer.js
+index 38033bb..978ff20 100644
+--- a/node_modules/@tf2autobot/tradeoffer-manager/lib/classes/TradeOffer.js
++++ b/node_modules/@tf2autobot/tradeoffer-manager/lib/classes/TradeOffer.js
+@@ -396,7 +396,8 @@ TradeOffer.prototype.send = function(callback) {
+ 			"json_tradeoffer": JSON.stringify(offerdata),
+ 			"captcha": '',
+ 			"trade_offer_create_params": JSON.stringify(params),
+-			"tradeofferid_countered": this._countering
++			// Steam rejects an empty counter-offer ID on new offers with EResult 8.
++			...(this._countering ? {"tradeofferid_countered": this._countering} : {})
+ 		},
+ 		"checkJsonError": false,
+ 		"checkHttpError": false // we'll check it ourself. Some trade offer errors return HTTP 500
