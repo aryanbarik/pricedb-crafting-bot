@@ -84,3 +84,8 @@ When Steam's historical offer list omits an older accepted retry, use
 verify its exact receipt. `--apply` runs the existing receipt reconciliation in
 the running bot, preserving both memory and disk. It requires a complete transfer
 of the entire recorded balance to the original customer and sends no offers.
+
+For an older delivery absent from offer history, pass `sourceOfferId:trade-<tradeid>`.
+The tool fetches the complete Steam exchange receipt and requires an exact match
+of the recorded return balance, or of all intake fabricators, to the customer or
+the configured owner. Intake records are archived only after this proof.

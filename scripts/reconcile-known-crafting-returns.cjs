@@ -15,28 +15,69 @@ async function reconcile(pairs, apply) {
         const job = bot.handler.craftingJournal.get(source);
         if (!job) { results.push({ source, alreadyArchived: true }); continue; }
         if (job.operations?.some(op => op.state !== 'completed')) throw new Error('Unresolved GC work');
-        const offer = await new Promise((resolve, reject) => bot.manager.getOffer(returnId,
-            (err, value) => err ? reject(err) : resolve(value)));
-        if (offer.state !== 3 || offer.partner.getSteamID64() !== job.partnerSteamId || !offer.tradeID || offer.itemsToReceive.length)
-            throw new Error('Return must be an accepted free transfer to the recorded customer');
-        const receipt = await new Promise((resolve, reject) => offer.getExchangeDetails(true,
-            (err, status, _time, _received, sent) => err ? reject(err) : resolve({ status, sent })));
-        const given = (receipt.sent ?? []).map(asset => String(asset.assetid));
-        const expected = [...job.returnAssetIds].sort();
-        if (receipt.status !== 3 || !expected.length || JSON.stringify([...given].sort()) !== JSON.stringify(expected))
+        // A trade ID works for old transfers whose offer has rotated out of Steam's
+        // offer-history listing. Verify against Steam's completed exchange receipt.
+        const expected = [...(job.returnAssetIds.length ? job.returnAssetIds : job.fabricatorAssetIds)].sort();
+        if (!expected.length) throw new Error('Source has no outstanding assets');
+        let given;
+        let destination;
+        let offer;
+        if (returnId.startsWith('trade-')) {
+            const tradeid = returnId.slice(6);
+            const fs = process.mainModule.require('fs');
+            const key = JSON.parse(fs.readFileSync('ecosystem.json')).apps[0].env.STEAM_API_KEY;
+            const url = new URL('https://api.steampowered.com/IEconService/GetTradeStatus/v1/');
+            url.searchParams.set('key', key);
+            url.searchParams.set('tradeid', tradeid);
+            const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+            if (!response.ok) throw new Error(`Steam receipt HTTP ${response.status}`);
+            const trade = (await response.json()).response.trades?.[0];
+            if (!trade || String(trade.tradeid) !== tradeid || trade.status !== 3)
+                throw new Error('Trade receipt is not complete');
+            destination = String(trade.steamid_other);
+            given = trade.assets_given ?? [];
+        } else {
+            offer = await new Promise((resolve, reject) => bot.manager.getOffer(returnId,
+                (err, value) => err ? reject(err) : resolve(value)));
+            if (offer.state !== 3 || !offer.tradeID || offer.itemsToReceive.length)
+                throw new Error('Return must be an accepted free transfer');
+            destination = offer.partner.getSteamID64();
+            const receipt = await new Promise((resolve, reject) => offer.getExchangeDetails(true,
+                (err, status, _time, _received, sent) => err ? reject(err) : resolve({ status, sent })));
+            if (receipt.status !== 3) throw new Error('Exchange receipt is not complete');
+            given = receipt.sent ?? [];
+        }
+        // The configured owner may take custody when the customer cannot wait.
+        if (![job.partnerSteamId, '76561198138534634'].includes(destination))
+            throw new Error('Destination does not match the customer or configured owner');
+        const sentIds = given.map(asset => String(asset.assetid));
+        if (JSON.stringify([...sentIds].sort()) !== JSON.stringify(expected))
             throw new Error('Complete receipt must match the entire outstanding balance');
-        if (receipt.sent.some(asset => !asset.new_assetid || asset.new_assetid === '0' || asset.new_contextid !== '2'))
+        if (given.some(asset => !asset.new_assetid || asset.new_assetid === '0' || asset.new_contextid !== '2'))
             throw new Error('Missing destination asset IDs');
         if (apply) {
             const current = bot.handler.craftingJournal.get(source);
-            if (!current || JSON.stringify([...current.returnAssetIds].sort()) !== JSON.stringify(expected))
+            const balance = current?.returnAssetIds.length ? current.returnAssetIds : current?.fabricatorAssetIds;
+            if (!current || JSON.stringify([...balance].sort()) !== JSON.stringify(expected))
                 throw new Error('Balance changed during verification; rerun');
-            offer.data('craftingServiceReturn', { assetIds: given, sourceOfferId: source });
-            await bot.handler.reconcileReturnOffer(offer);
-            if (bot.handler.craftingJournal.get(source)?.returnAssetIds.length)
-                throw new Error('Receipt reconciliation did not clear the balance');
+            if (current.returnAssetIds.length) {
+                bot.handler.craftingJournal.recordDelivery(source, sentIds);
+            } else {
+                if (current.phase !== 'intake' || current.operations?.length)
+                    throw new Error('Cannot close a source without a recorded return balance');
+                bot.handler.craftingJournal.update(source, {
+                    stage: 'completed', processingComplete: true,
+                    fabricatorAssetIds: [], deliveredAssetIds: sentIds
+                });
+            }
+            sentIds.forEach(id => bot.handler.craftingInFlightIds.delete(id));
+            const held = (bot.handler.heldReturnItems.get(job.partnerSteamId) ?? []).filter(id => !sentIds.includes(id));
+            if (held.length) bot.handler.heldReturnItems.set(job.partnerSteamId, held);
+            else bot.handler.heldReturnItems.delete(job.partnerSteamId);
+            if (bot.handler.craftingJournal.get(source))
+                throw new Error('Receipt reconciliation did not archive the source');
         }
-        results.push({ source, returnId, customer: job.partnerSteamId, delivered: given, applied: apply });
+        results.push({ source, returnId, destination, customer: job.partnerSteamId, delivered: sentIds, applied: apply });
     }
     return results;
 }
@@ -45,7 +86,7 @@ async function main() {
     const args = process.argv.slice(2);
     const apply = args.includes('--apply');
     const pairs = args.filter(arg => arg !== '--apply').map(arg => {
-        if (!/^\d+:\d+$/.test(arg)) throw new Error('Expected sourceOfferId:returnOfferId');
+        if (!/^\d+:(?:\d+|trade-\d+)$/.test(arg)) throw new Error('Expected sourceOfferId:returnOfferId or sourceOfferId:trade-<id>');
         return arg.split(':');
     });
     if (!pairs.length) throw new Error('Provide at least one sourceOfferId:returnOfferId');
