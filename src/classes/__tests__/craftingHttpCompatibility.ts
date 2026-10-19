@@ -128,6 +128,20 @@ test('depot sourcing remains admin-only and uses the self-fill pipeline', async 
         preTradeIds: ['existing-bot-item'],
         adminSelfFill: true
     });
+    metadata.clear();
+    offer.addTheirItem.mockClear();
+    expect((await post({ ...requestBody, sourcing: 'depot' })).status).toBe(200);
+    expect(offer.addTheirItem.mock.calls).toEqual([
+        [{ appid: 440, contextid: '2', assetid: '17645949083' }],
+        [{ appid: 440, contextid: '2', assetid: '17645949100' }]
+    ]);
+    expect(metadata.get('craftingService')).toEqual({
+        fabricatorAssetIds: requestBody.fabricatorAssetIds,
+        componentAssetIds: requestBody.componentAssetIds,
+        kitAssetIds: [],
+        preTradeIds: ['existing-bot-item'],
+        adminSelfFill: true
+    });
 });
 
 test('pending offers receive mobile confirmation before responding to the site', async () => {

@@ -760,7 +760,8 @@ export default class HttpManager {
 
                 // Tag with crafting service data — onTradeOfferChanged reads this when the user accepts.
                 //
-                // Depot orders are shaped as Mode A with no components rather than phase:'intake',
+                // Admin orders may bring ingredients from the admin's backpack and self-fill
+                // any remaining recipe slots from bot stock. Shape them as Mode A, not intake.
                 // matching what onNewTradeOffer writes for a bare fabricator from an admin. The
                 // intake branch returns before runMultiFabCraft is defined and cannot reach it,
                 // whereas this falls through to the craft branch — where the fabricator appears in
@@ -770,7 +771,7 @@ export default class HttpManager {
                     wantsDepot
                         ? {
                               fabricatorAssetIds,
-                              componentAssetIds: [],
+                              componentAssetIds: componentAssetIds ?? [],
                               kitAssetIds: [],
                               preTradeIds,
                               adminSelfFill: true
@@ -792,7 +793,7 @@ export default class HttpManager {
                           many ? 'results' : 'result'
                       }!`
                     : wantsDepot
-                    ? `I'll fill ${many ? 'them' : 'it'} from depot stock and send the ${many ? 'kits' : 'kit'} back!`
+                    ? `I'll use your supplied ingredients and my stock to fill ${many ? 'them' : 'it'}, then send the ${many ? 'results' : 'result'} back!`
                     : `I'll read ${many ? 'their recipes' : 'its recipe'} and follow up with the parts needed!`;
                 offer.setMessage(`Please accept this offer to send ${subject} — ${followUp}`);
 

@@ -3516,7 +3516,7 @@ export default class MyHandler extends Handler {
                                     let appliedDepotWeaponIds: string[] = [];
                                     if (selfFill) {
                                         try {
-                                            appliedDepotWeaponIds = await this.prepareDepotTierOneWeapons(fabId, allNewIds);
+                                            appliedDepotWeaponIds = await this.prepareDepotTierOneWeapons(fabId, allNewIds, componentIds);
                                         } catch (err) {
                                             const message = (err as Error).message;
                                             log.warn(`[craftingService] Depot kit application failed for fab ${fabId}: ${message}`);
@@ -5322,7 +5322,7 @@ export default class MyHandler extends Handler {
     }
 
     /** Turn depot-owned Basic Kits into the tier-1 weapons a Specialized Fabricator actually eats. */
-    private async prepareDepotTierOneWeapons(fabId: string, currentTradeIds: string[]): Promise<string[]> {
+    private async prepareDepotTierOneWeapons(fabId: string, currentTradeIds: string[], suppliedComponentIds: string[] = []): Promise<string[]> {
         const backpack = ((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? [];
         const fabricator = backpack.find(item => String(item.id) === fabId);
         if (!fabricator) return [];
@@ -5330,7 +5330,16 @@ export default class MyHandler extends Handler {
         // Only apply an irreversible Kit when the existing stock covers every OTHER ingredient.
         // A shortage of robot parts should leave the Kit and plain weapon untouched.
         const excluded = new Set(this.buildSelfFillExcludeIds(currentTradeIds));
-        const { missing } = findBotComponents(fabricator, backpack, { excludeIds: excluded, allowPartial: true });
+        const supplied = backpack.filter(item => suppliedComponentIds.includes(String(item.id)));
+        const covered = new Map<number, number>();
+        for (const component of buildCraftComponents(fabricator, supplied)) {
+            covered.set(component.attribute_index, (covered.get(component.attribute_index) ?? 0) + 1);
+        }
+        const { missing } = findBotComponents(fabricator, backpack, {
+            excludeIds: excluded,
+            alreadyCovered: covered,
+            allowPartial: true
+        });
         const tierOneShortages = missing.map(part => part.match(/^(\d+)× kt-1 killstreak weapon$/));
         if (tierOneShortages.some(match => match === null)) return [];
         const needed = tierOneShortages.reduce((sum, match) => sum + Number(match?.[1] ?? 0), 0);
