@@ -1438,6 +1438,16 @@ export default class Trades {
                         'successfully created' + (status === 'pending' ? '; confirmation required' : '')
                     );
 
+                    try {
+                        this.bot.handler.trackCraftingReturn(offer);
+                    } catch (err) {
+                        // Steam already created this offer. Do not turn a journal write error
+                        // into a send failure or release its reservations and send it again.
+                        log.error(
+                            `Offer ${offer.id} was created but its return journal update failed; reconcile from poll data:`,
+                            err
+                        );
+                    }
                     this.moveReservationToOfferId(offer);
                     this.scheduleOfferExpiry(offer);
 

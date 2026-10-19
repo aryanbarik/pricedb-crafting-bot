@@ -39,6 +39,14 @@ import { Paths } from '../../resources/paths';
 import log from '../../lib/logger';
 import * as files from '../../lib/files';
 import CraftingJournal from '../../lib/craftingJournal';
+import { randomUUID } from 'crypto';
+import {
+    CraftItem,
+    CraftOperation,
+    operationOutputs,
+    operationPartialOutput,
+    rollbackMappings
+} from '../../lib/craftingReconciliation';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
 import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
@@ -235,6 +243,382 @@ export default class MyHandler extends Handler {
     private paths: Paths;
     private craftingJournal: CraftingJournal;
 
+    private retryingReturnPartners = new Set<string>();
+
+    beginCraftingOperation(operation: CraftOperation, sourceOfferId?: string): string | undefined {
+        const source =
+            sourceOfferId ??
+            this.craftingJournal
+                .open()
+                .filter(
+                    job =>
+                        ['processing', 'held', 'returning'].includes(job.stage) &&
+                        operation.inputIds.some(id =>
+                            [...job.receivedAssetIds, ...job.fabricatorAssetIds, ...job.returnAssetIds].includes(id)
+                        )
+                )
+                .sort(
+                    (a, b) =>
+                        operation.inputIds.filter(id => b.receivedAssetIds.includes(id)).length -
+                        operation.inputIds.filter(id => a.receivedAssetIds.includes(id)).length
+                )[0]?.offerId;
+        if (source) this.craftingJournal.addOperation(source, operation);
+        return source;
+    }
+
+    finishCraftingOperation(
+        source: string | undefined,
+        operationId: string,
+        outputId?: string,
+        consumedIds: string[] = []
+    ): void {
+        if (!source) return;
+        this.craftingJournal.finishOperation(source, operationId, outputId, consumedIds);
+        consumedIds.forEach(id => this.craftingInFlightIds.delete(id));
+        if (outputId) this.craftingInFlightIds.add(outputId);
+        log.info(
+            `[craftingService] Operation ${operationId} source=${source} output=${
+                outputId ?? 'reconciling'
+            } consumed=${consumedIds.join(',')}`
+        );
+    }
+
+    craftingOutputExclusions(operationId: string): Set<string> {
+        const excluded = new Set<string>();
+        for (const job of this.craftingJournal.open()) {
+            job.receivedAssetIds.forEach(id => excluded.add(id));
+            for (const operation of job.operations ?? []) {
+                if (operation.id !== operationId && operation.outputId) excluded.add(operation.outputId);
+                if (operation.id !== operationId) operation.candidateIds?.forEach(id => excluded.add(id));
+            }
+        }
+        return excluded;
+    }
+
+    reserveCraftingCandidates(source: string | undefined, operationId: string, ids: string[]): void {
+        if (!source || ids.length === 0) return;
+        const job = this.craftingJournal.get(source);
+        const operation = job?.operations?.find(value => value.id === operationId);
+        if (!job || !operation) return;
+        const candidateIds = [...new Set([...(operation.candidateIds ?? []), ...ids])];
+        candidateIds.forEach(id => this.craftingInFlightIds.add(id));
+        if (candidateIds.length !== operation.candidateIds?.length)
+            this.craftingJournal.update(source, {
+                operations: job.operations?.map(value =>
+                    value.id === operationId ? { ...value, candidateIds } : value
+                )
+            });
+    }
+
+    private async reconcileCraftingOperations(): Promise<void> {
+        await this.reconcileMissingCraftReceipts();
+        const backpack = (await this.freshGCBackpack()) as CraftItem[];
+        for (const job of this.craftingJournal.open()) {
+            for (const operation of job.operations ?? []) {
+                if (operation.state !== 'held') continue;
+                const excluded = this.craftingOutputExclusions(operation.id);
+                if (operation.retainedInputId) excluded.delete(operation.retainedInputId);
+                const outputs = operationOutputs(operation, backpack, excluded);
+                const partial =
+                    outputs.length === 0 ? operationPartialOutput(operation, backpack, excluded, true) : undefined;
+                const output = outputs.length === 1 ? outputs[0] : partial;
+                if (output) {
+                    const consumed = operation.inputIds.filter(id => !backpack.some(item => String(item.id) === id));
+                    this.finishCraftingOperation(job.offerId, operation.id, String(output.id), consumed);
+                    this.holdReturnItems(
+                        job.partnerSteamId,
+                        [String(output.id)],
+                        'a completed operation was reconciled'
+                    );
+                } else if (!job.reconciliationAlerted) {
+                    this.craftingJournal.update(job.offerId, { reconciliationAlerted: true });
+                    this.bot.messageAdmins(
+                        `⚠️ Craft operation ${operation.id} for ${job.partnerSteamId} is awaiting unambiguous Steam evidence; inputs remain reserved.`,
+                        []
+                    );
+                }
+            }
+        }
+    }
+
+    private async reconcileMissingCraftReceipts(): Promise<void> {
+        const jobs = this.craftingJournal
+            .open()
+            .filter(
+                job =>
+                    !job.operations?.length &&
+                    (job.receiptPending ||
+                        job.stage === 'accepted' ||
+                        (job.stage === 'held' && job.receivedAssetIds.length === 0))
+            );
+        for (const job of jobs) {
+            try {
+                const offer = await new Promise<TradeOffer>((resolve, reject) =>
+                    this.bot.manager.getOffer(job.offerId, (err, result) => (err ? reject(err) : resolve(result)))
+                );
+                if (offer.partner.getSteamID64() !== job.partnerSteamId || offer.state !== 3) continue;
+                const ids = await new Promise<string[]>((resolve, reject) =>
+                    offer.getExchangeDetails(true, (err, status, _time, received) => {
+                        if (err) return reject(err);
+                        const assets = received ?? [];
+                        if (
+                            status !== 3 ||
+                            assets.length !== offer.itemsToReceive.length ||
+                            assets.some(
+                                item =>
+                                    item.appid !== 440 ||
+                                    item.new_contextid !== '2' ||
+                                    !item.new_assetid ||
+                                    item.new_assetid === '0'
+                            )
+                        ) {
+                            return reject(new Error('Steam receipt is not complete yet'));
+                        }
+                        resolve(assets.map(item => String(item.new_assetid)));
+                    })
+                );
+                const owned = new Set(((await this.freshGCBackpack()) as CraftItem[]).map(item => String(item.id)));
+                const returns = [...new Set([...ids, ...job.fabricatorAssetIds.filter(id => owned.has(id))])];
+                this.craftingJournal.update(job.offerId, {
+                    receivedAssetIds: ids,
+                    receiptPending: false,
+                    processingComplete: true,
+                    stage: 'held',
+                    returnAssetIds: returns
+                });
+                returns.forEach(id => this.craftingInFlightIds.add(id));
+                this.holdReturnItems(
+                    job.partnerSteamId,
+                    returns,
+                    'the delayed Steam receipt was recovered; returning unchanged inputs'
+                );
+            } catch (err) {
+                log.warn(`[craftingService] Receipt ${job.offerId} still pending: ${(err as Error).message}`);
+            }
+        }
+    }
+
+    trackCraftingReturn(offer: TradeOffer): void {
+        const metadata = offer.data('craftingServiceReturn') as
+            | { assetIds: string[]; sourceOfferId?: string; sourceOfferIds?: string[] }
+            | undefined;
+        if (!metadata || !offer.id) return;
+        const sources = new Set([
+            ...(metadata.sourceOfferIds ?? []),
+            ...(metadata.sourceOfferId ? [metadata.sourceOfferId] : [])
+        ]);
+        for (const job of this.craftingJournal.open()) {
+            if (job.partnerSteamId !== offer.partner.getSteamID64()) continue;
+            const assetIds = metadata.assetIds.filter(id => job.returnAssetIds.includes(id));
+            if (assetIds.length === 0) continue;
+            sources.add(job.offerId);
+            const previous = job.returnAttempts?.find(attempt => attempt.offerId === offer.id);
+            if (!previous)
+                this.craftingJournal.recordReturnAttempt(job.offerId, {
+                    offerId: offer.id,
+                    assetIds,
+                    state: [2, 9, 11].includes(offer.state) ? 'active' : 'reconcile'
+                });
+        }
+        offer.data('craftingServiceReturn', { ...metadata, sourceOfferIds: [...sources] });
+    }
+
+    private async reconcileReturnOffer(offer: TradeOffer): Promise<void> {
+        this.trackCraftingReturn(offer);
+        const jobs = this.craftingJournal
+            .open()
+            .filter(job => job.returnAttempts?.some(attempt => attempt.offerId === offer.id));
+        if (jobs.length === 0) return;
+        if ([2, 9, 11].includes(offer.state)) {
+            for (const job of jobs) {
+                const attempt = job.returnAttempts?.find(value => value.offerId === offer.id);
+                if (!attempt) continue;
+                this.craftingJournal.recordReturnAttempt(job.offerId, { ...attempt, state: 'active' });
+            }
+            return;
+        }
+        let receipt:
+            | {
+                  status: number;
+                  assets: { assetid: string; rollback_new_assetid?: string; rollback_new_contextid?: string }[];
+              }
+            | undefined;
+        if (offer.tradeID) {
+            receipt = await new Promise((resolve, reject) =>
+                offer.getExchangeDetails(true, (err, status, _time, _received, sent) => {
+                    if (err) reject(err);
+                    else resolve({ status, assets: sent ?? [] });
+                })
+            );
+        }
+        const awaitingReceipt =
+            (offer.state === 3 && !receipt) ||
+            (receipt && ([0, 1, 2, 10].includes(receipt.status) || (receipt.status === 3 && offer.state !== 3)));
+        if (awaitingReceipt) {
+            for (const job of jobs) {
+                const attempt = job.returnAttempts?.find(value => value.offerId === offer.id);
+                if (attempt) this.craftingJournal.recordReturnAttempt(job.offerId, { ...attempt, state: 'reconcile' });
+            }
+            return;
+        }
+        const rollbackCandidates = (receipt?.assets ?? []).filter(
+            asset =>
+                asset.rollback_new_contextid === '2' && asset.rollback_new_assetid && asset.rollback_new_assetid !== '0'
+        );
+        for (const job of jobs) {
+            const attempt = job.returnAttempts?.find(value => value.offerId === offer.id);
+            const ids = rollbackCandidates
+                .filter(asset => attempt?.assetIds.includes(String(asset.assetid)))
+                .map(asset => asset.rollback_new_assetid);
+            if (ids.length > 0)
+                this.craftingJournal.update(job.offerId, {
+                    rollbackCandidateIds: [...new Set([...(job.rollbackCandidateIds ?? []), ...ids])]
+                });
+        }
+        let backpack = (await this.freshGCBackpack()) as CraftItem[];
+        let owned = new Set(backpack.map(item => String(item.id)));
+        if (rollbackCandidates.some(asset => !owned.has(asset.rollback_new_assetid))) {
+            await this.bot.tf2gc.forceFreshBackpack();
+            backpack = (await this.freshGCBackpack()) as CraftItem[];
+            owned = new Set(backpack.map(item => String(item.id)));
+        }
+        for (const job of jobs) {
+            const attempt = job.returnAttempts?.find(value => value.offerId === offer.id);
+            if (!attempt) continue;
+            if (attempt.state === 'delivered') continue;
+            const resolveId = (id: string): string => {
+                const seen = new Set<string>();
+                while (job.assetIdMappings?.[id] && !seen.has(id)) {
+                    seen.add(id);
+                    id = job.assetIdMappings[id];
+                }
+                return id;
+            };
+            if (offer.state === 3 && receipt?.status === 3) {
+                const delivered = attempt.assetIds.filter(id =>
+                    receipt.assets.some(asset => String(asset.assetid) === id)
+                );
+                if (delivered.length !== attempt.assetIds.length)
+                    throw new Error(`Incomplete return receipt for ${offer.id}`);
+                this.craftingJournal.recordReturnAttempt(job.offerId, { ...attempt, state: 'delivered' });
+                this.craftingJournal.recordDelivery(job.offerId, delivered.map(resolveId));
+                this.releaseCraftingInFlight(delivered.map(resolveId));
+                const held = this.heldReturnItems.get(job.partnerSteamId) ?? [];
+                const remainingHeld = held.filter(id => !delivered.map(resolveId).includes(id));
+                if (remainingHeld.length > 0) this.heldReturnItems.set(job.partnerSteamId, remainingHeld);
+                else this.heldReturnItems.delete(job.partnerSteamId);
+            } else {
+                const mappings = rollbackMappings(attempt.assetIds, receipt?.assets ?? [], owned);
+                this.craftingJournal.remapAssets(job.offerId, mappings);
+                for (const [oldId, newId] of Object.entries(mappings)) {
+                    this.craftingInFlightIds.delete(oldId);
+                    this.craftingInFlightIds.add(newId);
+                    const held = this.heldReturnItems.get(job.partnerSteamId) ?? [];
+                    this.heldReturnItems.set(
+                        job.partnerSteamId,
+                        held.map(id => (id === oldId ? newId : id))
+                    );
+                    log.info(
+                        `[craftingService] Rollback ${offer.id} source=${job.offerId} customer=${job.partnerSteamId} ${oldId} -> ${newId}`
+                    );
+                }
+                this.craftingJournal.recordReturnAttempt(job.offerId, { ...attempt, state: 'failed' });
+                this.craftingJournal.update(job.offerId, { stage: 'held' });
+                const outstanding = this.craftingJournal.get(job.offerId)?.returnAssetIds ?? [];
+                const existing = this.heldReturnItems.get(job.partnerSteamId) ?? [];
+                this.heldReturnItems.set(job.partnerSteamId, [...new Set([...existing, ...outstanding])]);
+            }
+        }
+    }
+
+    private async reconcileCraftingReturns(partnerSteamId?: string): Promise<void> {
+        await this.discoverUntrackedReturns(partnerSteamId);
+        // Poll data is saved by the manager before sendOffer resolves. Recover attempts from
+        // that evidence if the process stopped before our success callback journaled the ID.
+        const jobs = this.craftingJournal
+            .open()
+            .filter(job => !partnerSteamId || job.partnerSteamId === partnerSteamId);
+        const ids = new Set(
+            jobs.flatMap(job => (job.returnAttempts ?? []).filter(a => a.state !== 'delivered').map(a => a.offerId))
+        );
+        for (const [id, data] of Object.entries(this.bot.manager.pollData.offerData ?? {})) {
+            const metadata = (
+                data as unknown as {
+                    craftingServiceReturn?: {
+                        assetIds?: string[];
+                        sourceOfferId?: string;
+                        sourceOfferIds?: string[];
+                    };
+                }
+            ).craftingServiceReturn;
+            if (
+                metadata &&
+                jobs.some(
+                    job =>
+                        metadata.sourceOfferId === job.offerId ||
+                        metadata.sourceOfferIds?.includes(job.offerId) ||
+                        metadata.assetIds?.some((assetId: string) => job.returnAssetIds.includes(assetId))
+                )
+            )
+                ids.add(id);
+        }
+        for (const id of ids) {
+            try {
+                const offer = await new Promise<TradeOffer>((resolve, reject) =>
+                    this.bot.manager.getOffer(id, (err, value) => (err ? reject(err) : resolve(value)))
+                );
+                await this.reconcileReturnOffer(offer);
+            } catch (err) {
+                log.warn(
+                    `[craftingService] Return ${id} awaiting Steam receipt reconciliation: ${(err as Error).message}`
+                );
+            }
+        }
+    }
+
+    private async discoverUntrackedReturns(partnerSteamId?: string): Promise<void> {
+        const jobs = this.craftingJournal
+            .open()
+            .filter(
+                job =>
+                    job.stage === 'returning' &&
+                    job.returnAssetIds.length > 0 &&
+                    !job.returnAttempts?.length &&
+                    (!partnerSteamId || job.partnerSteamId === partnerSteamId)
+            );
+        if (jobs.length === 0) return;
+        const cutoff = new Date(
+            Math.min(...jobs.map(job => Date.parse(job.returnStartedAt ?? job.updatedAt))) - 300000
+        );
+        // Include completed offers: the customer could have accepted before the process stopped.
+        const sent = await new Promise<TradeOffer[]>((resolve, reject) =>
+            this.bot.manager.getOffers(3, cutoff, (err, offers) => (err ? reject(err) : resolve(offers ?? [])))
+        );
+        for (const job of jobs) {
+            const matches = sent.filter(
+                offer =>
+                    offer.partner.getSteamID64() === job.partnerSteamId &&
+                    offer.itemsToGive.length > 0 &&
+                    offer.itemsToReceive.length === 0 &&
+                    offer.itemsToGive.every(item => job.returnAssetIds.includes(String(item.assetid)))
+            );
+            for (const offer of matches) {
+                offer.data('craftingServiceReturn', {
+                    assetIds: offer.itemsToGive.map(item => String(item.assetid)),
+                    sourceOfferId: job.offerId
+                });
+                this.trackCraftingReturn(offer);
+            }
+            if (matches.length === 0 && Date.now() - Date.parse(job.returnStartedAt ?? job.updatedAt) >= 60000) {
+                // A successful active + historical lookup found no outgoing attempt. Requeue
+                // the balance, keeping any missing assets unresolved rather than assuming delivery.
+                this.craftingJournal.update(job.offerId, { stage: 'held' });
+                const held = this.heldReturnItems.get(job.partnerSteamId) ?? [];
+                this.heldReturnItems.set(job.partnerSteamId, [...new Set([...held, ...job.returnAssetIds])]);
+            }
+        }
+    }
+
     get getPaths(): Paths {
         return this.paths;
     }
@@ -294,13 +678,44 @@ export default class MyHandler extends Handler {
         // Do not replay uncertain GC operations after a process restart. Keep their assets
         // reserved and surface the durable receipt to the owner for reconciliation.
         if (this.craftingJournal.open().some(job => job.stage === 'accepted' || (job.stage === 'held' && job.receivedAssetIds.length === 0))) {
-            log.warn('[craftingService] Unidentified customer assets in craft journal; halting trading until reconciled');
-            void this.bot.halt();
+            log.warn(
+                '[craftingService] Unidentified customer assets remain reserved for automatic receipt reconciliation'
+            );
         }
         for (const job of this.craftingJournal.open()) {
-            [...job.receivedAssetIds, ...job.fabricatorAssetIds, ...job.returnAssetIds].forEach(id =>
-                this.craftingInFlightIds.add(id)
-            );
+            if (['processing', 'queued'].includes(job.stage) && job.operations) {
+                const issued = new Set(job.operations.flatMap(operation => operation.inputIds));
+                // Never replay submitted GC work. Inputs not used by any issued operation are
+                // still customer property and can be refunded once inventory confirms them.
+                this.craftingJournal.update(job.offerId, {
+                    stage: 'held',
+                    processingComplete: true,
+                    returnAssetIds: [
+                        ...new Set([
+                            ...job.returnAssetIds,
+                            ...[...job.receivedAssetIds, ...job.fabricatorAssetIds].filter(id => !issued.has(id))
+                        ])
+                    ]
+                });
+            }
+            if (job.operations?.some(operation => operation.state === 'pending')) {
+                this.craftingJournal.update(job.offerId, {
+                    operations: job.operations.map(operation =>
+                        operation.state === 'pending' ? { ...operation, state: 'held' } : operation
+                    )
+                });
+            }
+            const restored = this.craftingJournal.get(job.offerId) ?? job;
+            if (restored.stage === 'held' && restored.returnAssetIds.length > 0) {
+                const previous = this.heldReturnItems.get(job.partnerSteamId) ?? [];
+                this.heldReturnItems.set(job.partnerSteamId, [...new Set([...previous, ...restored.returnAssetIds])]);
+            }
+            [
+                ...job.receivedAssetIds,
+                ...job.fabricatorAssetIds,
+                ...job.returnAssetIds,
+                ...(job.operations ?? []).flatMap(operation => operation.candidateIds ?? [])
+            ].forEach(id => this.craftingInFlightIds.add(id));
             log.warn(`[craftingService] Recoverable journal job ${job.offerId} (${job.stage}) for ${job.partnerSteamId}`);
             this.bot.messageAdmins(
                 `⚠️ Craft journal: offer ${job.offerId} (${job.stage}) for ${job.partnerSteamId} ` +
@@ -2462,11 +2877,12 @@ export default class MyHandler extends Handler {
 
     onTradeOfferChanged(offer: TradeOffer, oldState: number, timeTakenToComplete?: number): void {
         void (async () => {
-            const outgoingReturn = offer.data('craftingServiceReturn') as
-                | { sourceOfferId?: string }
-                | undefined;
-            if (outgoingReturn?.sourceOfferId && this.craftingJournal.get(outgoingReturn.sourceOfferId)) {
-                this.craftingJournal.update(outgoingReturn.sourceOfferId, { returnOfferId: offer.id });
+            if (offer.data('craftingServiceReturn')) {
+                try {
+                    await this.reconcileReturnOffer(offer);
+                } catch (err) {
+                    log.warn(`[craftingService] Return ${offer.id} pending reconciliation: ${(err as Error).message}`);
+                }
             }
             // Not sure if it can go from other states to active
             if (oldState === TradeOfferManager.ETradeOfferState['Accepted']) {
@@ -2675,11 +3091,16 @@ export default class MyHandler extends Handler {
                         }
                         offer.data('craftingServiceReturnDeathHandled', true);
                         const partnerSteamID64 = offer.partner.getSteamID64();
-                        const assetIds = returnedIds;
+                        const record = craftingReturn?.sourceOfferId
+                            ? this.craftingJournal.get(craftingReturn.sourceOfferId)
+                            : undefined;
+                        const assetIds = record?.returnAssetIds ?? returnedIds;
                         const stateName = String(TradeOfferManager.ETradeOfferState[offer.state] ?? offer.state);
                         log.warn(
                             `[craftingService] Return offer ${offer.id} to ${partnerSteamID64} ended as ${stateName} — ` +
-                                `${assetIds.length} item(s) are still in the bot: ${assetIds.join(', ')}`
+                                `${assetIds.length} item(s) await verified return reconciliation: ${assetIds.join(
+                                    ', '
+                                )}`
                         );
                         // Re-held rather than auto-resent: a cancelTime expiry means the partner was
                         // not there to accept, and immediately firing another offer that expires the
@@ -2689,7 +3110,9 @@ export default class MyHandler extends Handler {
                         const why =
                             offer.state === TradeOfferManager.ETradeOfferState['Declined']
                                 ? 'was declined'
-                                : 'expired before it was accepted';
+                                : offer.state === TradeOfferManager.ETradeOfferState['Expired']
+                                ? 'expired before it was accepted'
+                                : 'was canceled or rolled back';
                         this.bot.sendMessage(
                             offer.partner,
                             `Your items didn't make it back — that offer ${why}. They're safe with me; I'll send another shortly.`
@@ -2708,14 +3131,21 @@ export default class MyHandler extends Handler {
 
                     // An accepted offer can be observed again after a process restart. A journaled
                     // job may already have changed GC state, so never replay it automatically.
-                    if (offer.data('craftingService') && this.craftingJournal.hasHandled(offer.id)) {
+                    if (
+                        (offer.data('craftingService') ||
+                            offer.data('killstreakifyService') ||
+                            offer.data('strangifyService')) &&
+                        this.craftingJournal.hasHandled(offer.id)
+                    ) {
                         const saved = this.craftingJournal.get(offer.id);
                         log.warn(`[craftingService] Offer ${offer.id} already journaled as ${saved?.stage ?? 'archived'}; skipping duplicate accepted event`);
                         this.sentSummary[offer.id] = true;
                         return;
                     }
 
-                    const acceptedCraft = offer.data('craftingService') as
+                    const acceptedCraft = (offer.data('craftingService') ??
+                        (offer.data('killstreakifyService') ? { phase: 'killstreakify' } : undefined) ??
+                        (offer.data('strangifyService') ? { phase: 'strangify' } : undefined)) as
                         | { phase?: string; fabricatorAssetIds?: string[]; intakeOfferId?: string }
                         | undefined;
                     let acceptedReceivedAssetIds: string[] | undefined;
@@ -2724,25 +3154,37 @@ export default class MyHandler extends Handler {
                         // updates inventory or creates any sale listings.
                         this.craftingJournal.recordAccepted(offer.id, offer.partner.getSteamID64(),
                             acceptedCraft.phase ?? 'legacy', acceptedCraft.fabricatorAssetIds ?? []);
+                        const metadata = (offer.data('craftingService') ??
+                            offer.data('killstreakifyService') ??
+                            offer.data('strangifyService')) as { preTradeIds?: string[] };
+                        this.craftingJournal.update(offer.id, { receiptSnapshotIds: metadata?.preTradeIds });
                         try {
                             acceptedReceivedAssetIds = await this.getReceivedTradeAssetIds(offer);
                         } catch (receiptErr) {
                             const reason = this.describeSendError(receiptErr);
-                            this.craftingJournal.update(offer.id, { stage: 'held' });
-                            void this.bot.halt();
+                            this.craftingJournal.update(offer.id, { stage: 'held', receiptPending: true });
                             log.warn('[craftingService] Trade ' + offer.id + ' accepted but its receipt cannot safely identify received assets: ' + reason);
                             this.bot.messageAdmins('⚠️ Crafting offer ' + offer.id + ' from ' + offer.partner.getSteamID64() + ' is held: Steam receipt did not identify its received assets (' + reason + '). Do not refund by backpack diff.', []);
-                            this.bot.sendMessage(offer.partner, '⚠️ Steam did not give me a safe receipt for your items. They are being held for manual recovery; please do not resend anything.');
+                            this.bot.sendMessage(
+                                offer.partner,
+                                '⚠️ Steam has not provided a complete receipt for your items yet. They are safe with me; I will retry automatically. Please do not resend anything.'
+                            );
                             this.sentSummary[offer.id] = true;
                             return;
                         }
                         const expectedReceivedCount = offer.itemsToReceive.length;
                         if (acceptedReceivedAssetIds.length !== expectedReceivedCount) {
-                            this.craftingJournal.update(offer.id, { stage: 'held', receivedAssetIds: acceptedReceivedAssetIds });
-                            void this.bot.halt();
+                            this.craftingJournal.update(offer.id, {
+                                stage: 'held',
+                                receiptPending: true,
+                                receivedAssetIds: acceptedReceivedAssetIds
+                            });
                             log.warn('[craftingService] Trade ' + offer.id + ' receipt count mismatch: expected ' + expectedReceivedCount + ', got ' + acceptedReceivedAssetIds.length + '; holding for manual recovery');
                             this.bot.messageAdmins('⚠️ Crafting offer ' + offer.id + ' from ' + offer.partner.getSteamID64() + ' is held: receipt count ' + acceptedReceivedAssetIds.length + '/' + expectedReceivedCount + '. Do not refund by backpack diff.', []);
-                            this.bot.sendMessage(offer.partner, '⚠️ Steam returned an incomplete receipt for your items. They are being held for manual recovery; please do not resend anything.');
+                            this.bot.sendMessage(
+                                offer.partner,
+                                '⚠️ Steam has not provided a complete receipt for your items yet. They are safe with me; I will retry automatically. Please do not resend anything.'
+                            );
                             this.sentSummary[offer.id] = true;
                             return;
                         }
@@ -2761,10 +3203,7 @@ export default class MyHandler extends Handler {
                         | { assetIds?: string[]; sourceOfferId?: string }
                         | undefined;
                     if (Array.isArray(deliveredCraftingReturn?.assetIds)) {
-                        if (deliveredCraftingReturn.sourceOfferId && this.craftingJournal.get(deliveredCraftingReturn.sourceOfferId)) {
-                            this.craftingJournal.update(deliveredCraftingReturn.sourceOfferId, { stage: 'completed' });
-                        }
-                        this.releaseCraftingInFlight(deliveredCraftingReturn.assetIds);
+                        // Receipt reconciliation above, not offer state alone, establishes delivery.
                     }
                     const manualCustody = offer.data('manualCraftingCustody') as
                         | { assetIds: string[]; jobs: { sourceOfferId: string; customerSteamId: string; assetIds: string[] }[] }
@@ -2808,7 +3247,7 @@ export default class MyHandler extends Handler {
                     if (strangifyService) {
                         log.info(`[strangifyService] Trade ${offer.id} accepted — scheduling apply in 5s`);
                         setTimeout(() => {
-                            void this.handleStrangifyAccepted(offer.partner, strangifyService.preTradeIds ?? []);
+                            void this.handleStrangifyAccepted(offer);
                         }, 5000);
                     }
 
@@ -3085,7 +3524,18 @@ export default class MyHandler extends Handler {
                                 let planIndex = 0;
 
                                 const sendResults = async (): Promise<void> => {
-                                    const returnIds = [...resultKitIds, ...partialFabIds, ...failedFabIds, ...leftoverIds];
+                                    await this.reconcileCraftingOperations();
+                                    const current = (await this.freshGCBackpack()) as CraftItem[];
+                                    const owned = new Set(current.map(item => String(item.id)));
+                                    const returnIds = [
+                                        ...new Set([
+                                            ...resultKitIds,
+                                            ...partialFabIds,
+                                            ...failedFabIds,
+                                            ...leftoverIds,
+                                            ...(this.craftingJournal.get(offer.id)?.returnAssetIds ?? [])
+                                        ])
+                                    ].filter(id => owned.has(id));
                                     if (returnIds.length === 0) {
                                         log.warn(`[craftingService] Nothing to return for offer ${offer.id}`);
                                         return;
@@ -3183,6 +3633,7 @@ export default class MyHandler extends Handler {
                                     // Rebuilt per fab rather than once per plan: an earlier craft in
                                     // this same plan may have already spent some of the bot's stock.
                                     const craftOptions = {
+                                        sourceOfferId: offer.id,
                                         componentIds,
                                         selfFill,
                                         // Keep the just-created weapon reserved from other jobs, but let
@@ -4254,7 +4705,12 @@ export default class MyHandler extends Handler {
         requestedIds.forEach(assetid => requestOffer.addTheirItem({ appid: 440, contextid: '2', assetid }));
         // Do not store the pre-trade pairing: accepted assets receive new IDs, and a counteroffer
         // can remove either side. handleKillstreakifyAccepted rebuilds pairs from the receipt.
-        requestOffer.data('killstreakifyService', { requestedIds });
+        requestOffer.data('killstreakifyService', {
+            requestedIds,
+            preTradeIds: ((this.bot.tf2 as unknown as { backpack: CraftItem[] }).backpack ?? []).map(item =>
+                String(item.id)
+            )
+        });
         requestOffer.setMessage('Found ' + pairs.length + ' Killstreak Kit pair(s) — accept to apply them!');
 
         const attemptSend = (retriesLeft: number): void => {
@@ -4281,7 +4737,8 @@ export default class MyHandler extends Handler {
         const partnerSteamID64 = partner.getSteamID64();
         let receivedAssetIds: string[];
         try {
-            receivedAssetIds = await this.getReceivedTradeAssetIds(offer);
+            receivedAssetIds =
+                this.craftingJournal.get(offer.id)?.receivedAssetIds ?? (await this.getReceivedTradeAssetIds(offer));
         } catch (err) {
             const reason = this.describeSendError(err);
             log.warn('[killstreakifyService] Trade ' + offer.id + ' has no safe received-asset receipt: ' + reason);
@@ -4299,6 +4756,7 @@ export default class MyHandler extends Handler {
             this.bot.sendMessage(partner, '⚠️ I cannot safely locate every item from your accepted trade. They are held for manual recovery.');
             return;
         }
+        this.craftingJournal.update(offer.id, { stage: 'processing', receivedAssetIds });
         receivedAssetIds.forEach(id => this.craftingInFlightIds.add(id));
 
         const usedIds = new Set<string>();
@@ -4388,10 +4846,12 @@ export default class MyHandler extends Handler {
                 );
             }
         }
+        await this.reconcileCraftingOperations();
         const backpack = await this.freshGCBackpack();
         const ownedIds = new Set(backpack.map((item: any) => String(item.id)));
         const returnIds = [...new Set([
             ...resultWeaponIds,
+                ...(this.craftingJournal.get(componentOfferId)?.returnAssetIds ?? []),
             ...receivedAssetIds.filter(id => !successfulInputIds.has(id))
         ])].filter(id => ownedIds.has(id));
         this.releaseCraftingInFlight(receivedAssetIds.filter(id => !returnIds.includes(id)));
@@ -4404,7 +4864,7 @@ export default class MyHandler extends Handler {
         }
 
         const returnOffer = this.bot.manager.createOffer(partner, token);
-        this.prepareCraftingOffer(returnOffer, returnIds, []);
+        this.prepareCraftingOffer(returnOffer, returnIds, [], undefined, componentOfferId);
         returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
         returnOffer.setMessage(
             resultWeaponIds.length > 0
@@ -4667,19 +5127,26 @@ export default class MyHandler extends Handler {
      * "not found in backpack", and the return offer then failed with Steam EResult 26 (Revoked)
      * because it tried to give back items that never existed under those IDs in the first place.
      */
-    private async handleStrangifyAccepted(partner: SteamID, preTradeIds: string[]): Promise<void> {
+    private async handleStrangifyAccepted(offer: TradeOffer): Promise<void> {
+        const partner = offer.partner;
+        const receipt =
+            this.craftingJournal.get(offer.id)?.receivedAssetIds ?? (await this.getReceivedTradeAssetIds(offer));
+        this.craftingJournal.update(offer.id, { stage: 'processing', receivedAssetIds: receipt });
+        receipt.forEach(id => this.craftingInFlightIds.add(id));
+        await this.bot.tf2gc.ensureFreshBackpack();
         const partnerSteamID64 = partner.getSteamID64();
         // See fetchTradeUrlToken on handleCraftingIntake above.
         const token = await fetchTradeUrlToken(partnerSteamID64);
         const resultWeaponIds: string[] = [];
         const failedPairIds: string[] = [];
 
-        const knownIds = new Set<string>(preTradeIds);
-        const newItems: any[] = ((this.bot.tf2 as any).backpack as any[] ?? []).filter(
-            (i: any) => !knownIds.has(String(i.id))
+        const newItems = ((this.bot.tf2 as unknown as { backpack: CraftItem[] }).backpack ?? []).filter(i =>
+            receipt.includes(String(i.id))
         );
         log.debug(
-            `[strangifyService] Backpack diff: ${newItems.length} new item(s) (knownIds=${knownIds.size}): ${newItems.map((i: any) => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'}`
+            `[strangifyService] Receipt: ${newItems.length} received item(s): ${
+                newItems.map(i => `id=${i.id} def=${i.def_index}`).join(', ') || '(none)'
+            }`
         );
 
         const usedIds = new Set<string>();
@@ -4725,13 +5192,23 @@ export default class MyHandler extends Handler {
 
         const applyNext = (index: number): void => {
             if (index >= pairs.length) {
-                const returnIds = [...resultWeaponIds, ...failedPairIds];
+                const owned = new Set(
+                    ((this.bot.tf2 as unknown as { backpack: CraftItem[] }).backpack ?? []).map(item => String(item.id))
+                );
+                const returnIds = [
+                    ...new Set([
+                        ...resultWeaponIds,
+                        ...failedPairIds,
+                        ...receipt.filter(id => owned.has(id)),
+                        ...(this.craftingJournal.get(offer.id)?.returnAssetIds ?? [])
+                    ])
+                ].filter(id => owned.has(id));
                 if (returnIds.length === 0) {
                     log.warn(`[strangifyService] Nothing to return to ${partnerSteamID64}`);
                     return;
                 }
                 const returnOffer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(returnOffer, returnIds, []);
+                this.prepareCraftingOffer(returnOffer, returnIds, [], undefined, offer.id);
                 returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
                 returnOffer.setMessage(
                     failedPairIds.length > 0
@@ -5008,6 +5485,8 @@ export default class MyHandler extends Handler {
         // A fabricator can never fill a slot, and a Killstreak Kit is a recipe's OUTPUT rather than
         // an input. The depot pre-application path opts Kits back in solely to select a safe pair.
         for (const item of backpack) {
+            const candidateId = String((item as CraftItem).id);
+            if (this.isCraftingAssetReserved(candidateId)) exclude.add(candidateId);
             const normalizedDefindex = item.def_index >= 5726 && item.def_index <= 5801
                 ? fixItem({ defindex: item.def_index, quality: 6 } as any, this.bot.schema).defindex
                 : item.def_index;
@@ -5159,9 +5638,15 @@ export default class MyHandler extends Handler {
         if (this.craftingInFlightIds.has(assetId) || this.heldIntakeFabricators.has(assetId)) return true;
         if ([...this.heldReturnItems.values()].some(ids => ids.includes(assetId))) return true;
         return this.craftingJournal.open().some(job =>
+                    ((job.receiptPending ||
+                        job.stage === 'accepted' ||
+                        (job.stage === 'held' && job.receivedAssetIds.length === 0)) &&
+                        !job.receiptSnapshotIds?.includes(assetId)) ||
             job.receivedAssetIds.includes(assetId) ||
             job.fabricatorAssetIds.includes(assetId) ||
-            job.returnAssetIds.includes(assetId)
+                    job.returnAssetIds.includes(assetId) ||
+                    job.rollbackCandidateIds?.includes(assetId) ||
+                    (job.operations ?? []).some(operation => operation.candidateIds?.includes(assetId))
         );
     }
 
@@ -5222,6 +5707,40 @@ export default class MyHandler extends Handler {
     private holdReturnItems(partnerSteamID64: string, assetIds: string[], reason = 'a return send failed'): void {
         const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
         this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
+        let jobs = this.craftingJournal
+            .open()
+            .filter(
+                job =>
+                    job.partnerSteamId === partnerSteamID64 &&
+                    assetIds.some(id =>
+                        [...job.returnAssetIds, ...job.receivedAssetIds, ...job.fabricatorAssetIds].includes(id)
+                    )
+            );
+        const untracked = assetIds.filter(
+            id =>
+                !jobs.some(job =>
+                    [...job.returnAssetIds, ...job.receivedAssetIds, ...job.fabricatorAssetIds].includes(id)
+                )
+        );
+        if (untracked.length > 0) {
+            const key = `held-${partnerSteamID64}-${randomUUID()}`;
+            this.craftingJournal.recordAccepted(key, partnerSteamID64, 'return-recovery', []);
+            this.craftingJournal.update(key, {
+                processingComplete: true,
+                receivedAssetIds: [
+                    ...new Set([...(this.craftingJournal.get(key)?.receivedAssetIds ?? []), ...untracked])
+                ]
+            });
+            jobs = [...jobs, this.craftingJournal.get(key)];
+        }
+        for (const job of jobs) {
+            const ids = assetIds.filter(id =>
+                [...job.returnAssetIds, ...job.receivedAssetIds, ...job.fabricatorAssetIds].includes(id)
+            );
+            this.craftingJournal.addReturn(job.offerId, ids);
+            this.craftingJournal.update(job.offerId, { stage: 'held' });
+        }
+
         this.bot.messageAdmins(
             `⚠️ Held ${assetIds.length} item(s) for ${partnerSteamID64} after ${reason}: ${assetIds.join(', ')}. Use !retryreturn steamid=${partnerSteamID64}.`,
             []
@@ -5255,12 +5774,48 @@ export default class MyHandler extends Handler {
         theirInventory?: Inventory,
         sourceOfferId?: string
     ): void {
-        if (sourceOfferId && giveIds.length > 0 && this.craftingJournal.get(sourceOfferId)) {
-            this.craftingJournal.update(sourceOfferId, { stage: 'returning', returnAssetIds: giveIds });
-        }
         offer.data('dict', this.craftingDict(giveIds, receiveIds, theirInventory));
         if (giveIds.length > 0) {
-            offer.data('craftingServiceReturn', { assetIds: giveIds, sourceOfferId });
+            let jobs = this.craftingJournal
+                .open()
+                .filter(
+                    job =>
+                        job.partnerSteamId === offer.partner.getSteamID64() &&
+                        (job.offerId === sourceOfferId ||
+                            giveIds.some(id =>
+                                [...job.returnAssetIds, ...job.receivedAssetIds, ...job.fabricatorAssetIds].includes(id)
+                            ))
+                );
+            const untracked = jobs.some(job => job.offerId === sourceOfferId)
+                ? []
+                : giveIds.filter(
+                      id =>
+                          !jobs.some(job =>
+                              [...job.returnAssetIds, ...job.receivedAssetIds, ...job.fabricatorAssetIds].includes(id)
+                          )
+                  );
+            if (untracked.length > 0) {
+                // Manual recovery and legacy chat flows can return assets without a source
+                // intake record. Preserve the explicit destination and balance before sending.
+                const key = `return-${randomUUID()}`;
+                this.craftingJournal.recordAccepted(key, offer.partner.getSteamID64(), 'return-recovery', []);
+                this.craftingJournal.update(key, { receivedAssetIds: untracked, processingComplete: true });
+                jobs = [...jobs, this.craftingJournal.get(key)];
+            }
+            for (const job of jobs) {
+                const ids =
+                    job.offerId === sourceOfferId
+                        ? giveIds
+                        : giveIds.filter(id =>
+                              [...job.returnAssetIds, ...job.receivedAssetIds, ...job.fabricatorAssetIds].includes(id)
+                          );
+                this.craftingJournal.addReturn(job.offerId, ids, job.offerId === sourceOfferId);
+            }
+            offer.data('craftingServiceReturn', {
+                assetIds: giveIds,
+                sourceOfferId,
+                sourceOfferIds: jobs.map(job => job.offerId)
+            });
         }
     }
 
@@ -5313,38 +5868,55 @@ export default class MyHandler extends Handler {
      * permanently failed (see heldReturnItems). Wired to the admin-only !retryreturn command.
      */
     async retryHeldReturn(partnerSteamID64: string): Promise<string> {
-        const heldIds = this.heldReturnItems.get(partnerSteamID64);
-        if (!heldIds || heldIds.length === 0) {
-            return `❌ No held return items found for steamID ${partnerSteamID64}.`;
-        }
-
-        const backpack = await this.freshGCBackpack();
-        const stillOwned = heldIds.filter(id => backpack.some((i: any) => String(i.id) === id));
-        const missing = heldIds.filter(id => !stillOwned.includes(id));
-        if (stillOwned.length === 0) {
-            this.heldReturnItems.delete(partnerSteamID64);
-            return `❌ None of the held items (${heldIds.join(', ')}) are still in the bot's backpack — already sent or traded away? Cleared the hold.`;
-        }
-
-        const partner = new SteamID(partnerSteamID64);
-        // See fetchTradeUrlToken on handleCraftingIntake above.
-        const token = await fetchTradeUrlToken(partnerSteamID64);
-        const returnOffer = this.bot.manager.createOffer(partner, token);
-        this.prepareCraftingOffer(returnOffer, stillOwned, []);
-        stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
-        returnOffer.setMessage(`Here are your item(s) from the crafting service.`);
-
+        if (this.retryingReturnPartners.has(partnerSteamID64)) return '⏳ Return reconciliation is already running.';
+        this.retryingReturnPartners.add(partnerSteamID64);
         try {
+            await this.reconcileCraftingReturns(partnerSteamID64);
+            const jobs = this.craftingJournal.open().filter(job => job.partnerSteamId === partnerSteamID64);
+            const activeIds = new Set(
+                jobs.flatMap(job =>
+                    (job.returnAttempts ?? [])
+                        .filter(attempt => ['active', 'pending', 'reconcile'].includes(attempt.state))
+                        .flatMap(attempt => attempt.assetIds)
+                )
+            );
+            jobs.filter(job => job.stage === 'returning' && !job.returnAttempts?.length).forEach(job =>
+                job.returnAssetIds.forEach(id => activeIds.add(id))
+            );
+            const heldIds = [
+                ...new Set([
+                    ...(this.heldReturnItems.get(partnerSteamID64) ?? []),
+                    ...jobs.filter(job => job.stage === 'held').flatMap(job => job.returnAssetIds)
+                ])
+            ].filter(id => !activeIds.has(id));
+            if (heldIds.length === 0)
+                return `⏳ No unsent return items for ${partnerSteamID64}; existing offers are tracked until delivery.`;
+            const backpack = (await this.freshGCBackpack()) as CraftItem[];
+            const owned = new Set(backpack.map(item => String(item.id)));
+            const stillOwned = heldIds.filter(id => owned.has(id));
+            const missing = heldIds.filter(id => !owned.has(id));
+            // Absence is never proof of delivery. Keep the full unresolved balance durable.
+            this.heldReturnItems.set(partnerSteamID64, heldIds);
+            if (stillOwned.length === 0)
+                return `⏳ ${missing.length} item(s) await Steam receipt/asset-ID reconciliation; nothing was discarded.`;
+            const partner = new SteamID(partnerSteamID64);
+            const token = await fetchTradeUrlToken(partnerSteamID64);
+            const returnOffer = this.bot.manager.createOffer(partner, token);
+            this.prepareCraftingOffer(returnOffer, stillOwned, []);
+            stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
+            returnOffer.setMessage('Here are your item(s) from the crafting service.');
             const status = await this.bot.trades.sendOffer(returnOffer);
-            if (status === "pending") void this.bot.trades.acceptConfirmation(returnOffer);
-            this.heldReturnItems.delete(partnerSteamID64);
+            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
+            if (missing.length > 0) this.heldReturnItems.set(partnerSteamID64, missing);
+            else this.heldReturnItems.delete(partnerSteamID64);
             return (
-                `🔄 Retried return offer to ${partnerSteamID64} with ${stillOwned.length} item(s)` +
-                (missing.length > 0 ? ` (skipped ${missing.length} no-longer-owned item(s): ${missing.join(", ")})` : "") +
-                `.`
+                `🔄 Sent return offer ${returnOffer.id} to ${partnerSteamID64} with ${stillOwned.length} item(s); ` +
+                `${missing.length} remain under reconciliation. Delivery is pending acceptance.`
             );
         } catch (err) {
             return `❌ Retry failed: ${this.describeSendError(err)}. Items remain held.`;
+        } finally {
+            this.retryingReturnPartners.delete(partnerSteamID64);
         }
     }
 
@@ -5417,6 +5989,8 @@ export default class MyHandler extends Handler {
         if (this.retryingHeldItems) return;
         this.retryingHeldItems = true;
         try {
+            await this.reconcileCraftingReturns();
+            await this.reconcileCraftingOperations();
             const heldByPartner = new Map<string, string[]>();
             for (const [fabAssetId, partnerSteamID64] of this.heldIntakeFabricators) {
                 const list = heldByPartner.get(partnerSteamID64) ?? [];

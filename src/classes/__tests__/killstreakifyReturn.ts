@@ -39,6 +39,8 @@ function fixture() {
             trades: { sendOffer: jest.fn(() => Promise.resolve('sent')), acceptConfirmation: jest.fn() },
             messageAdmins: jest.fn()
         },
+        craftingJournal: { get: jest.fn() },
+        reconcileCraftingOperations: jest.fn().mockResolvedValue(undefined),
         freshGCBackpack: jest.fn(() => {
             events.push('read');
             return Promise.resolve([{ id: 'result' }, { id: 'unmatched' }]);

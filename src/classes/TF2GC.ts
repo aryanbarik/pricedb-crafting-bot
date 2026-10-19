@@ -1,6 +1,26 @@
 import Bot from './Bot';
+import {
+    CraftItem,
+    CraftOperation,
+    OutputExpectation,
+    operationOutputs,
+    recipeOutput,
+    originalItemId,
+    matchesOutput,
+    operationPartialOutput
+} from '../lib/craftingReconciliation';
+import { randomUUID } from 'crypto';
+import { EventEmitter } from 'events';
+import { sheensData, killstreakersData } from '../lib/data';
 import log from '../lib/logger';
-import { decodeFabricatorSlots, buildCraftComponents, findBotComponents, GCBackpackItem, KS_KIT_DEFINDEXES } from '../lib/fabricatorSlots';
+import {
+    decodeFabricatorSlots,
+    buildCraftComponents,
+    findBotComponents,
+    GCBackpackItem,
+    KS_KIT_DEFINDEXES,
+    getItemAttrValue
+} from '../lib/fabricatorSlots';
 
 export enum Attributes {
     Paint = 1031,
@@ -27,8 +47,18 @@ export type SubTokenType =
     | 'melee'
     | 'pda2';
 
+interface RecipeClient extends EventEmitter {
+    backpack: CraftItem[];
+    fulfillDynamicRecipeComponent(id: string, components: { subject_item_id: string; attribute_index: number }[]): void;
+    applyStrangifierOrUnusualifier(weaponId: string, toolId: string): void;
+    applyToolToBaseItem(kitId: string, defindex: number): void;
+}
+
 type Job = {
+    sourceOfferId?: string;
+    allowPartial?: boolean;
     type:
+        | 'refreshBackpack'
         | 'smelt'
         | 'combine'
         | 'combineWeapon'
@@ -180,13 +210,13 @@ export default class TF2GC {
      */
     craftFabricator(
         fabricatorId: string,
-        options: { componentIds?: string[]; selfFill?: boolean; excludeIds?: string[] },
+        options: { componentIds?: string[]; selfFill?: boolean; excludeIds?: string[]; sourceOfferId?: string },
         fabricatorCallback?: (
             err: Error | null,
             result?: { kitId?: string; partialFabId?: string; selfFilledIds?: string[]; stillMissing?: string[] }
         ) => void
     ): void {
-        const { componentIds, selfFill, excludeIds } = options;
+        const { componentIds, selfFill, excludeIds, sourceOfferId } = options;
         const provided = componentIds?.length ?? 0;
         const reserved = excludeIds?.length ?? 0;
         const selfFillNote = selfFill ? `, self-fill enabled, ${reserved} id(s) reserved` : '';
@@ -195,6 +225,7 @@ export default class TF2GC {
         );
         this.newJob({
             type: 'craftFabricator',
+            sourceOfferId,
             fabricatorId,
             componentIds,
             selfFill,
@@ -272,7 +303,14 @@ export default class TF2GC {
             .then(() => {
                 let func;
 
-                if (job.type === 'combineWeapon') {
+                if (job.type === 'refreshBackpack') {
+                    func = () => {
+                        void this.refreshBackpackSession().then(
+                            () => this.finishedProcessingJob(),
+                            (err: Error) => this.finishedProcessingJob(err)
+                        );
+                    };
+                } else if (job.type === 'combineWeapon') {
                     func = this.handleCraftJobWeapon.bind(this, job);
                 } else if (job.type === 'combineClassWeapon') {
                     func = this.handleCraftJobClassWeapon.bind(this, job);
@@ -302,6 +340,9 @@ export default class TF2GC {
                 }
             })
             .catch((err: Error) => {
+                job.fabricatorCallback?.(err);
+                job.kitCallback?.(err);
+                job.strangifyCallback?.(err);
                 this.finishedProcessingJob(err);
             });
     }
@@ -417,24 +458,13 @@ export default class TF2GC {
 
     private handleCraftFabricatorJob(job: Job): void {
         const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
-        const FABRICATOR_DEFINDEXES = [20002, 20003];
-
-        // Asset IDs change when a trade completes — try original ID first, then fall back to defindex search
-        let fabricator = backpack?.find(i => i.id === job.fabricatorId);
+        // Accepted-trade receipts already resolved the post-trade ID. Never substitute a
+        // different customer's fabricator merely because it is the only one in the backpack.
+        const fabricator = backpack?.find(item => String(item.id) === job.fabricatorId);
         if (!fabricator) {
-            const candidates = (backpack ?? []).filter(i => FABRICATOR_DEFINDEXES.includes(i.def_index));
-            if (candidates.length === 1) {
-                fabricator = candidates[0];
-                log.debug(`craftFabricator: original ID ${job.fabricatorId} changed after trade; found by defindex as ${fabricator.id}`);
-            } else if (candidates.length > 1) {
-                log.warn(`craftFabricator: fabricator ${job.fabricatorId} not found by ID; ${candidates.length} candidates by defindex, ambiguous`);
-                if (job.fabricatorCallback) job.fabricatorCallback(new Error('Fabricator not found in backpack (ambiguous — multiple fabricators)'));
-                return this.finishedProcessingJob(new Error('Fabricator not found (ambiguous)'));
-            } else {
-                log.warn(`craftFabricator: fabricator ${job.fabricatorId} not found in backpack`);
-                if (job.fabricatorCallback) job.fabricatorCallback(new Error('Fabricator not found in backpack'));
-                return this.finishedProcessingJob(new Error('Fabricator not found'));
-            }
+            const err = new Error(`Fabricator ${job.fabricatorId} missing; receipt reconciliation required`);
+            job.fabricatorCallback?.(err);
+            return this.finishedProcessingJob(err);
         }
 
         let components: { subject_item_id: string; attribute_index: number }[];
@@ -569,465 +599,258 @@ export default class TF2GC {
             log.debug(`craftFabricator: partial fill — ${incompleteSlots.length} slot(s) not fully covered; proceeding with available components`);
         }
 
-        // Snapshot kit IDs the bot already owns so the timeout fallback can find only NEWLY crafted kits
-        const preExistingKitIds = new Set<string>(
-            ((this.bot.tf2 as any).backpack as TF2GCItem[] ?? [])
-                .filter(i => KS_KIT_DEFINDEXES.includes(i.def_index))
-                .map(i => String(i.id))
+        const expected = recipeOutput(fabricator as unknown as CraftItem);
+        this.observeOperation(
+            { ...job, allowPartial: incompleteSlots.length > 0 },
+            [String(fabricator.id), ...components.map(c => String(c.subject_item_id))],
+            expected,
+            () => this.recipeClient.fulfillDynamicRecipeComponent(fabricator.id, components),
+            (err, outputId, partial) => {
+                job.fabricatorCallback?.(
+                    err,
+                    outputId
+                        ? {
+                              ...(partial ? { partialFabId: outputId } : { kitId: outputId }),
+                              selfFilledIds,
+                              stillMissing
+                          }
+                        : undefined
+                );
+            },
+            fabricator as unknown as CraftItem
         );
-        // Snapshot fabricator IDs the bot already owns so a NEW fabricator-defindex item appearing
-        // after this craft (the GC sometimes re-issues a partially-filled fabricator under a new id
-        // instead of updating it in place via itemChanged/SO_Update) can be told apart from one that
-        // was already there.
-        const preExistingFabIds = new Set<string>(
-            ((this.bot.tf2 as any).backpack as TF2GCItem[] ?? [])
-                .filter(i => FABRICATOR_DEFINDEXES.includes(i.def_index))
-                .map(i => String(i.id))
-        );
+    }
 
-        log.debug(`Sending FulfillDynamicRecipeComponent for fabricator ${fabricator.id} with ${components.length} component(s)`);
-        (this.bot.tf2 as any).fulfillDynamicRecipeComponent(fabricator.id, components);
+    private get recipeClient(): RecipeClient {
+        return this.bot.tf2 as unknown as RecipeClient;
+    }
 
-        // Listen for full craft (itemAcquired = kit) OR partial fill (itemChanged = fab updated in place).
-        // Use raw listeners with a 30-second timeout (listenForEvent is hardcoded to 10s, too short).
+    /** One observer owns the GC operation until consumption and output identity agree. */
+    private observeOperation(
+        job: Job,
+        inputIds: string[],
+        expected: OutputExpectation,
+        send: () => void,
+        callback: (err: Error | null, outputId?: string, partial?: boolean) => void,
+        fabricator?: CraftItem,
+        retainedInputId?: string
+    ): void {
+        const operation: CraftOperation = {
+            id: randomUUID(),
+            kind: job.type,
+            inputIds,
+            expected,
+            retainedInputId,
+            beforeIds: this.recipeClient.backpack.map(item => String(item.id)),
+            state: 'pending',
+            partialFabricator: fabricator
+                ? {
+                      id: String(fabricator.id),
+                      originalId: originalItemId(fabricator),
+                      defindex: fabricator.def_index,
+                      deferUntilRefresh: !job.allowPartial,
+                      fulfilled: Object.fromEntries(
+                          decodeFabricatorSlots(fabricator)
+                              .filter(slot => !KS_KIT_DEFINDEXES.includes(slot.itemDefIndex))
+                              .map(slot => [String(slot.attributeIndex), slot.numFulfilled])
+                      )
+                  }
+                : undefined,
+            startedAt: new Date().toISOString()
+        };
+        // This synchronous write must succeed before a destructive GC request is sent.
+        const sourceOfferId = this.bot.handler.beginCraftingOperation(operation, job.sourceOfferId);
         let settled = false;
-        const fabricatorId = String(fabricator.id);
-
+        const events = ['itemAcquired', 'itemRemoved', 'itemChanged'];
         const cleanup = (): void => {
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            this.bot.tf2.removeListener('itemChanged', onItemChanged);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+            clearTimeout(timeout);
+            events.forEach(event => this.recipeClient.removeListener(event, changed));
+            this.bot.tf2.removeListener('disconnectedFromGC', disconnected);
         };
-
-        const onItemAcquired = (item: TF2GCItem): void => {
-            log.debug(`craftFabricator: itemAcquired defindex=${item.def_index} id=${item.id}`);
-            if (KS_KIT_DEFINDEXES.includes(item.def_index)) {
-                if (settled) return;
-                settled = true;
-                clearTimeout(kitTimeout);
-                cleanup();
-                log.debug(`craftFabricator: received kit ${item.id} (defindex ${item.def_index})`);
-                if (job.fabricatorCallback) {
-                    job.fabricatorCallback(null, { kitId: String(item.id), selfFilledIds, stillMissing });
-                }
-                this.finishedProcessingJob();
-                return;
-            }
-            if (FABRICATOR_DEFINDEXES.includes(item.def_index) && !preExistingFabIds.has(String(item.id))) {
-                // Partial fill — GC re-issued the fabricator under a new id instead of updating it
-                // in place. Use the NEW id, not the stale original one.
-                if (settled) return;
-                settled = true;
-                clearTimeout(kitTimeout);
-                cleanup();
-                log.debug(`craftFabricator: partial fill — fab re-issued as new id ${item.id} (was ${fabricatorId})`);
-                if (job.fabricatorCallback) {
-                    job.fabricatorCallback(null, { partialFabId: String(item.id), selfFilledIds, stillMissing });
-                }
-                this.finishedProcessingJob();
-            }
-        };
-
-        const onItemChanged = (oldItem: TF2GCItem, newItem: TF2GCItem): void => {
-            if (String(newItem.id) !== fabricatorId) return;
+        const finish = (err: Error | null, outputId?: string, partial = false): void => {
             if (settled) return;
             settled = true;
-            clearTimeout(kitTimeout);
             cleanup();
-            log.debug(`craftFabricator: partial fill — fab ${fabricatorId} updated in place`);
-            if (job.fabricatorCallback) {
-                job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds, stillMissing });
-            }
-            this.finishedProcessingJob();
-        };
-
-        const onDisconnected = (): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(kitTimeout);
-            cleanup();
-            const err = new Error('Disconnected from TF2 GC');
-            if (job.fabricatorCallback) job.fabricatorCallback(err);
+            const backpack = this.recipeClient.backpack;
+            const consumed = inputIds.filter(id => !backpack.some(item => String(item.id) === id));
+            this.bot.handler.finishCraftingOperation(sourceOfferId, operation.id, outputId, consumed);
+            callback(err, outputId, partial);
             this.finishedProcessingJob(err);
         };
-
-        const kitTimeout = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            // Last-chance: is the fab still present (partial fill event missed) or gone (full craft event missed)?
-            const currentBackpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
-            const updatedFab = currentBackpack?.find(i => String(i.id) === fabricatorId);
-            if (!updatedFab) {
-                // Fab gone — full craft succeeded but itemAcquired was missed; look for the new kit
-                const newKit = currentBackpack?.find(
-                    i => KS_KIT_DEFINDEXES.includes(i.def_index) && !preExistingKitIds.has(String(i.id))
-                );
-                if (newKit) {
-                    log.debug(`craftFabricator: timeout — fab gone, found kit ${newKit.id} in backpack`);
-                    if (job.fabricatorCallback) {
-                        job.fabricatorCallback(null, { kitId: String(newKit.id), selfFilledIds, stillMissing });
-                    }
-                } else {
-                    // No new kit either — check whether the fabricator was re-issued under a new id
-                    // (partial fill) before declaring hard failure.
-                    const newFab = currentBackpack?.find(
-                        i => FABRICATOR_DEFINDEXES.includes(i.def_index) && !preExistingFabIds.has(String(i.id))
-                    );
-                    if (newFab) {
-                        log.debug(`craftFabricator: timeout — fab gone, found re-issued fab ${newFab.id} in backpack (partial fill)`);
-                        if (job.fabricatorCallback) {
-                            job.fabricatorCallback(null, {
-                                partialFabId: String(newFab.id),
-                                selfFilledIds,
-                                stillMissing
-                            });
-                        }
-                    } else {
-                        const err = new Error('Timed out — fabricator gone but no kit found');
-                        log.warn(`craftFabricator: ${err.message} (fab ${fabricatorId})`);
-                        if (job.fabricatorCallback) job.fabricatorCallback(err);
-                    }
-                }
-            } else {
-                // Fab still present — partial fill happened but itemChanged was missed
-                log.debug(`craftFabricator: timeout — fab ${fabricatorId} still present, treating as partial fill`);
-                if (job.fabricatorCallback) {
-                    job.fabricatorCallback(null, { partialFabId: fabricatorId, selfFilledIds, stillMissing });
-                }
+        const reconcile = (afterRefresh = false): boolean => {
+            if (settled) return true;
+            const backpack = this.recipeClient.backpack;
+            const excluded = this.bot.handler.craftingOutputExclusions(operation.id);
+            if (retainedInputId) excluded.delete(retainedInputId);
+            const candidates = backpack.filter(
+                item =>
+                    !operation.beforeIds.includes(String(item.id)) &&
+                    !excluded.has(String(item.id)) &&
+                    matchesOutput(item, expected)
+            );
+            this.bot.handler.reserveCraftingCandidates(
+                sourceOfferId,
+                operation.id,
+                candidates.map(item => String(item.id))
+            );
+            const outputs = operationOutputs(operation, backpack, excluded);
+            if (outputs.length === 1) {
+                finish(null, String(outputs[0].id));
+                return true;
             }
-            this.finishedProcessingJob();
+            const partial = operationPartialOutput(operation, backpack, excluded, afterRefresh);
+            if (partial) {
+                finish(null, String(partial.id), true);
+                return true;
+            }
+            return false;
+        };
+        // SO_Create and SO_Destroy can arrive in either order; inspect after this event turn.
+        const changed = (): void => {
+            setImmediate(() => reconcile());
+        };
+        const disconnected = (): void => finish(new Error('GC disconnected; operation held for reconciliation'));
+        const timeout = setTimeout(() => {
+            cleanup();
+            void this.refreshBackpackSession()
+                .catch(err => log.warn('Operation reconciliation refresh failed:', err))
+                .then(() => {
+                    if (!reconcile(true))
+                        finish(new Error('GC operation awaiting output reconciliation; do not replay'));
+                });
         }, 30000);
-
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemAcquired', onItemAcquired);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemChanged', onItemChanged);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
+        events.forEach(event => this.recipeClient.on(event, changed));
+        this.bot.tf2.once('disconnectedFromGC', disconnected);
+        const target = expected.attributes[2012] ?? expected.defindexes[0];
+        const weaponName = this.bot.schema.getItemByDefindex(target)?.item_name ?? String(target);
+        const sheen =
+            Object.keys(sheensData).find(name => sheensData[name] === `ks-${expected.attributes[2014]}`) ?? 'none';
+        const killstreaker =
+            Object.keys(killstreakersData).find(
+                name => killstreakersData[name] === `ke-${expected.attributes[2013]}`
+            ) ?? 'none';
+        log.info(
+            `[craftingService] GC operation ${operation.id} source=${
+                sourceOfferId ?? 'bot'
+            } weapon=${weaponName} sheen=${sheen} killstreaker=${killstreaker} inputs=${inputIds.join(
+                ','
+            )} expected=${JSON.stringify(expected)}`
+        );
+        try {
+            send();
+        } catch (err) {
+            finish(err as Error);
+        }
     }
 
     private handleApplyKSKitJob(job: Job): void {
-        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
-
-        const kit = backpack?.find(i => i.id === job.kitId);
-        if (!kit) {
-            const err = new Error(`applyKSKit: kit ${job.kitId} not found in backpack`);
-            log.warn(err.message);
-            if (job.kitCallback) job.kitCallback(err);
+        const backpack = this.recipeClient.backpack;
+        const kit = backpack.find(item => String(item.id) === job.kitId);
+        const weapon = backpack.find(item => String(item.id) === job.weaponId);
+        if (!kit || !weapon) {
+            const err = new Error('Kit or weapon missing before application');
+            job.kitCallback?.(err);
             return this.finishedProcessingJob(err);
         }
-        const weapon = backpack?.find(i => i.id === job.weaponId);
-        if (!weapon) {
-            const err = new Error(`applyKSKit: weapon ${job.weaponId} not found in backpack`);
-            log.warn(err.message);
-            if (job.kitCallback) job.kitCallback(err);
-            return this.finishedProcessingJob(err);
+        const attributes: Record<string, number> = {};
+        for (const key of [2025, 2013, 2014]) {
+            const value = getItemAttrValue(kit, key);
+            if (value !== null) attributes[key] = value;
         }
-
-        let settled = false;
-        const originalWeaponId = String(weapon.id);
-
-        const cleanup = (): void => {
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            // @ts-ignore
-            this.bot.tf2.removeListener('itemChanged', onItemChanged);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
-            // @ts-ignore
-            this.bot.tf2.removeListener('applyXifierResponse', onXifierResponse);
-        };
-
-        // Log the GC response code — 0 typically means accepted
-        const onXifierResponse = (result: number): void => {
-            log.debug(`applyKSKit: applyXifierResponse result=${result} (kit ${kit.id})`);
-        };
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.once('applyXifierResponse', onXifierResponse);
-
-        log.debug(`applyKSKit: applying kit ${kit.id} to weapon ${weapon.id} via ApplyXifier`);
-        (this.bot.tf2 as any).applyStrangifierOrUnusualifier(weapon.id, kit.id);
-
-        // Catches weapon created as a new GC item (kit consumed + new weapon spawned)
-        const onItemAcquired = (item: TF2GCItem): void => {
-            const ktAttr = ((item as unknown as GCBackpackItem).attribute ?? []).find(a => a.def_index === 2025);
-            if (!ktAttr) return;
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            log.debug(`applyKSKit: new KS weapon acquired ${item.id} (defidx ${item.def_index})`);
-            if (job.kitCallback) job.kitCallback(null, String(item.id));
-            this.finishedProcessingJob();
-        };
-
-        // Catches weapon modified in-place via SO_Update (same ID, new kt-tier attribute)
-        const onItemChanged = (oldItem: TF2GCItem, newItem: TF2GCItem): void => {
-            if (String(newItem.id) !== originalWeaponId) return;
-            const hasKt = ((newItem as unknown as GCBackpackItem).attribute ?? []).some(a => a.def_index === 2025);
-            if (!hasKt) return;
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            log.debug(`applyKSKit: weapon ${originalWeaponId} modified in-place with kt attr`);
-            if (job.kitCallback) job.kitCallback(null, originalWeaponId);
-            this.finishedProcessingJob();
-        };
-
-        const onDisconnected = (): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            const err = new Error('Disconnected from TF2 GC during kit application');
-            if (job.kitCallback) job.kitCallback(err);
-            this.finishedProcessingJob(err);
-        };
-
-        const applyTimeout = setTimeout(() => {
-            if (settled) return;
-            // Last-chance check: weapon modified in-place but event was missed
-            const updatedWeapon = ((this.bot.tf2 as any).backpack as TF2GCItem[])?.find(i => i.id === originalWeaponId);
-            const hasKt = updatedWeapon
-                ? ((updatedWeapon as unknown as GCBackpackItem).attribute ?? []).some(a => a.def_index === 2025)
-                : false;
-            settled = true;
-            cleanup();
-            if (hasKt) {
-                log.debug(`applyKSKit: weapon ${originalWeaponId} modified in place (caught at timeout)`);
-                if (job.kitCallback) job.kitCallback(null, originalWeaponId);
-                this.finishedProcessingJob();
-            } else {
-                const err = new Error(`applyKSKit: timed out waiting for kit application on weapon ${originalWeaponId}`);
-                log.warn(err.message);
-                if (job.kitCallback) job.kitCallback(err);
-                this.finishedProcessingJob(err);
-            }
-        }, 30000);
-
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemAcquired', onItemAcquired);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemChanged', onItemChanged);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
+        if (attributes[2025] === undefined) {
+            const normalized = this.bot.schema.getItemByDefindex(kit.def_index);
+            attributes[2025] =
+                kit.def_index === 6526
+                    ? 3
+                    : kit.def_index === 6523
+                    ? 2
+                    : /Specialized/.test(normalized?.item_name ?? '')
+                    ? 2
+                    : /Professional/.test(normalized?.item_name ?? '')
+                    ? 3
+                    : 1;
+        }
+        this.observeOperation(
+            job,
+            [String(kit.id), String(weapon.id)],
+            {
+                defindexes: [weapon.def_index],
+                attributes,
+                originalId: originalItemId(weapon)
+            },
+            () => this.recipeClient.applyStrangifierOrUnusualifier(weapon.id, kit.id),
+            (err, id) => job.kitCallback?.(err, id),
+            undefined,
+            String(weapon.id)
+        );
     }
 
-    /**
-     * Applies a kit to a stock (Normal-quality) weapon, addressed by defindex rather than asset id.
-     *
-     * Differs from handleApplyKSKitJob in three ways, all forced by what a base item is:
-     *
-     * - There is nothing to look up in the backpack for the target. Stock weapons are granted to
-     *   every account and are not economy items, so they never appear in the SO cache. Confirmed
-     *   here: `!dumpattrs name=Scattergun` finds nothing, and GetPlayerItems returns no quality-0
-     *   items across inventories of 198, 1,064 and 2,842 items.
-     * - Success can ONLY arrive as itemAcquired. The GC promotes a copy to Unique and delivers it as
-     *   a new item, leaving the stock weapon untouched, so there is no in-place itemChanged to watch
-     *   and no original id to re-check at timeout.
-     * - There is no response message to wait on. Valve defines k_EMsgGCApplyXifierResponse (1083)
-     *   for ordinary items but nothing paired with 1091, so a rejected request is silent and shows
-     *   up only as the timeout below.
-     */
     private handleApplyKSKitToBaseItemJob(job: Job): void {
-        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
-
-        const kit = backpack?.find(i => i.id === job.kitId);
-        if (!kit) {
-            const err = new Error(`applyKSKitToBaseItem: kit ${job.kitId} not found in backpack`);
-            log.warn(err.message);
-            if (job.kitCallback) job.kitCallback(err);
+        const kit = this.recipeClient.backpack.find(item => String(item.id) === job.kitId);
+        if (!kit || job.baseitemDefIndex === undefined) {
+            const err = new Error('Kit or base target missing before application');
+            job.kitCallback?.(err);
             return this.finishedProcessingJob(err);
         }
-        if (job.baseitemDefIndex === undefined) {
-            const err = new Error('applyKSKitToBaseItem: no base item defindex given');
-            log.warn(err.message);
-            if (job.kitCallback) job.kitCallback(err);
-            return this.finishedProcessingJob(err);
-        }
-
-        let settled = false;
-
-        const cleanup = (): void => {
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+        const attributes: Record<string, number> = {
+            2025: getItemAttrValue(kit, 2025) ?? (kit.def_index === 6526 ? 3 : kit.def_index === 6523 ? 2 : 1)
         };
-
-        log.debug(
-            `applyKSKitToBaseItem: applying kit ${kit.id} to base item defindex ${job.baseitemDefIndex} via ApplyBaseItemXifier`
+        for (const key of [2013, 2014]) {
+            const value = getItemAttrValue(kit, key);
+            if (value !== null) attributes[key] = value;
+        }
+        // Normalize stock and upgradeable aliases with the same schema normalizer used for kits.
+        const base = job.baseitemDefIndex;
+        const schemaItems = this.bot.schema.getItemByDefindex(base);
+        const name = schemaItems?.item_name;
+        const schemaItemsRaw = (
+            this.bot.schema as unknown as {
+                raw: {
+                    schema: {
+                        items: { item_name: string; defindex: number }[];
+                    };
+                };
+            }
+        ).raw.schema.items;
+        const aliases = name
+            ? schemaItemsRaw.filter(item => item.item_name === name).map(item => item.defindex)
+            : [base];
+        this.observeOperation(
+            job,
+            [String(kit.id)],
+            {
+                defindexes: [...new Set<number>([base, ...aliases])],
+                attributes,
+                newlyCreated: true
+            },
+            () => this.recipeClient.applyToolToBaseItem(kit.id, base),
+            (err, id) => job.kitCallback?.(err, id)
         );
-        (this.bot.tf2 as any).applyToolToBaseItem(kit.id, job.baseitemDefIndex);
-
-        const onItemAcquired = (item: TF2GCItem): void => {
-            const ktAttr = ((item as unknown as GCBackpackItem).attribute ?? []).find(a => a.def_index === 2025);
-            if (!ktAttr) return;
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            log.debug(
-                `applyKSKitToBaseItem: new KS weapon acquired ${item.id} (defidx ${item.def_index}) from base item ${job.baseitemDefIndex}`
-            );
-            if (job.kitCallback) job.kitCallback(null, String(item.id));
-            this.finishedProcessingJob();
-        };
-
-        const onDisconnected = (): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            const err = new Error('Disconnected from TF2 GC during base-item kit application');
-            if (job.kitCallback) job.kitCallback(err);
-            this.finishedProcessingJob(err);
-        };
-
-        const applyTimeout = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            // Silence here is ambiguous by design — with no response message, a defindex the GC
-            // rejected looks exactly like one it never received. The stock/"Upgradeable" defindex
-            // pair (Scattergun 13 vs 200) is the first thing to suspect if this fires.
-            const err = new Error(
-                `applyKSKitToBaseItem: timed out waiting for a new killstreak weapon from base item defindex ${job.baseitemDefIndex} (kit ${job.kitId}) — the GC sends no response to 1091, so this may mean the defindex was rejected`
-            );
-            log.warn(err.message);
-            if (job.kitCallback) job.kitCallback(err);
-            this.finishedProcessingJob(err);
-        }, 30000);
-
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemAcquired', onItemAcquired);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
     }
 
     private handleApplyStrangifierJob(job: Job): void {
-        const backpack = (this.bot.tf2 as any).backpack as TF2GCItem[];
-
-        const strangifier = backpack?.find(i => i.id === job.strangifierId);
-        if (!strangifier) {
-            const err = new Error(`applyStrangifier: strangifier ${job.strangifierId} not found in backpack`);
-            log.warn(err.message);
-            if (job.strangifyCallback) job.strangifyCallback(err);
+        const backpack = this.recipeClient.backpack;
+        const tool = backpack.find(item => String(item.id) === job.strangifierId);
+        const weapon = backpack.find(item => String(item.id) === job.weaponId);
+        if (!tool || !weapon) {
+            const err = new Error('Strangifier or weapon missing before application');
+            job.strangifyCallback?.(err);
             return this.finishedProcessingJob(err);
         }
-        const weapon = backpack?.find(i => i.id === job.weaponId);
-        if (!weapon) {
-            const err = new Error(`applyStrangifier: weapon ${job.weaponId} not found in backpack`);
-            log.warn(err.message);
-            if (job.strangifyCallback) job.strangifyCallback(err);
-            return this.finishedProcessingJob(err);
-        }
-
-        let settled = false;
-        const originalWeaponId = String(weapon.id);
-
-        const cleanup = (): void => {
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            this.bot.tf2.removeListener('itemAcquired', onItemAcquired);
-            // @ts-ignore
-            this.bot.tf2.removeListener('itemChanged', onItemChanged);
-            this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
-            // @ts-ignore
-            this.bot.tf2.removeListener('applyXifierResponse', onXifierResponse);
-        };
-
-        // Log the GC response code — 0 typically means accepted
-        const onXifierResponse = (result: number): void => {
-            log.debug(`applyStrangifier: applyXifierResponse result=${result} (strangifier ${strangifier.id})`);
-        };
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.once('applyXifierResponse', onXifierResponse);
-
-        log.debug(`applyStrangifier: applying strangifier ${strangifier.id} to weapon ${weapon.id} via ApplyXifier`);
-        (this.bot.tf2 as any).applyStrangifierOrUnusualifier(weapon.id, strangifier.id);
-
-        // Strangifying makes the weapon Strange quality (11) — either a new GC item is spawned
-        // (strangifier consumed + new weapon issued) or the same item is updated in-place.
-        const isStrange = (item: TF2GCItem): boolean => (item as unknown as { quality?: number }).quality === 11;
-
-        // Catches weapon created as a new GC item (strangifier consumed + new weapon spawned)
-        const onItemAcquired = (item: TF2GCItem): void => {
-            if (!isStrange(item)) return;
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            log.debug(`applyStrangifier: new Strange weapon acquired ${item.id} (defidx ${item.def_index})`);
-            if (job.strangifyCallback) job.strangifyCallback(null, String(item.id));
-            this.finishedProcessingJob();
-        };
-
-        // Catches weapon modified in-place via SO_Update (same ID, quality changed to Strange)
-        const onItemChanged = (oldItem: TF2GCItem, newItem: TF2GCItem): void => {
-            if (String(newItem.id) !== originalWeaponId) return;
-            if (!isStrange(newItem)) return;
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            log.debug(`applyStrangifier: weapon ${originalWeaponId} modified in-place to Strange quality`);
-            if (job.strangifyCallback) job.strangifyCallback(null, originalWeaponId);
-            this.finishedProcessingJob();
-        };
-
-        const onDisconnected = (): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(applyTimeout);
-            cleanup();
-            const err = new Error('Disconnected from TF2 GC during strangifier application');
-            if (job.strangifyCallback) job.strangifyCallback(err);
-            this.finishedProcessingJob(err);
-        };
-
-        const applyTimeout = setTimeout(() => {
-            if (settled) return;
-            // Last-chance check: weapon modified in-place but event was missed
-            const updatedWeapon = ((this.bot.tf2 as any).backpack as TF2GCItem[])?.find(i => i.id === originalWeaponId);
-            const strange = updatedWeapon ? isStrange(updatedWeapon) : false;
-            settled = true;
-            cleanup();
-            if (strange) {
-                log.debug(`applyStrangifier: weapon ${originalWeaponId} modified in place (caught at timeout)`);
-                if (job.strangifyCallback) job.strangifyCallback(null, originalWeaponId);
-                this.finishedProcessingJob();
-            } else {
-                const err = new Error(`applyStrangifier: timed out waiting for strangifier application on weapon ${originalWeaponId}`);
-                log.warn(err.message);
-                if (job.strangifyCallback) job.strangifyCallback(err);
-                this.finishedProcessingJob(err);
-            }
-        }, 30000);
-
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemAcquired', onItemAcquired);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('itemChanged', onItemChanged);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        this.bot.tf2.on('disconnectedFromGC', onDisconnected);
+        this.observeOperation(
+            job,
+            [String(tool.id), String(weapon.id)],
+            {
+                defindexes: [weapon.def_index],
+                attributes: {},
+                quality: 11,
+                originalId: originalItemId(weapon)
+            },
+            () => this.recipeClient.applyStrangifierOrUnusualifier(weapon.id, tool.id),
+            (err, id) => job.strangifyCallback?.(err, id),
+            undefined,
+            String(weapon.id)
+        );
     }
 
     private handleCraftJobWeapon(job: Job): void {
@@ -1429,6 +1252,12 @@ export default class TF2GC {
      * This is deliberately an exceptional recovery operation, not a normal inventory read.
      */
     forceFreshBackpack(): Promise<void> {
+        return new Promise((resolve, reject) =>
+            this.newJob({ type: 'refreshBackpack', callback: err => (err ? reject(err) : resolve()) })
+        );
+    }
+
+    private refreshBackpackSession(): Promise<void> {
         if (!this.bot.tf2.haveGCSession) {
             return this.ensureFreshBackpack();
         }

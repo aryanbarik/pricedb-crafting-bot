@@ -1,8 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 import writeFileAtomic from 'write-file-atomic';
+import { CraftOperation, ReturnAttempt } from './craftingReconciliation';
 
-export type CraftJobStage = 'accepted' | 'queued' | 'processing' | 'awaiting_components' | 'returning' | 'completed' | 'held';
+export type CraftJobStage =
+    | 'accepted'
+    | 'queued'
+    | 'processing'
+    | 'awaiting_components'
+    | 'returning'
+    | 'completed'
+    | 'held';
 
 export interface CraftJobRecord {
     offerId: string;
@@ -15,6 +23,17 @@ export interface CraftJobRecord {
     returnOfferId?: string;
     linkedOfferId?: string;
     updatedAt: string;
+    operations?: CraftOperation[];
+    deliveredAssetIds?: string[];
+    assetIdMappings?: Record<string, string>;
+    returnAttempts?: ReturnAttempt[];
+    reconciliationAlerted?: boolean;
+    reconciliationEvidence?: { offerIds: string[]; note: string };
+    processingComplete?: boolean;
+    returnStartedAt?: string;
+    receiptPending?: boolean;
+    receiptSnapshotIds?: string[];
+    rollbackCandidateIds?: string[];
 }
 
 /**
@@ -24,7 +43,9 @@ export interface CraftJobRecord {
  */
 export default class CraftingJournal {
     private records: Record<string, CraftJobRecord> = {};
+
     private readonly archivedIds = new Set<string>();
+
     private readonly archivePath: string;
 
     constructor(private readonly filePath: string) {
@@ -48,13 +69,64 @@ export default class CraftingJournal {
         }
         for (const [id, value] of Object.entries(parsed)) {
             const record = value as CraftJobRecord;
-            if (!record || record.offerId !== id ||
+            if (
+                !record ||
+                record.offerId !== id ||
                 !Array.isArray(record.receivedAssetIds) ||
                 !Array.isArray(record.fabricatorAssetIds) ||
                 !Array.isArray(record.returnAssetIds) ||
                 typeof record.partnerSteamId !== 'string' ||
-                !['accepted', 'queued', 'processing', 'awaiting_components', 'returning', 'completed', 'held'].includes(record.stage)) {
+                !['accepted', 'queued', 'processing', 'awaiting_components', 'returning', 'completed', 'held'].includes(
+                    record.stage
+                )
+            ) {
                 throw new Error(`Invalid crafting journal record ${id}`);
+            }
+            if (
+                record.operations !== undefined &&
+                (!Array.isArray(record.operations) ||
+                    record.operations.some(
+                        op =>
+                            !op ||
+                            typeof op.id !== 'string' ||
+                            !Array.isArray(op.inputIds) ||
+                            !Array.isArray(op.beforeIds) ||
+                            !op.inputIds.every(value => typeof value === 'string') ||
+                            !op.beforeIds.every(value => typeof value === 'string') ||
+                            !['pending', 'completed', 'held'].includes(op.state) ||
+                            !op.expected ||
+                            !Array.isArray(op.expected.defindexes) ||
+                            typeof op.expected.attributes !== 'object' ||
+                            op.expected.attributes === null
+                    ))
+            ) {
+                throw new Error(`Invalid crafting operation journal ${id}`);
+            }
+            if (
+                record.returnAttempts !== undefined &&
+                (!Array.isArray(record.returnAttempts) ||
+                    record.returnAttempts.some(
+                        attempt =>
+                            !attempt ||
+                            typeof attempt.offerId !== 'string' ||
+                            !Array.isArray(attempt.assetIds) ||
+                            !attempt.assetIds.every(value => typeof value === 'string') ||
+                            !['pending', 'active', 'delivered', 'reconcile', 'failed'].includes(attempt.state)
+                    ))
+            ) {
+                throw new Error(`Invalid return attempt journal ${id}`);
+            }
+            if (
+                (record.deliveredAssetIds !== undefined &&
+                    (!Array.isArray(record.deliveredAssetIds) ||
+                        !record.deliveredAssetIds.every(value => typeof value === 'string'))) ||
+                (record.assetIdMappings !== undefined &&
+                    (!record.assetIdMappings ||
+                        typeof record.assetIdMappings !== 'object' ||
+                        Array.isArray(record.assetIdMappings) ||
+                        !Object.values(record.assetIdMappings).every(value => typeof value === 'string')))
+            ) {
+                throw new Error(`Invalid return custody journal ${id}`);
             }
             this.records[id] = record;
         }
@@ -95,6 +167,8 @@ export default class CraftingJournal {
             receivedAssetIds: [],
             fabricatorAssetIds,
             returnAssetIds: [],
+            operations: [],
+            processingComplete: false,
             updatedAt: new Date().toISOString()
         });
     }
@@ -112,6 +186,107 @@ export default class CraftingJournal {
         } else {
             this.save(updated);
         }
+    }
+
+    addOperation(offerId: string, operation: CraftOperation): void {
+        const record = this.records[offerId];
+        if (!record) throw new Error(`Unknown craft job ${offerId}`);
+        if ((record.operations ?? []).some(op => op.id === operation.id)) return;
+        this.update(offerId, { operations: [...(record.operations ?? []), operation] });
+    }
+
+    finishOperation(offerId: string, operationId: string, outputId?: string, consumedIds: string[] = []): void {
+        const record = this.records[offerId];
+        if (!record) return;
+        const existing = record.operations?.find(op => op.id === operationId);
+        if (!existing) throw new Error(`Unknown crafting operation ${operationId}`);
+        if (existing.state === 'completed') return;
+        const operations = (record.operations ?? []).map(op =>
+            op.id === operationId
+                ? { ...op, state: outputId ? ('completed' as const) : ('held' as const), outputId, consumedIds }
+                : op
+        );
+        const remaining = record.returnAssetIds.filter(id => !consumedIds.includes(id));
+        this.update(offerId, {
+            operations,
+            returnAssetIds: [...new Set([...remaining, ...(outputId ? [outputId] : [])])]
+        });
+    }
+
+    addReturn(offerId: string, assetIds: string[], processingComplete = false): void {
+        const record = this.records[offerId];
+        if (!record) return;
+        const delivered = new Set(record.deliveredAssetIds ?? []);
+        this.update(offerId, {
+            stage: 'returning',
+            returnStartedAt: record.returnStartedAt ?? new Date().toISOString(),
+            processingComplete: processingComplete ? true : record.processingComplete,
+            returnAssetIds: [...new Set([...record.returnAssetIds, ...assetIds])].filter(id => !delivered.has(id))
+        });
+    }
+
+    recordReturnAttempt(offerId: string, attempt: ReturnAttempt): void {
+        const record = this.records[offerId];
+        if (!record) return;
+        const attempts = (record.returnAttempts ?? []).filter(a => a.offerId !== attempt.offerId);
+        this.update(offerId, { returnOfferId: attempt.offerId, returnAttempts: [...attempts, attempt] });
+    }
+
+    remapAssets(offerId: string, mappings: Record<string, string>): void {
+        const record = this.records[offerId];
+        if (!record) return;
+        const combined = { ...record.assetIdMappings, ...mappings };
+        for (const [oldId, replacement] of Object.entries(mappings)) {
+            let previous = oldId;
+            const seen = new Set<string>();
+            while (record.assetIdMappings?.[previous] && !seen.has(previous)) {
+                seen.add(previous);
+                previous = record.assetIdMappings[previous];
+            }
+            if (previous !== oldId && previous !== replacement) combined[previous] = replacement;
+        }
+        const remap = (id: string): string => {
+            const seen = new Set<string>();
+            while (combined[id]) {
+                if (seen.has(id)) throw new Error('Cyclic asset-ID mapping');
+                seen.add(id);
+                id = combined[id];
+            }
+            return id;
+        };
+        Object.keys(combined).forEach(remap);
+        this.update(offerId, {
+            assetIdMappings: combined,
+            returnAssetIds: [...new Set(record.returnAssetIds.map(remap))],
+            operations: record.operations?.map(op => ({
+                ...op,
+                outputId: op.outputId ? remap(op.outputId) : undefined
+            }))
+        });
+    }
+
+    recordDelivery(offerId: string, assetIds: string[]): void {
+        const record = this.records[offerId];
+        if (!record) return;
+        const delivered = new Set([...(record.deliveredAssetIds ?? []), ...assetIds]);
+        const remaining = record.returnAssetIds.filter(id => !delivered.has(id));
+        const uncertain = (record.operations ?? []).some(op => op.state !== 'completed');
+        const fabricatorAssetIds =
+            record.phase === 'intake'
+                ? record.fabricatorAssetIds.filter(id => !delivered.has(id))
+                : record.fabricatorAssetIds;
+        const waitingForComponents = record.phase === 'intake' && fabricatorAssetIds.length > 0;
+        this.update(offerId, {
+            deliveredAssetIds: [...delivered],
+            returnAssetIds: remaining,
+            fabricatorAssetIds,
+            stage:
+                remaining.length === 0 && !uncertain && !waitingForComponents && record.processingComplete !== false
+                    ? 'completed'
+                    : waitingForComponents && remaining.length === 0
+                    ? 'awaiting_components'
+                    : 'held'
+        });
     }
 
     private archive(record: CraftJobRecord): void {
