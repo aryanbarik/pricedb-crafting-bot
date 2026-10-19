@@ -5,15 +5,20 @@ import SteamID from 'steamid';
 import { TradeOffer } from '@tf2autobot/tradeoffer-manager';
 import MyHandler from '../MyHandler/MyHandler';
 import CraftingJournal from '../../lib/craftingJournal';
-import { CraftItem } from '../../lib/craftingReconciliation';
+import { CraftItem, CraftOperation } from '../../lib/craftingReconciliation';
 
 jest.mock('../../lib/logger', () => ({
     __esModule: true,
     default: { info: jest.fn(), warn: jest.fn(), debug: jest.fn(), error: jest.fn() }
 }));
-jest.mock('../../lib/craftingWebsiteApi', () => ({ fetchTradeUrlToken: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('../../lib/craftingWebsiteApi', () => ({
+    fetchTradeUrlToken: jest.fn().mockResolvedValue(undefined),
+    notifyReturnOffer: jest.fn().mockResolvedValue(undefined)
+}));
 
 interface ReturnHandler {
+    queueCompletedCraftingReturn: (source: string, ids: string[]) => Promise<void>;
+    reconcileCraftingOperations: () => Promise<void>;
     craftingJournal: CraftingJournal;
     craftingInFlightIds: Set<string>;
     heldReturnItems: Map<string, string[]>;
@@ -131,7 +136,7 @@ test('active and unconfirmed return offers remain tracked without reporting deli
     expect(handler.craftingJournal.get('source')?.returnAssetIds).toEqual(['kit']);
 });
 
-test('concurrent retries send once and retain missing items instead of clearing them', async () => {
+test('concurrent retries hold the entire balance when any item is missing', async () => {
     handler.craftingJournal.addReturn('source', ['present', 'missing'], true);
     handler.craftingJournal.update('source', { stage: 'held' });
     handler.heldReturnItems.set(customer.getSteamID64(), ['present', 'missing']);
@@ -148,13 +153,14 @@ test('concurrent retries send once and retain missing items instead of clearing 
         handler.retryHeldReturn(customer.getSteamID64()),
         handler.retryHeldReturn(customer.getSteamID64())
     ]);
-    expect(sendOffer).toHaveBeenCalledTimes(1);
+    expect(sendOffer).not.toHaveBeenCalled();
     expect(results.some(value => value.includes('already running'))).toBe(true);
-    expect(handler.heldReturnItems.get(customer.getSteamID64())).toEqual(['missing']);
+    expect(handler.heldReturnItems.get(customer.getSteamID64())).toEqual(['present', 'missing']);
     expect(handler.craftingJournal.get('source')?.returnAssetIds).toEqual(['present', 'missing']);
 });
 
 test('an entirely missing balance remains held for later receipt reconciliation', async () => {
+    handler.craftingJournal.update('source', { stage: 'held', processingComplete: true });
     handler.heldReturnItems.set(customer.getSteamID64(), ['missing']);
     Object.assign(handler, { retryingReturnPartners: new Set() });
     handler.reconcileCraftingReturns = jest.fn().mockResolvedValue(undefined);
@@ -283,4 +289,156 @@ test('a rollback ID absent from the GC snapshot is reserved and refreshed before
         rollbackCandidateIds: ['replacement'],
         assetIdMappings: { old: 'replacement' }
     });
+});
+
+function setupBatchReturns(ids: string[]) {
+    const outgoing = offer('combined', ids, 2, []);
+    const addMyItem = jest.fn();
+    Object.assign(outgoing, { addMyItem, setMessage: jest.fn() });
+    const sendOffer = jest.fn().mockResolvedValue('sent');
+    Object.assign(handler, {
+        retryingReturnPartners: new Set(),
+        craftingDict: jest.fn(() => ({ our: {}, their: {} })),
+        bot: {
+            manager: { createOffer: jest.fn(() => outgoing) },
+            trades: { sendOffer },
+            tf2gc: { forceFreshBackpack: jest.fn().mockResolvedValue(undefined) },
+            sendMessage: jest.fn(),
+            messageAdmins: jest.fn()
+        }
+    });
+    handler.reconcileCraftingReturns = jest.fn().mockResolvedValue(undefined);
+    handler.freshGCBackpack = jest.fn().mockResolvedValue(items(ids));
+    return { outgoing, sendOffer, addMyItem };
+}
+
+const heldOperation: CraftOperation = {
+    id: 'rescue',
+    kind: 'craftFabricator',
+    state: 'held',
+    startedAt: '2026-10-19T08:41:30Z',
+    inputIds: ['fab', 'component'],
+    beforeIds: ['fab', 'component'],
+    expected: { defindexes: [6526], attributes: { 2012: 997, 2014: 3, 2013: 2004, 2025: 3 }, newlyCreated: true }
+};
+
+test('two accepted jobs for one customer wait and send all results in one offer', async () => {
+    const { outgoing, sendOffer, addMyItem } = setupBatchReturns(['kit-a', 'kit-b']);
+    handler.craftingJournal.recordAccepted('second', customer.getSteamID64(), 'components', []);
+    await handler.queueCompletedCraftingReturn('source', ['kit-a']);
+    expect(sendOffer).not.toHaveBeenCalled();
+    expect(handler.craftingJournal.get('source')).toMatchObject({
+        processingComplete: true,
+        returnAssetIds: ['kit-a']
+    });
+    await handler.queueCompletedCraftingReturn('second', ['kit-b']);
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+    expect(addMyItem).toHaveBeenCalledWith({ appid: 440, contextid: '2', assetid: 'kit-a' });
+    expect(addMyItem).toHaveBeenCalledWith({ appid: 440, contextid: '2', assetid: 'kit-b' });
+    expect(outgoing.data('craftingServiceReturn')).toMatchObject({ sourceOfferIds: ['source', 'second'] });
+});
+
+test('an unresolved operation blocks even when some outputs are ready, then recovers together', async () => {
+    const { sendOffer, addMyItem } = setupBatchReturns(['ready', 'rescue-kit']);
+    handler.craftingJournal.addOperation('source', heldOperation);
+    await handler.queueCompletedCraftingReturn('source', ['ready']);
+    expect(sendOffer).not.toHaveBeenCalled();
+    handler.craftingJournal.finishOperation('source', 'rescue', 'rescue-kit', ['fab', 'component']);
+    await handler.retryHeldReturn(customer.getSteamID64());
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+    expect(addMyItem).toHaveBeenCalledTimes(2);
+});
+
+test('an unrelated customer with pending work does not block a complete return', async () => {
+    const { sendOffer } = setupBatchReturns(['ready']);
+    handler.craftingJournal.recordAccepted('other', '76561198135282692', 'components', []);
+    await handler.queueCompletedCraftingReturn('source', ['ready']);
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+});
+
+test('a zero-output held job records completion, survives restart, and identifies the live GC Rescue Ranger kit', async () => {
+    const { sendOffer } = setupBatchReturns([]);
+    handler.craftingJournal.addOperation('source', heldOperation);
+    await handler.queueCompletedCraftingReturn('source', []);
+    expect(sendOffer).not.toHaveBeenCalled();
+    handler.craftingJournal = new CraftingJournal(path.join(directory, 'journal.json'));
+    expect(handler.craftingJournal.get('source')?.processingComplete).toBe(true);
+    const attribute = [
+        [2012, 997],
+        [2014, 3],
+        [2013, 2004]
+    ].map(([def_index, value]) => {
+        const value_bytes = Buffer.alloc(4);
+        value_bytes.writeFloatLE(value);
+        return { def_index, value: null, value_bytes };
+    });
+    handler.freshGCBackpack = jest
+        .fn()
+        .mockResolvedValue([{ id: 'rescue-kit', def_index: 6526, quality: 6, attribute }]);
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    await handler.reconcileCraftingOperations();
+    expect(handler.craftingJournal.get('source')?.operations?.[0]).toMatchObject({
+        state: 'completed',
+        outputId: 'rescue-kit'
+    });
+    await handler.retryHeldReturn(customer.getSteamID64());
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+});
+
+test('historical held claims discover an accepted retry even without saved poll metadata', async () => {
+    handler.craftingJournal.addReturn('source', ['old-kit'], true);
+    handler.craftingJournal.update('source', { stage: 'held' });
+    const accepted = offer('historical', ['old-kit'], 3, [{ assetid: 'old-kit', new_assetid: 'customer-kit' }]);
+    Object.assign(handler, {
+        bot: {
+            manager: {
+                getOffers: (
+                    _filter: number,
+                    _cutoff: Date,
+                    callback: (err: Error | null, sent: TradeOffer[]) => void
+                ) => callback(null, [accepted])
+            }
+        }
+    });
+    await handler.discoverUntrackedReturns();
+    await handler.reconcileReturnOffer(accepted);
+    expect(handler.craftingJournal.get('source')).toBeUndefined();
+});
+
+test('restart discovers one combined return spanning multiple source jobs', async () => {
+    handler.craftingJournal.addReturn('source', ['kit-a'], true);
+    handler.craftingJournal.recordAccepted('second', customer.getSteamID64(), 'components', []);
+    handler.craftingJournal.addReturn('second', ['kit-b'], true);
+    const accepted = offer(
+        'combined',
+        ['kit-a', 'kit-b'],
+        3,
+        ['kit-a', 'kit-b'].map(assetid => ({ assetid, new_assetid: `customer-${assetid}` }))
+    );
+    Object.assign(handler, {
+        bot: {
+            manager: {
+                getOffers: (
+                    _filter: number,
+                    _cutoff: Date,
+                    callback: (err: Error | null, sent: TradeOffer[]) => void
+                ) => callback(null, [accepted])
+            }
+        }
+    });
+    await handler.discoverUntrackedReturns();
+    await handler.reconcileReturnOffer(accepted);
+    expect(handler.craftingJournal.open()).toHaveLength(0);
+});
+
+test('a new accepted job during inventory refresh prevents sending the earlier result alone', async () => {
+    const { sendOffer } = setupBatchReturns(['kit-a']);
+    handler.craftingJournal.addReturn('source', ['kit-a'], true);
+    handler.craftingJournal.update('source', { stage: 'held' });
+    handler.freshGCBackpack = jest.fn().mockImplementation(() => {
+        handler.craftingJournal.recordAccepted('new-job', customer.getSteamID64(), 'components', []);
+        return Promise.resolve(items(['kit-a']));
+    });
+    expect(await handler.retryHeldReturn(customer.getSteamID64())).toContain('Waiting for all');
+    expect(sendOffer).not.toHaveBeenCalled();
 });

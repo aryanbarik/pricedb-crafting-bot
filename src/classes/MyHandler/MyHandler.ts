@@ -327,7 +327,12 @@ export default class MyHandler extends Handler {
                     this.finishCraftingOperation(job.offerId, operation.id, String(output.id), consumed);
                     this.holdReturnItems(
                         job.partnerSteamId,
-                        [String(output.id)],
+                        [
+                            ...new Set([
+                                String(output.id),
+                                ...operation.inputIds.filter(id => backpack.some(item => String(item.id) === id))
+                            ])
+                        ],
                         'a completed operation was reconciled'
                     );
                 } else if (!job.reconciliationAlerted) {
@@ -581,7 +586,7 @@ export default class MyHandler extends Handler {
             .open()
             .filter(
                 job =>
-                    job.stage === 'returning' &&
+                    ['returning', 'held'].includes(job.stage) &&
                     job.returnAssetIds.length > 0 &&
                     !job.returnAttempts?.length &&
                     (!partnerSteamId || job.partnerSteamId === partnerSteamId)
@@ -595,12 +600,16 @@ export default class MyHandler extends Handler {
             this.bot.manager.getOffers(3, cutoff, (err, offers) => (err ? reject(err) : resolve(offers ?? [])))
         );
         for (const job of jobs) {
+            const customerAssets = new Set(
+                jobs.filter(value => value.partnerSteamId === job.partnerSteamId).flatMap(value => value.returnAssetIds)
+            );
             const matches = sent.filter(
                 offer =>
                     offer.partner.getSteamID64() === job.partnerSteamId &&
                     offer.itemsToGive.length > 0 &&
                     offer.itemsToReceive.length === 0 &&
-                    offer.itemsToGive.every(item => job.returnAssetIds.includes(String(item.assetid)))
+                    offer.itemsToGive.some(item => job.returnAssetIds.includes(String(item.assetid))) &&
+                    offer.itemsToGive.every(item => customerAssets.has(String(item.assetid)))
             );
             for (const offer of matches) {
                 offer.data('craftingServiceReturn', {
@@ -693,7 +702,10 @@ export default class MyHandler extends Handler {
                     returnAssetIds: [
                         ...new Set([
                             ...job.returnAssetIds,
-                            ...[...job.receivedAssetIds, ...job.fabricatorAssetIds].filter(id => !issued.has(id))
+                            ...[
+                                ...job.receivedAssetIds,
+                                ...(job.phase === 'components' ? job.fabricatorAssetIds : [])
+                            ].filter(id => !issued.has(id))
                         ])
                     ]
                 });
@@ -3441,44 +3453,7 @@ export default class MyHandler extends Handler {
                                 const refundIds = [
                                     ...new Set([...baseRefundIds, ...newFabs.map((f: any) => String(f.id))])
                                 ];
-                                const refundOffer = this.bot.manager.createOffer(offer.partner, token);
-                                this.prepareCraftingOffer(refundOffer, refundIds, [], undefined, offer.id);
-                                refundIds.forEach(id =>
-                                    refundOffer.addMyItem({ appid: 440, contextid: '2', assetid: id })
-                                );
-                                // reason can embed an unbounded err.message (see kit-application
-                                // failure callsite below) — slice defensively so we never exceed
-                                // Steam's 128-char setMessage limit; full reason is already logged above.
-                                refundOffer.setMessage(`Refund — crafting failed: ${reason}`.slice(0, 128));
-
-                                const attemptSend = (retriesLeft: number): void => {
-                                    this.bot.trades.sendOffer(refundOffer)
-                                        .then(status => {
-                                            if (status === 'pending') void this.bot.trades.acceptConfirmation(refundOffer);
-                                            // Keep every refunded asset reserved until Steam reports the
-                                            // return offer accepted; a sent offer can still expire or be declined.
-                                            refundIds.forEach(id => this.craftingInFlightIds.add(id));
-                                        })
-                                        .catch((sendErr: Error) => {
-                                            if (retriesLeft > 0) {
-                                                log.warn(`[craftingService] Refund send failed (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
-                                                setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                                                return;
-                                            }
-                                            log.warn(`[craftingService] Refund send failed permanently to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
-                                            this.holdReturnItems(partnerSteamID64, refundIds);
-                                            this.bot.sendMessage(
-                                                offer.partner,
-                                                `⚠️ Crafting failed and I couldn't return your items just now — I'll retry automatically shortly, no action needed unless it doesn't resolve.`
-                                            );
-                                            this.bot.messageAdmins(
-                                                `⚠️ [craftingService] Refund to ${partnerSteamID64} failed after 3 attempts (${this.describeSendError(sendErr)}). ` +
-                                                    `Manual return needed — item IDs: ${refundIds.join(', ')}`,
-                                                []
-                                            );
-                                        });
-                                };
-                                attemptSend(3);
+                                void this.queueCompletedCraftingReturn(offer.id, refundIds);
                             };
 
                             if (newFabs.length === 0 && fabricatorAssetIds.length > 0) {
@@ -3524,91 +3499,12 @@ export default class MyHandler extends Handler {
                                 let planIndex = 0;
 
                                 const sendResults = async (): Promise<void> => {
-                                    await this.reconcileCraftingOperations();
-                                    const current = (await this.freshGCBackpack()) as CraftItem[];
-                                    const owned = new Set(current.map(item => String(item.id)));
-                                    const returnIds = [
-                                        ...new Set([
-                                            ...resultKitIds,
-                                            ...partialFabIds,
-                                            ...failedFabIds,
-                                            ...leftoverIds,
-                                            ...(this.craftingJournal.get(offer.id)?.returnAssetIds ?? [])
-                                        ])
-                                    ].filter(id => owned.has(id));
-                                    if (returnIds.length === 0) {
-                                        log.warn(`[craftingService] Nothing to return for offer ${offer.id}`);
-                                        return;
-                                    }
-                                    log.info(`[craftingService] Refreshing the TF2 GC backpack before returning ${returnIds.length} crafted item(s)`);
-                                    try {
-                                        await this.bot.tf2gc.forceFreshBackpack();
-                                    } catch (refreshErr) {
-                                        log.warn(`[craftingService] Pre-return GC backpack refresh failed: ${(refreshErr as Error).message}`);
-                                    }
-
-                                    const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                    this.prepareCraftingOffer(returnOffer, returnIds, [], undefined, offer.id);
-                                    returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: "2", assetid: id }));
-
-                                    let msg: string;
-                                    if (resultKitIds.length > 0 && partialFabIds.length === 0 && failedFabIds.length === 0 && leftoverIds.length === 0) {
-                                        if (resultKitIds.length === 1) {
-                                            const kitBpItem = ((this.bot.tf2 as any).backpack as any[] ?? []).find((i: any) => String(i.id) === resultKitIds[0]);
-                                            const kitName = kitBpItem
-                                                ? ((this.bot.schema as any).getItemByDefindex?.(kitBpItem.def_index)?.item_name ?? 'Killstreak Kit')
-                                                : 'Killstreak Kit';
-                                            msg = `Here is your ${kitName}! Thanks for using the crafting service.`;
-                                        } else {
-                                            msg = `Here are your ${resultKitIds.length} Killstreak Kits! Thanks for using the crafting service.`;
-                                        }
-                                    } else {
-                                        const parts: string[] = [];
-                                        if (resultKitIds.length > 0) parts.push(`${resultKitIds.length} kit(s) crafted`);
-                                        if (partialFabIds.length > 0) parts.push(`${partialFabIds.length} fab(s) partial`);
-                                        if (failedFabIds.length > 0) parts.push(`${failedFabIds.length} fab(s) failed`);
-                                        if (leftoverIds.length > 0) parts.push(`${leftoverIds.length} part(s) leftover`);
-                                        msg = parts.join(', ') + '. Thanks!';
-                                    }
-
-                                    // Inputs consumed by the GC can be released now. Every item that will
-                                    // be returned stays reserved until this return offer is accepted.
-                                    this.releaseCraftingInFlight(allNewIds.filter(id => !returnIds.includes(id)));
-                                    returnIds.forEach(id => this.craftingInFlightIds.add(id));
-
-                                    returnOffer.setMessage(msg.slice(0, 128));
-                                    log.info(`[craftingService] Sending return offer to ${partnerSteamID64}: ${returnIds.length} item(s)`);
-                                    const attemptSend = (retriesLeft: number): void => {
-                                        this.bot.trades.sendOffer(returnOffer)
-                                            .then(status => {
-                                                if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                                                // Keep returnIds reserved until onTradeOfferChanged sees acceptance.
-                                                void notifyReturnOffer({
-                                                    steamId: partnerSteamID64,
-                                                    componentOfferId: offer.id,
-                                                    returnOfferId: returnOffer.id
-                                                });
-                                            })
-                                            .catch((sendErr: Error) => {
-                                                if (retriesLeft > 0) {
-                                                    log.warn(`[craftingService] Failed to send return offer (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
-                                                    setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                                                    return;
-                                                }
-                                                log.warn(`[craftingService] Failed to send return offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
-                                                this.holdReturnItems(partnerSteamID64, returnIds);
-                                                this.bot.sendMessage(
-                                                    offer.partner,
-                                                    `⏳ Crafting is complete! Your items are safe with me. Steam may need a little time to update them before they can be traded. I'll retry automatically — please wait a little while; you don't need to resend anything.`
-                                                );
-                                                this.bot.messageAdmins(
-                                                    `⚠️ [craftingService] Return offer to ${partnerSteamID64} failed after 3 attempts (${this.describeSendError(sendErr)}). ` +
-                                                        `Items held — item IDs: ${returnIds.join(', ')}`,
-                                                    []
-                                                );
-                                            });
-                                    };
-                                    attemptSend(3);
+                                    await this.queueCompletedCraftingReturn(offer.id, [
+                                        ...resultKitIds,
+                                        ...partialFabIds,
+                                        ...failedFabIds,
+                                        ...leftoverIds
+                                    ]);
                                 };
                                 const craftNext = async (): Promise<void> => {
                                     if (planIndex >= craftPlan.length) {
@@ -3867,30 +3763,7 @@ export default class MyHandler extends Handler {
                                             ...unusedPlainWeapons.map((w: any) => String(w.id))
                                         ];
                                         log.info(`[craftingService] Kit-only trade — returning ${kitOnlyReturnIds.length} item(s)`);
-                                        const returnOffer = this.bot.manager.createOffer(offer.partner, token);
-                                        this.prepareCraftingOffer(returnOffer, kitOnlyReturnIds, [], undefined, offer.id);
-                                        kitOnlyReturnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
-                                        returnOffer.setMessage(`Here is your Killstreak weapon! Thanks for using the crafting service.`);
-                                        const attemptSend = (retriesLeft: number): void => {
-                                            this.bot.trades.sendOffer(returnOffer)
-                                                .then(status => {
-                                                    if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                                                })
-                                                .catch((sendErr: Error) => {
-                                                    if (retriesLeft > 0) {
-                                                        log.warn(`[craftingService] Failed to send KS weapon (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`);
-                                                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                                                        return;
-                                                    }
-                                                    log.warn(`[craftingService] Failed to send KS weapon to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
-                                                    this.holdReturnItems(partnerSteamID64, kitOnlyReturnIds);
-                                                    this.bot.sendMessage(
-                                                        offer.partner,
-                                                        `⏳ Your Killstreak weapon is ready and safe with me! Steam may need a little time to update it before it can be traded. I'll retry automatically — please wait a little while; you don't need to resend anything.`
-                                                    );
-                                                });
-                                        };
-                                        attemptSend(3);
+                                        void this.queueCompletedCraftingReturn(offer.id, kitOnlyReturnIds);
                                         return;
                                     }
 
@@ -4857,41 +4730,7 @@ export default class MyHandler extends Handler {
         this.releaseCraftingInFlight(receivedAssetIds.filter(id => !returnIds.includes(id)));
         returnIds.forEach(id => this.craftingInFlightIds.add(id));
 
-        if (returnIds.length === 0) {
-            log.warn('[killstreakifyService] Nothing owned to return to ' + partnerSteamID64);
-            this.bot.messageAdmins('⚠️ Killstreakify for ' + partnerSteamID64 + ' completed with no returnable assets. Inspect offer ' + componentOfferId + '.', []);
-            return;
-        }
-
-        const returnOffer = this.bot.manager.createOffer(partner, token);
-        this.prepareCraftingOffer(returnOffer, returnIds, [], undefined, componentOfferId);
-        returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
-        returnOffer.setMessage(
-            resultWeaponIds.length > 0
-                ? 'Here are your ' + resultWeaponIds.length + ' Killstreak weapon(s)! Unmatched counteroffer items were returned unchanged.'
-                : 'No complete Killstreak Kit pairs remained after your counteroffer. Your items are returned unchanged.'
-        );
-        const attemptSend = (retriesLeft: number): void => {
-            this.bot.trades.sendOffer(returnOffer)
-                .then(status => {
-                    if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                    log.info('[killstreakifyService] Sent return offer ' + returnOffer.id + ' to ' + partnerSteamID64 + ': ' + returnIds.length + ' item(s)');
-                })
-                .catch((sendErr: Error) => {
-                    if (retriesLeft > 0) {
-                        log.warn('[killstreakifyService] Failed to send return offer (' + this.describeSendError(sendErr) + '), retrying in 15s (' + retriesLeft + ' left)');
-                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                        return;
-                    }
-                    log.warn('[killstreakifyService] Failed to send return offer to ' + partnerSteamID64 + ': ' + this.describeSendError(sendErr));
-                    this.holdReturnItems(partnerSteamID64, returnIds);
-                    this.bot.sendMessage(
-                        partner,
-                        '⏳ Killstreakify has finished! Your items are safe with me. Steam may need a little time to update them before they can be traded. I\'ll retry automatically — please wait a little while; you don\'t need to resend anything.'
-                    );
-                });
-        };
-        attemptSend(3);
+        await this.queueCompletedCraftingReturn(componentOfferId, returnIds);
     }
 
     /**
@@ -5203,45 +5042,7 @@ export default class MyHandler extends Handler {
                         ...(this.craftingJournal.get(offer.id)?.returnAssetIds ?? [])
                     ])
                 ].filter(id => owned.has(id));
-                if (returnIds.length === 0) {
-                    log.warn(`[strangifyService] Nothing to return to ${partnerSteamID64}`);
-                    return;
-                }
-                const returnOffer = this.bot.manager.createOffer(partner, token);
-                this.prepareCraftingOffer(returnOffer, returnIds, [], undefined, offer.id);
-                returnIds.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
-                returnOffer.setMessage(
-                    failedPairIds.length > 0
-                        ? `Here are your ${resultWeaponIds.length} Strange weapon(s)! ${
-                              failedPairIds.length / 2
-                          } pair(s) failed — contact the bot owner.`
-                        : `Here are your ${resultWeaponIds.length} Strange weapon(s)! Thanks for using the strangifier service.`
-                );
-
-                const attemptSend = (retriesLeft: number): void => {
-                    this.bot.trades
-                        .sendOffer(returnOffer)
-                        .then(status => {
-                            if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-                            log.info(`[strangifyService] Sent return offer ${returnOffer.id} to ${partnerSteamID64}: ${returnIds.length} item(s)`);
-                        })
-                        .catch((sendErr: Error) => {
-                            if (retriesLeft > 0) {
-                                log.warn(
-                                    `[strangifyService] Failed to send return offer (${this.describeSendError(sendErr)}), retrying in 15s (${retriesLeft} left)`
-                                );
-                                setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                                return;
-                            }
-                            log.warn(`[strangifyService] Failed to send return offer to ${partnerSteamID64}: ${this.describeSendError(sendErr)}`);
-                            this.holdReturnItems(partnerSteamID64, returnIds);
-                            this.bot.sendMessage(
-                                partner,
-                                `⏳ Strangifying has finished! Your items are safe with me. Steam may need a little time to update them before they can be traded. I'll retry automatically — please wait a little while; you don't need to resend anything.`
-                            );
-                        });
-                };
-                attemptSend(3);
+                void this.queueCompletedCraftingReturn(offer.id, returnIds);
                 return;
             }
 
@@ -5704,6 +5505,56 @@ export default class MyHandler extends Handler {
         affectedSkus.forEach(sku => this.bot.listings.checkByPriceKey({ priceKey: sku }));
     }
 
+    /** Finish a source job durably, then send only when the customer's whole batch is ready. */
+    private async queueCompletedCraftingReturn(sourceOfferId: string, assetIds: string[]): Promise<void> {
+        const job = this.craftingJournal.get(sourceOfferId);
+        if (!job) throw new Error(`Unknown craft job ${sourceOfferId}`);
+        const consumed = new Set((job.operations ?? []).flatMap(op => op.consumedIds ?? []));
+        const unresolvedInputs = new Set(
+            (job.operations ?? []).filter(op => op.state !== 'completed').flatMap(op => op.inputIds)
+        );
+        const returns = [
+            ...new Set([
+                ...job.returnAssetIds,
+                ...assetIds,
+                ...job.receivedAssetIds,
+                ...(job.phase === 'components' ? job.fabricatorAssetIds : [])
+            ])
+        ].filter(id => !consumed.has(id) && !unresolvedInputs.has(id));
+        // Missing assets remain owed until a receipt or operation proves their disposition.
+        this.craftingJournal.addReturn(sourceOfferId, returns, true);
+        this.craftingJournal.update(sourceOfferId, { stage: 'held' });
+        const pending = this.heldReturnItems.get(job.partnerSteamId) ?? [];
+        this.heldReturnItems.set(job.partnerSteamId, [...new Set([...pending, ...returns])]);
+        returns.forEach(id => this.craftingInFlightIds.add(id));
+        try {
+            await this.bot.tf2gc.forceFreshBackpack();
+        } catch (err) {
+            log.warn(`[craftingService] Pre-return refresh failed: ${(err as Error).message}`);
+        }
+        const result = await this.retryHeldReturn(job.partnerSteamId);
+        log.info(`[craftingService] Customer return: ${result}`);
+        if (!result.startsWith('🔄')) {
+            this.bot.sendMessage(
+                new SteamID(job.partnerSteamId),
+                "⏳ Your items are safe with me. I'm waiting for all your crafting results to be ready before returning them together. Steam may need a little time to update them. I'll retry automatically; you don't need to resend anything."
+            );
+        }
+    }
+
+    private customerCraftingPending(partnerSteamID64: string): boolean {
+        return this.craftingJournal
+            .open()
+            .some(
+                job =>
+                    job.partnerSteamId === partnerSteamID64 &&
+                    (job.receiptPending ||
+                        job.processingComplete === false ||
+                        ['accepted', 'queued', 'processing', 'awaiting_components'].includes(job.stage) ||
+                        (job.operations ?? []).some(op => op.state !== 'completed'))
+            );
+    }
+
     private holdReturnItems(partnerSteamID64: string, assetIds: string[], reason = 'a return send failed'): void {
         const existing = this.heldReturnItems.get(partnerSteamID64) ?? [];
         this.heldReturnItems.set(partnerSteamID64, [...new Set([...existing, ...assetIds])]);
@@ -5872,6 +5723,12 @@ export default class MyHandler extends Handler {
         this.retryingReturnPartners.add(partnerSteamID64);
         try {
             await this.reconcileCraftingReturns(partnerSteamID64);
+            if (this.customerCraftingPending(partnerSteamID64))
+                return '⏳ Waiting for all your crafting to finish and all outputs to be identified; items will return together.';
+            const backpack = (await this.freshGCBackpack()) as CraftItem[];
+            const token = await fetchTradeUrlToken(partnerSteamID64);
+            if (this.customerCraftingPending(partnerSteamID64))
+                return '⏳ Waiting for all your crafting to finish; items will return together.';
             const jobs = this.craftingJournal.open().filter(job => job.partnerSteamId === partnerSteamID64);
             const activeIds = new Set(
                 jobs.flatMap(job =>
@@ -5883,35 +5740,45 @@ export default class MyHandler extends Handler {
             jobs.filter(job => job.stage === 'returning' && !job.returnAttempts?.length).forEach(job =>
                 job.returnAssetIds.forEach(id => activeIds.add(id))
             );
+            if (activeIds.size > 0)
+                return '⏳ An existing return is still pending; remaining items will wait for its receipt.';
             const heldIds = [
                 ...new Set([
                     ...(this.heldReturnItems.get(partnerSteamID64) ?? []),
-                    ...jobs.filter(job => job.stage === 'held').flatMap(job => job.returnAssetIds)
+                    ...jobs.flatMap(job => job.returnAssetIds)
                 ])
             ].filter(id => !activeIds.has(id));
             if (heldIds.length === 0)
                 return `⏳ No unsent return items for ${partnerSteamID64}; existing offers are tracked until delivery.`;
-            const backpack = (await this.freshGCBackpack()) as CraftItem[];
             const owned = new Set(backpack.map(item => String(item.id)));
             const stillOwned = heldIds.filter(id => owned.has(id));
             const missing = heldIds.filter(id => !owned.has(id));
             // Absence is never proof of delivery. Keep the full unresolved balance durable.
             this.heldReturnItems.set(partnerSteamID64, heldIds);
-            if (stillOwned.length === 0)
-                return `⏳ ${missing.length} item(s) await Steam receipt/asset-ID reconciliation; nothing was discarded.`;
+            if (missing.length > 0)
+                return `⏳ ${missing.length} item(s) await Steam receipt/asset-ID reconciliation; nothing was discarded. All items will return together.`;
             const partner = new SteamID(partnerSteamID64);
-            const token = await fetchTradeUrlToken(partnerSteamID64);
             const returnOffer = this.bot.manager.createOffer(partner, token);
             this.prepareCraftingOffer(returnOffer, stillOwned, []);
             stillOwned.forEach(id => returnOffer.addMyItem({ appid: 440, contextid: '2', assetid: id }));
             returnOffer.setMessage('Here are your item(s) from the crafting service.');
             const status = await this.bot.trades.sendOffer(returnOffer);
             if (status === 'pending') void this.bot.trades.acceptConfirmation(returnOffer);
-            if (missing.length > 0) this.heldReturnItems.set(partnerSteamID64, missing);
+            // Preserve anything queued while Steam was creating this offer.
+            const sent = new Set(stillOwned);
+            const remaining = (this.heldReturnItems.get(partnerSteamID64) ?? []).filter(id => !sent.has(id));
+            if (remaining.length > 0) this.heldReturnItems.set(partnerSteamID64, remaining);
             else this.heldReturnItems.delete(partnerSteamID64);
+            for (const job of jobs.filter(value => value.returnAssetIds.some(id => sent.has(id)))) {
+                void notifyReturnOffer({
+                    steamId: partnerSteamID64,
+                    componentOfferId: job.offerId,
+                    returnOfferId: returnOffer.id
+                });
+            }
             return (
                 `🔄 Sent return offer ${returnOffer.id} to ${partnerSteamID64} with ${stillOwned.length} item(s); ` +
-                `${missing.length} remain under reconciliation. Delivery is pending acceptance.`
+                'delivery is pending acceptance.'
             );
         } catch (err) {
             return `❌ Retry failed: ${this.describeSendError(err)}. Items remain held.`;

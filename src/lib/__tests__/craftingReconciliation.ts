@@ -103,3 +103,41 @@ test('rollback mappings only replace this offer’s assets with verified bot-own
     });
     expect(rollbackMappings(['old-1'], receipt, new Set())).toEqual({});
 });
+
+// Captured GC shape from the held Rescue Ranger and Specialized kit incidents.
+// GetPlayerItems includes 2025, but CSOEconItem only sends dynamic attributes.
+function floatAttr(def_index: number, value: number) {
+    const value_bytes = Buffer.alloc(4);
+    value_bytes.writeFloatLE(value);
+    return { def_index, value: null, value_bytes };
+}
+
+test.each([
+    [6526, 3, 997, 3, 2004],
+    [6523, 2, 412, 1, 0],
+    [6523, 2, 40, 5, 0],
+    [6523, 2, 528, 7, 0]
+])('recognizes GC kit %i with its static tier omitted', (defindex, tier, target, sheen, effect) => {
+    const output: CraftItem = {
+        id: 'output',
+        original_id: null,
+        def_index: defindex,
+        quality: 6,
+        attribute: [floatAttr(2012, target), floatAttr(2014, sheen), ...(effect ? [floatAttr(2013, effect)] : [])]
+    };
+    const op = {
+        ...operation,
+        expected: {
+            defindexes: [6523, 6526, 6527],
+            newlyCreated: true,
+            attributes: { 2012: target, 2014: sheen, 2013: effect, 2025: tier }
+        }
+    };
+    expect(operationOutputs(op, [output], new Set())).toEqual([output]);
+    expect(operationOutputs(op, [{ ...output, def_index: 6527 }], new Set())).toEqual([]);
+    expect(operationOutputs(op, [{ ...output, def_index: tier === 3 ? 6523 : 6526 }], new Set())).toEqual([]);
+    expect(
+        operationOutputs(op, [{ ...output, attribute: [...output.attribute, floatAttr(2025, 1)] }], new Set())
+    ).toEqual([]);
+    expect(operationOutputs(op, [{ ...output, original_id: 'traded-in' }], new Set())).toEqual([]);
+});

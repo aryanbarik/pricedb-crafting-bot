@@ -56,3 +56,25 @@ node dist/scripts/reconcileReturn9435221804.js --apply
 The correction refuses changed balances or unexpected receipt states, backs up the journal,
 and records its evidence in the archive. Older journal entries remain compatible; uncertain
 historical jobs are not rewritten or replayed automatically.
+
+## Static kit attributes and complete customer returns (2026-10-19)
+
+The GC backpack omits schema-static killstreak tier 2025 on completed Specialized
+(defindex 6523) and Professional (6526) kits. Steam's GetPlayerItems response expands
+that attribute, so API-shaped fixtures concealed the mismatch. Output matching now
+uses those two concrete definitions for the tier only when the dynamic attribute is
+absent. Target, sheen, killstreaker, consumption, provenance, and ambiguity checks
+still apply. Generic kit definitions and weapons require their actual tier attribute.
+The Rescue Ranger incident (source 9435803618, output 17704257930) is covered by a
+regression using the GC's float byte attributes with no tier attribute.
+
+Crafting, kit application, and strangify completion now persist their return balance
+before sending through one customer queue. A return waits for every accepted job for
+that customer to finish and every operation to resolve. All outstanding assets must
+be present, and any earlier return must settle before another is sent. Concurrent
+customers remain independent. One combined return is associated with every source
+job so website notifications and delivery receipts update the full batch.
+
+Completion is persisted even when no output was recognized yet; reconciliation can
+then recover it after a restart. Missing assets remain owed and block partial retries.
+Manual administrator recovery commands retain their explicit override behavior.

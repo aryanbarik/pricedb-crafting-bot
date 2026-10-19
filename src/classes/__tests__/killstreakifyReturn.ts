@@ -47,13 +47,14 @@ function fixture() {
         }),
         releaseCraftingInFlight: jest.fn(),
         craftingInFlightIds: new Set<string>(),
-        prepareCraftingOffer: jest.fn()
+        prepareCraftingOffer: jest.fn(),
+        queueCompletedCraftingReturn: jest.fn().mockResolvedValue(undefined)
     };
     return { events, offer, handler };
 }
 
 test('killstreakify refreshes the GC before returning modified weapons and unmatched inputs', async () => {
-    const { events, offer, handler } = fixture();
+    const { events, handler } = fixture();
     await returnResults.call(
         handler,
         new SteamID('76561198164485484'),
@@ -63,19 +64,16 @@ test('killstreakify refreshes the GC before returning modified weapons and unmat
         new Set(['kit', 'weapon']),
         ['result']
     );
-    expect(events).toEqual(['refresh', 'read', 'create']);
-    expect(offer.addMyItem.mock.calls).toEqual([
-        [{ appid: 440, contextid: '2', assetid: 'result' }],
-        [{ appid: 440, contextid: '2', assetid: 'unmatched' }]
-    ]);
-    expect(handler.bot.trades.sendOffer).toHaveBeenCalledWith(offer);
+    expect(events).toEqual(['refresh', 'read']);
+    expect(handler.queueCompletedCraftingReturn).toHaveBeenCalledWith('source', ['result', 'unmatched']);
+    expect(handler.bot.trades.sendOffer).not.toHaveBeenCalled();
 });
 
 test('a failed GC refresh still attempts the return instead of abandoning customer assets', async () => {
     const { handler } = fixture();
     handler.bot.tf2gc.forceFreshBackpack.mockRejectedValue(new Error('GC timeout'));
     await returnResults.call(handler, new SteamID('76561198164485484'), undefined, 'source', [], new Set(), ['result']);
-    expect(handler.bot.trades.sendOffer).toHaveBeenCalledTimes(1);
+    expect(handler.queueCompletedCraftingReturn).toHaveBeenCalledTimes(1);
 });
 
 test('returning unchanged inputs does not reset the GC', async () => {
@@ -90,5 +88,5 @@ test('returning unchanged inputs does not reset the GC', async () => {
         []
     );
     expect(handler.bot.tf2gc.forceFreshBackpack).not.toHaveBeenCalled();
-    expect(handler.bot.trades.sendOffer).toHaveBeenCalledTimes(1);
+    expect(handler.queueCompletedCraftingReturn).toHaveBeenCalledTimes(1);
 });

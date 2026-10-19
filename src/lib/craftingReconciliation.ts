@@ -60,7 +60,7 @@ export function recipeOutput(fabricator: CraftItem): OutputExpectation {
     if (attributes[2025] === undefined) attributes[2025] = fabricator.def_index === 20003 ? 3 : 2;
     if (!Number.isSafeInteger(attributes[2012]) || attributes[2012] <= 0)
         throw new Error(`Recipe has no weapon target: ${fabricator.id}`);
-    // GC uses both generic and tier-specific kit defindexes. Attributes carry the actual tier.
+    // Generic kits carry their tier dynamically; tier-specific kits may omit that static attribute.
     return { defindexes: KS_KIT_DEFINDEXES, attributes, newlyCreated: true };
 }
 
@@ -72,7 +72,14 @@ export function matchesOutput(item: CraftItem, expected: OutputExpectation): boo
     // The GC protobuf's absent/zero original_id uses the current ID as its identity.
     if (expected.newlyCreated && originalItemId(item) !== String(item.id)) return false;
     return Object.entries(expected.attributes).every(([key, value]) => {
-        const actual = getItemAttrValue(item, Number(key));
+        let actual = getItemAttrValue(item, Number(key));
+        // The GC omits schema-static attributes. GetPlayerItems expands them, which
+        // hid this difference in the original fixtures. Only these concrete kit
+        // definitions establish a tier; generic kits and weapons still require it.
+        if (key === '2025' && actual === null) {
+            if (item.def_index === 6523) actual = 2;
+            if (item.def_index === 6526) actual = 3;
+        }
         return actual === value || (value === 0 && actual === null);
     });
 }
