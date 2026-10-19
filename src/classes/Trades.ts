@@ -230,6 +230,10 @@ export default class Trades {
         }
 
         offer.log('info', 'received offer');
+        if (this.bot.stnWeaponPurchase?.shouldHoldIncomingOffer(offer)) {
+            offer.log('info', 'holding STN weapon purchase offer for verified purchase flow');
+            return;
+        }
         if (this.bot.manncoStoreManager?.matchesPendingDepositOffer(offer)) {
             offer.log('info', 'accepting matched Mannco.store deposit offer');
             void this.acceptOffer(offer)

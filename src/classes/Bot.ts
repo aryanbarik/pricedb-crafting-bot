@@ -39,6 +39,7 @@ import BotManager from './BotManager';
 import MyHandler from './MyHandler/MyHandler';
 import Groups from './Groups';
 import InventoryCostBasis from './InventoryCostBasis';
+import StnWeaponPurchase from '../lib/stnWeaponPurchase';
 
 import log from '../lib/logger';
 import { refreshAll as refreshAllCompetitiveBuyPrices } from '../lib/pricer/competitiveBuyPricer';
@@ -113,6 +114,7 @@ export default class Bot {
     pricedbStoreManager: PriceDBStoreManager;
 
     manncoStoreManager: ManncoStoreManager;
+    readonly stnWeaponPurchase?: StnWeaponPurchase;
 
     journalTfManager?: JournalTfManager;
 
@@ -361,6 +363,13 @@ export default class Bot {
 
         this.bptf = new BptfLogin();
         this.tf2 = new TF2(this.client);
+        if (process.env.STN_API_KEY) {
+            this.stnWeaponPurchase = new StnWeaponPurchase(
+                this,
+                process.env.STN_API_KEY,
+                path.join(process.cwd(), 'files', 'stn-weapon-purchase.json')
+            );
+        }
         this.friends = new Friends(this);
         this.groups = new Groups(this);
         this.trades = new Trades(this);

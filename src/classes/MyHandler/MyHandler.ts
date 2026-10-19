@@ -798,6 +798,7 @@ export default class MyHandler extends Handler {
         // Price configured SKUs (robot parts) off competing backpack.tf buy orders instead of the
         // pricer. Started here so the bp.tf API key obtained during login is available.
         this.bot.startCompetitiveBuyPricer();
+        this.bot.stnWeaponPurchase?.startReserve();
 
         this.pollDataInterval = setInterval(this.refreshPollDataPath.bind(this), 24 * 60 * 60 * 1000);
 
@@ -881,6 +882,7 @@ export default class MyHandler extends Handler {
     }
 
     onShutdown(): Promise<void> {
+        this.bot.stnWeaponPurchase?.stopReserve();
         if (this.poller) {
             clearInterval(this.poller);
         }
@@ -5348,62 +5350,95 @@ export default class MyHandler extends Handler {
         const inventory = this.bot.inventoryManager.getInventory;
         const rawById = new Map(inventory.getRawItems.map(item => [String(item.id), item]));
         const appliedIds: string[] = [];
+        const purchasedIds = new Set<string>();
 
         for (let index = 0; index < needed; index++) {
             const available = ((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? [];
             const pairExcluded = new Set(this.buildSelfFillExcludeIds(currentTradeIds, false));
-            const pair = findDepotBasicKitPair(
+            purchasedIds.forEach(id => pairExcluded.delete(id));
+            const isBasicKit = (kit: GCBackpackItem): boolean =>
+                kit.def_index === 6527 ||
+                (kit.def_index >= 5726 && kit.def_index <= 5801 &&
+                    fixItem({ defindex: kit.def_index, quality: 6 } as any, this.bot.schema).defindex === 6527);
+            const kitTarget = (kit: GCBackpackItem): number | null => {
+                const id = String(kit.id);
+                const raw = rawById.get(id);
+                if (!raw?.tradable || this.bot.trades.isInTrade(id)) return null;
+                return resolveKitTarget(kit, inventory.findByAssetid(id), this.bot.schema).targetDefindex;
+            };
+            const safeWeapon = (weapon: GCBackpackItem): boolean => {
+                const id = String(weapon.id);
+                const raw = rawById.get(id);
+                const sku = inventory.findByAssetid(id);
+                return (
+                    (purchasedIds.has(id) || (!!raw?.tradable && sku === `${weapon.def_index};6` &&
+                        !isProtectedItem(raw) && !hasExcludedHalloweenSpell(raw))) &&
+                    !isExcludedCraftingReskinDefindex(weapon.def_index) &&
+                    !isFestiveWeaponDefindex(weapon.def_index, this.bot) &&
+                    !this.bot.trades.isInTrade(id)
+                );
+            };
+            let pair = findDepotBasicKitPair(
                 available,
                 pairExcluded,
-                kit =>
-                    kit.def_index === 6527 ||
-                    (kit.def_index >= 5726 && kit.def_index <= 5801 &&
-                        fixItem({ defindex: kit.def_index, quality: 6 } as any, this.bot.schema).defindex === 6527),
-                kit => {
-                    const id = String(kit.id);
-                    const raw = rawById.get(id);
-                    // Kit market names include their target weapon, so name !== market_name is
-                    // normal here; the protected-weapon heuristic does not apply to Kits.
-                    if (!raw?.tradable || this.bot.trades.isInTrade(id)) return null;
-                    return resolveKitTarget(kit, inventory.findByAssetid(id), this.bot.schema).targetDefindex;
-                },
-                weapon => {
-                    const id = String(weapon.id);
-                    const raw = rawById.get(id);
-                    const sku = inventory.findByAssetid(id);
-                    return (
-                        !!raw?.tradable &&
-                        sku === `${weapon.def_index};6` &&
-                        !isProtectedItem(raw) &&
-                        !hasExcludedHalloweenSpell(raw) &&
-                        !isExcludedCraftingReskinDefindex(weapon.def_index) &&
-                        !isFestiveWeaponDefindex(weapon.def_index, this.bot) &&
-                        !this.bot.trades.isInTrade(id)
-                    );
-                }
+                isBasicKit,
+                kitTarget,
+                safeWeapon
             );
-            if (!pair) {
+            // Stock weapons are available as GC base items and create a new Unique copy when
+            // a Kit is applied. They have no backpack asset ID and never need an STN purchase.
+            const baseKit = !pair ? available
+                .filter(candidate => isBasicKit(candidate) && !pairExcluded.has(String(candidate.id)))
+                .map(candidate => ({ kit: candidate, target: kitTarget(candidate) }))
+                .find(candidate => candidate.target !== null && isBaseWeaponDefindex(candidate.target, this.bot.schema)) : undefined;
+            if (!pair && !baseKit && this.bot.stnWeaponPurchase) {
+                const kit = available.find(candidate => isBasicKit(candidate) && !pairExcluded.has(String(candidate.id)) && kitTarget(candidate) !== null);
+                const target = kit ? kitTarget(kit) : null;
+                if (target !== null && target !== undefined && !isBaseWeaponDefindex(target, this.bot.schema) &&
+                    !isExcludedCraftingReskinDefindex(target) &&
+                    !isFestiveWeaponDefindex(target, this.bot)) {
+                    const name = this.bot.schema.getItemByDefindex(target)?.item_name;
+                    if (name) {
+                        try {
+                            const purchasedId = await this.bot.stnWeaponPurchase.buy(target, name);
+                            purchasedIds.add(purchasedId);
+                            pairExcluded.delete(purchasedId);
+                            pair = findDepotBasicKitPair(
+                                ((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? [],
+                                pairExcluded, isBasicKit, kitTarget, safeWeapon
+                            );
+                        } catch (err) {
+                            log.warn(`[craftingService] STN could not supply a craftable ${name}: ${(err as Error).message}`);
+                        }
+                    }
+                }
+            }
+            if (!pair && !baseKit) {
                 log.warn(`[craftingService] Depot fab ${fabId}: no safe Basic Kit/plain weapon pair for tier-1 slot`);
                 break;
             }
 
-            this.craftingInFlightIds.add(pair.kitId);
-            this.craftingInFlightIds.add(pair.weaponId);
-            log.info(`[craftingService] Depot fab ${fabId}: applying Basic Kit ${pair.kitId} to weapon ${pair.weaponId}`);
+            const kitId = pair?.kitId ?? String(baseKit!.kit.id);
+            const targetDefindex = pair?.targetDefindex ?? baseKit!.target!;
+            this.craftingInFlightIds.add(kitId);
+            if (pair) this.craftingInFlightIds.add(pair.weaponId);
+            log.info(`[craftingService] Depot fab ${fabId}: applying Basic Kit ${kitId} to ${pair ? `weapon ${pair.weaponId}` : `stock weapon ${targetDefindex}`}`);
             let resultId: string;
             try {
                 resultId = await new Promise<string>((resolve, reject) => {
-                    this.bot.tf2gc.applyKSKit(pair.kitId, pair.weaponId, (err, id) => {
+                    const callback = (err: Error | null, id?: string): void => {
                         if (err || !id) reject(err ?? new Error('Kit application returned no weapon'));
                         else resolve(id);
-                    });
+                    };
+                    if (pair) this.bot.tf2gc.applyKSKit(kitId, pair.weaponId, callback);
+                    else this.bot.tf2gc.applyKSKitToBaseItem(kitId, targetDefindex, callback);
                 });
                 const result = (((this.bot.tf2 as any).backpack as GCBackpackItem[]) ?? []).find(
                     item => String(item.id) === resultId
                 );
                 if (
                     !result ||
-                    result.def_index !== pair.targetDefindex ||
+                    result.def_index !== targetDefindex ||
                     result.flag_cannot_craft ||
                     getItemAttrValue(result, 2025) !== 1
                 ) {
@@ -5415,22 +5450,22 @@ export default class MyHandler extends Handler {
                 // than offering them in another trade on the basis of a stale Steam cache.
                 appliedIds.forEach(id => this.craftingInFlightIds.delete(id));
                 this.bot.messageAdmins(
-                    `⚠️ Depot Kit application for fab ${fabId} is uncertain (kit ${pair.kitId}, weapon ${pair.weaponId}): ${(err as Error).message}. Inspect GC inventory before reusing either item.`,
+                    `⚠️ Depot Kit application for fab ${fabId} is uncertain (kit ${kitId}, target ${targetDefindex}): ${(err as Error).message}. Inspect GC inventory before reusing either item.`,
                     []
                 );
                 throw err;
             }
 
-            const kitSku = inventory.findByAssetid(pair.kitId);
-            inventory.removeItem(pair.kitId);
-            inventory.removeItem(pair.weaponId);
-            const tierOneSku = `${pair.targetDefindex};6;kt-1`;
+            const kitSku = inventory.findByAssetid(kitId);
+            inventory.removeItem(kitId);
+            if (pair) inventory.removeItem(pair.weaponId);
+            const tierOneSku = `${targetDefindex};6;kt-1`;
             inventory.addItem(tierOneSku, resultId);
-            this.craftingInFlightIds.delete(pair.kitId);
-            this.craftingInFlightIds.delete(pair.weaponId);
+            this.craftingInFlightIds.delete(kitId);
+            if (pair) this.craftingInFlightIds.delete(pair.weaponId);
             this.craftingInFlightIds.add(resultId);
             if (kitSku) this.bot.listings.checkByPriceKey({ priceKey: kitSku });
-            this.bot.listings.checkByPriceKey({ priceKey: `${pair.targetDefindex};6` });
+            if (pair) this.bot.listings.checkByPriceKey({ priceKey: `${targetDefindex};6` });
             log.info(`[craftingService] Depot fab ${fabId}: Basic Kit applied -> tier-1 weapon ${resultId}`);
             appliedIds.push(resultId);
         }
