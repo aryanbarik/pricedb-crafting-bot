@@ -78,3 +78,9 @@ job so website notifications and delivery receipts update the full batch.
 Completion is persisted even when no output was recognized yet; reconciliation can
 then recover it after a restart. Missing assets remain owed and block partial retries.
 Manual administrator recovery commands retain their explicit override behavior.
+
+When Steam's historical offer list omits an older accepted retry, use
+`scripts/reconcile-known-crafting-returns.cjs <source>:<return>` on the VPS to
+verify its exact receipt. `--apply` runs the existing receipt reconciliation in
+the running bot, preserving both memory and disk. It requires a complete transfer
+of the entire recorded balance to the original customer and sends no offers.
