@@ -53,7 +53,7 @@ function fixture() {
     return { events, offer, handler };
 }
 
-test('killstreakify refreshes the GC before returning modified weapons and unmatched inputs', async () => {
+test('killstreakify keeps modified weapons and unmatched inputs queued without an unconditional GC reset', async () => {
     const { events, handler } = fixture();
     await returnResults.call(
         handler,
@@ -64,16 +64,17 @@ test('killstreakify refreshes the GC before returning modified weapons and unmat
         new Set(['kit', 'weapon']),
         ['result']
     );
-    expect(events).toEqual(['refresh', 'read']);
+    expect(events).toEqual([]);
     expect(handler.queueCompletedCraftingReturn).toHaveBeenCalledWith('source', ['result', 'unmatched']);
     expect(handler.bot.trades.sendOffer).not.toHaveBeenCalled();
 });
 
-test('a failed GC refresh still attempts the return instead of abandoning customer assets', async () => {
+test('a known modified weapon is queued without depending on the current GC snapshot', async () => {
     const { handler } = fixture();
-    handler.bot.tf2gc.forceFreshBackpack.mockRejectedValue(new Error('GC timeout'));
+    handler.freshGCBackpack.mockRejectedValue(new Error('GC timeout'));
     await returnResults.call(handler, new SteamID('76561198164485484'), undefined, 'source', [], new Set(), ['result']);
-    expect(handler.queueCompletedCraftingReturn).toHaveBeenCalledTimes(1);
+    expect(handler.queueCompletedCraftingReturn).toHaveBeenCalledWith('source', ['result']);
+    expect(handler.freshGCBackpack).not.toHaveBeenCalled();
 });
 
 test('returning unchanged inputs does not reset the GC', async () => {

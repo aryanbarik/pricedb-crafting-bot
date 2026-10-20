@@ -18,7 +18,7 @@ jest.mock('../../lib/craftingWebsiteApi', () => ({
 
 interface ReturnHandler {
     queueCompletedCraftingReturn: (source: string, ids: string[]) => Promise<void>;
-    reconcileCraftingOperations: () => Promise<void>;
+    reconcileCraftingOperations: (forceRefresh?: boolean) => Promise<void>;
     craftingJournal: CraftingJournal;
     craftingInFlightIds: Set<string>;
     heldReturnItems: Map<string, string[]>;
@@ -31,6 +31,7 @@ interface ReturnHandler {
     reconcileMissingCraftReceipts: () => Promise<void>;
     isCraftingAssetReserved: (id: string) => boolean;
     prepareCraftingOffer: (offer: TradeOffer, giveIds: string[], receiveIds: string[]) => void;
+    bot: { tf2gc: { forceFreshBackpack: jest.Mock }; messageAdmins: jest.Mock };
 }
 
 let directory: string;
@@ -354,6 +355,76 @@ test('an unrelated customer with pending work does not block a complete return',
     handler.craftingJournal.recordAccepted('other', '76561198135282692', 'components', []);
     await handler.queueCompletedCraftingReturn('source', ['ready']);
     expect(sendOffer).toHaveBeenCalledTimes(1);
+});
+
+test('an old fabricator awaiting components does not block a separate completed batch', async () => {
+    const { sendOffer } = setupBatchReturns(['ready']);
+    handler.craftingJournal.recordAccepted('old', customer.getSteamID64(), 'intake', ['old-fab']);
+    handler.craftingJournal.update('old', { stage: 'awaiting_components' });
+    await handler.queueCompletedCraftingReturn('source', ['ready']);
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+    expect(handler.craftingJournal.get('old')).toMatchObject({ stage: 'awaiting_components', fabricatorAssetIds: ['old-fab'] });
+});
+
+test('one fresh snapshot reconciles multiple held operations and retains their return claims', async () => {
+    const refresh = jest.fn().mockResolvedValue(undefined);
+    Object.assign(handler, {
+        bot: { tf2gc: { forceFreshBackpack: refresh }, messageAdmins: jest.fn() },
+        craftingRefreshInFlight: null,
+        nextCraftingRefreshAt: 0,
+        craftingRefreshFailures: 0
+    });
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    const second = { ...heldOperation, id: 'second', inputIds: ['fab-2'], beforeIds: ['fab-2'], expected: { defindexes: [6523], attributes: {}, newlyCreated: true } };
+    handler.craftingJournal.addOperation('source', heldOperation);
+    handler.craftingJournal.addOperation('source', second);
+    const attrs = [
+        [2012, 997], [2014, 3], [2013, 2004]
+    ].map(([def_index, value]) => ({ def_index, value }));
+    handler.freshGCBackpack = jest.fn().mockResolvedValue([
+        { id: 'rescue-kit', def_index: 6526, quality: 6, attribute: attrs },
+        { id: 'other-kit', def_index: 6523, quality: 6 }
+    ]);
+    await handler.reconcileCraftingOperations(true);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(handler.craftingJournal.get('source')?.operations?.map(op => op.outputId)).toEqual(['rescue-kit', 'other-kit']);
+    expect(handler.craftingJournal.get('source')?.returnAssetIds).toEqual(expect.arrayContaining(['rescue-kit', 'other-kit']));
+});
+
+test('held reconciliation backs off after timeouts and preserves all reservations', async () => {
+    let now = Date.parse('2026-10-20T17:00:00Z');
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const refresh = jest.fn().mockRejectedValue(new Error('GC timeout'));
+    Object.assign(handler, {
+        bot: { tf2gc: { forceFreshBackpack: refresh }, messageAdmins: jest.fn() },
+        craftingRefreshInFlight: null,
+        nextCraftingRefreshAt: 0,
+        craftingRefreshFailures: 0
+    });
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    handler.craftingJournal.addOperation('source', heldOperation);
+    handler.craftingInFlightIds.add('fab');
+    handler.freshGCBackpack = jest.fn().mockResolvedValue([]);
+    await handler.reconcileCraftingOperations(true);
+    await handler.reconcileCraftingOperations(true);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    now += 3 * 60 * 1000;
+    await handler.reconcileCraftingOperations(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    now += 3 * 60 * 1000;
+    await handler.reconcileCraftingOperations(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(handler.craftingJournal.get('source')?.operations?.[0].state).toBe('held');
+    expect(handler.craftingInFlightIds.has('fab')).toBe(true);
+    jest.restoreAllMocks();
+});
+
+test('no held operation means no forced GC refresh', async () => {
+    const refresh = jest.fn();
+    Object.assign(handler, { bot: { tf2gc: { forceFreshBackpack: refresh } } });
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    await handler.reconcileCraftingOperations(true);
+    expect(refresh).not.toHaveBeenCalled();
 });
 
 test('a zero-output held job records completion, survives restart, and identifies the live GC Rescue Ranger kit', async () => {

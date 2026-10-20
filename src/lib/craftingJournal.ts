@@ -28,6 +28,7 @@ export interface CraftJobRecord {
     assetIdMappings?: Record<string, string>;
     returnAttempts?: ReturnAttempt[];
     reconciliationAlerted?: boolean;
+    reconciliationEscalatedAt?: string;
     reconciliationEvidence?: { offerIds: string[]; note: string };
     processingComplete?: boolean;
     returnStartedAt?: string;
