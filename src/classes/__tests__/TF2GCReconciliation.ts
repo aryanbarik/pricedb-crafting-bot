@@ -177,3 +177,42 @@ test('a requested GC refresh waits behind the active operation', async () => {
     await promise;
     expect(refresh).toHaveBeenCalledTimes(1);
 });
+
+test('refresh relaunches after appQuit without a GC disconnect and waits for backpackLoaded', async () => {
+    const client = Object.assign(new EventEmitter(), { gamesPlayed: jest.fn() });
+    const tf2 = Object.assign(new EventEmitter(), { haveGCSession: true });
+    let quitting = false;
+    client.gamesPlayed.mockImplementation(() => {
+        quitting = true;
+        tf2.haveGCSession = false;
+        client.emit('appQuit', 440);
+        quitting = false;
+    });
+    const updateSteamGamePresence = jest.fn(() => {
+        expect(quitting).toBe(false);
+        tf2.haveGCSession = true;
+        tf2.emit('backpackLoaded');
+    });
+    const gc = new TF2GC({ client, tf2, updateSteamGamePresence } as unknown as Bot) as unknown as Observer;
+    const refresh = gc.refreshBackpackSession();
+    expect(updateSteamGamePresence).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    await refresh;
+    expect(updateSteamGamePresence).toHaveBeenCalledTimes(1);
+    expect(client.listenerCount('appQuit')).toBe(0);
+    expect(tf2.listenerCount('backpackLoaded')).toBe(0);
+});
+
+test('refresh timeout cleans listeners even when Steam never supplies a new backpack', async () => {
+    const client = Object.assign(new EventEmitter(), { gamesPlayed: jest.fn() });
+    const tf2 = Object.assign(new EventEmitter(), { haveGCSession: true });
+    client.gamesPlayed.mockImplementation(() => client.emit('appQuit', 440));
+    const updateSteamGamePresence = jest.fn();
+    const gc = new TF2GC({ client, tf2, updateSteamGamePresence } as unknown as Bot) as unknown as Observer;
+    const result = expect(gc.refreshBackpackSession()).rejects.toThrow('Timed out');
+    await jest.advanceTimersByTimeAsync(30001);
+    await result;
+    expect(updateSteamGamePresence).toHaveBeenCalledTimes(1);
+    expect(client.listenerCount('appQuit')).toBe(0);
+    expect(tf2.listenerCount('backpackLoaded')).toBe(0);
+});

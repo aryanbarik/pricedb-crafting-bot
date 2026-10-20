@@ -6,7 +6,7 @@ import {
     operationOutputs,
     recipeOutput,
     originalItemId,
-    matchesOutput,
+    matchesOperationOutput,
     operationPartialOutput
 } from '../lib/craftingReconciliation';
 import { randomUUID } from 'crypto';
@@ -686,7 +686,8 @@ export default class TF2GC {
                 item =>
                     !operation.beforeIds.includes(String(item.id)) &&
                     !excluded.has(String(item.id)) &&
-                    matchesOutput(item, expected)
+                    !excluded.has(originalItemId(item)) &&
+                    matchesOperationOutput(item, operation)
             );
             this.bot.handler.reserveCraftingCandidates(
                 sourceOfferId,
@@ -1268,18 +1269,21 @@ export default class TF2GC {
             let reconnectStarted = false;
             const cleanup = (): void => {
                 clearTimeout(timeout);
-                this.bot.tf2.removeListener('disconnectedFromGC', onDisconnected);
+                this.bot.client.removeListener('appQuit', onAppQuit);
                 this.bot.tf2.removeListener('backpackLoaded', onBackpackLoaded);
             };
             const onBackpackLoaded = (): void => {
                 cleanup();
                 resolve();
             };
-            const onDisconnected = (): void => {
+            const onAppQuit = (appid: number): void => {
+                if (appid !== 440 || reconnectStarted) return;
                 reconnectStarted = true;
                 // Use the normal presence writer so custom/live-key-status presence is restored
                 // together with TF2, rather than replacing it with a bare gamesPlayed(440).
-                this.bot.updateSteamGamePresence(true);
+                // steam-user updates its playing-app list after emitting appQuit.
+                // Relaunch on the next turn so appLaunched fires and node-tf2 reconnects.
+                setImmediate(() => this.bot.updateSteamGamePresence(true));
             };
             const timeout = setTimeout(() => {
                 cleanup();
@@ -1290,7 +1294,7 @@ export default class TF2GC {
             // Register before leaving TF2: SOCacheSubscribed can arrive in the same tick as the
             // next ClientWelcome, and missing it would turn a successful reset into a timeout.
             this.bot.tf2.once('backpackLoaded', onBackpackLoaded);
-            this.bot.tf2.once('disconnectedFromGC', onDisconnected);
+            this.bot.client.on('appQuit', onAppQuit);
             this.bot.client.gamesPlayed([]);
         });
     }

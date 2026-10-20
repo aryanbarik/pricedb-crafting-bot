@@ -84,6 +84,16 @@ export function matchesOutput(item: CraftItem, expected: OutputExpectation): boo
     });
 }
 
+/** Stock kit application creates a base weapon and then modifies its asset ID.
+ * Its original_id therefore need not equal its final ID. Keep this exception
+ * specific to that operation, including historical journal records.
+ */
+export function matchesOperationOutput(item: CraftItem, operation: CraftOperation): boolean {
+    if (operation.kind !== 'applyKSKitToBaseItem') return matchesOutput(item, operation.expected);
+    if (operation.beforeIds.includes(originalItemId(item))) return false;
+    return matchesOutput(item, { ...operation.expected, newlyCreated: false });
+}
+
 export function operationOutputs(
     operation: CraftOperation,
     backpack: CraftItem[],
@@ -96,7 +106,8 @@ export function operationOutputs(
         item =>
             (!before.has(String(item.id)) || String(item.id) === operation.retainedInputId) &&
             !excludedIds.has(String(item.id)) &&
-            matchesOutput(item, operation.expected)
+            !excludedIds.has(originalItemId(item)) &&
+            matchesOperationOutput(item, operation)
     );
 }
 

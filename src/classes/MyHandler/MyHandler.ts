@@ -287,6 +287,13 @@ export default class MyHandler extends Handler {
         const excluded = new Set<string>();
         for (const job of this.craftingJournal.open()) {
             job.receivedAssetIds.forEach(id => excluded.add(id));
+            // Until a trade receipt identifies its arrivals, none of those arrivals
+            // can safely be assigned to a concurrent stock-weapon application.
+            if (job.receiptPending) {
+                for (const item of this.bot.tf2?.backpack ?? []) {
+                    if (!job.receiptSnapshotIds?.includes(String(item.id))) excluded.add(String(item.id));
+                }
+            }
             for (const operation of job.operations ?? []) {
                 if (operation.id !== operationId && operation.outputId) excluded.add(operation.outputId);
                 if (operation.id !== operationId) operation.candidateIds?.forEach(id => excluded.add(id));
@@ -310,33 +317,61 @@ export default class MyHandler extends Handler {
             });
     }
 
+    private craftingReconciliationInFlight: Promise<void> | null = null;
+
     private async reconcileCraftingOperations(forceRefresh = false): Promise<void> {
+        if (this.craftingReconciliationInFlight != null) return this.craftingReconciliationInFlight;
+        this.craftingReconciliationInFlight = this.runCraftingReconciliation(forceRefresh);
+        try {
+            await this.craftingReconciliationInFlight;
+        } finally {
+            this.craftingReconciliationInFlight = null;
+        }
+    }
+
+    private async runCraftingReconciliation(forceRefresh = false, refreshed = false): Promise<void> {
         await this.reconcileMissingCraftReceipts();
         const heldCount = this.craftingJournal.open().reduce(
             (count, job) => count + (job.operations ?? []).filter(operation => operation.state === 'held').length,
             0
         );
-        if (heldCount === 0) return;
-        if (forceRefresh) {
-            try {
-                await this.requestCraftingBackpackRefresh(`${heldCount} held operation(s)`);
-            } catch (err) {
-                log.warn(`[craftingService] Held operation reconciliation deferred: ${(err as Error).message}`);
-                return;
+        if (heldCount === 0 || this.craftingJournal.open().some(job => job.operations?.some(op => op.state === 'pending'))) return;
+        // Do not block recovery indefinitely inside freshGCBackpack when GC is offline.
+        // A failed refresh preserves custody; backpackLoaded schedules another pass.
+        if (this.bot.tf2 && !this.bot.tf2.haveGCSession) {
+            if (forceRefresh) {
+                try {
+                    await this.requestCraftingBackpackRefresh(`${heldCount} held operation(s)`);
+                    await this.runCraftingReconciliation(false, true);
+                } catch (err) {
+                    log.warn(`[craftingService] Held operation refresh deferred: ${(err as Error).message}`);
+                }
             }
+            return;
         }
         const backpack = (await this.freshGCBackpack()) as CraftItem[];
         let resolvedCount = 0;
         for (const job of this.craftingJournal.open()) {
-            for (const operation of job.operations ?? []) {
+            // Later snapshots can uniquely identify a later output; claiming that
+            // result then removes the ambiguity for an earlier operation.
+            for (const operation of [...(job.operations ?? [])].sort((a, b) => b.startedAt.localeCompare(a.startedAt))) {
                 if (operation.state !== 'held') continue;
                 const excluded = this.craftingOutputExclusions(operation.id);
                 if (operation.retainedInputId) excluded.delete(operation.retainedInputId);
                 const outputs = operationOutputs(operation, backpack, excluded);
                 const partial =
-                    outputs.length === 0 ? operationPartialOutput(operation, backpack, excluded, true) : undefined;
+                    outputs.length === 0 ? operationPartialOutput(operation, backpack, excluded, refreshed) : undefined;
                 const output = outputs.length === 1 ? outputs[0] : partial;
-                if (output) {
+                const competingClaim = output && this.craftingJournal.open().some(otherJob =>
+                    (otherJob.operations ?? []).some(other => {
+                        if (other.id === operation.id || other.state === 'completed') return false;
+                        const otherExcluded = this.craftingOutputExclusions(other.id);
+                        if (other.retainedInputId) otherExcluded.delete(other.retainedInputId);
+                        const candidates = operationOutputs(other, backpack, otherExcluded);
+                        return candidates.length === 1 && String(candidates[0].id) === String(output.id);
+                    })
+                );
+                if (output && !competingClaim) {
                     const consumed = operation.inputIds.filter(id => !backpack.some(item => String(item.id) === id));
                     this.finishCraftingOperation(job.offerId, operation.id, String(output.id), consumed);
                     resolvedCount++;
@@ -371,7 +406,20 @@ export default class MyHandler extends Handler {
                 );
             }
         }
-        log.info(`[craftingService] GC reconciliation resolved ${resolvedCount}/${heldCount} held operation(s)${forceRefresh ? ' after a fresh backpack load' : ' from the current backpack'}`);
+        log.info(`[craftingService] GC reconciliation resolved ${resolvedCount}/${heldCount} held operation(s)${refreshed ? ' after a fresh backpack load' : ' from the current backpack'}`);
+        if (resolvedCount > 0 && resolvedCount < heldCount) {
+            // Resolving one claim may disambiguate another job for the same customer.
+            await this.runCraftingReconciliation(forceRefresh, refreshed);
+            return;
+        }
+        if (forceRefresh && resolvedCount < heldCount) {
+            try {
+                await this.requestCraftingBackpackRefresh(`${heldCount - resolvedCount} held operation(s)`);
+                await this.runCraftingReconciliation(false, true);
+            } catch (err) {
+                log.warn(`[craftingService] Held operation refresh deferred: ${(err as Error).message}`);
+            }
+        }
     }
 
     private async reconcileMissingCraftReceipts(): Promise<void> {
@@ -683,6 +731,18 @@ export default class MyHandler extends Handler {
 
     private heldItemsRetryInterval: NodeJS.Timeout;
 
+    private craftingEvidenceTimer: NodeJS.Timeout | null = null;
+
+    private readonly onCraftingEvidence = (): void => {
+        if (this.craftingEvidenceTimer) return;
+        this.craftingEvidenceTimer = setTimeout(() => {
+            this.craftingEvidenceTimer = null;
+            const operations = this.craftingJournal.open().flatMap(job => job.operations ?? []);
+            if (!operations.some(op => op.state === 'held') || operations.some(op => op.state === 'pending')) return;
+            void this.retryAllHeldItems(false).catch(err => log.warn('Craft evidence reconciliation failed:', err));
+        }, 250);
+    };
+
     private retryingHeldItems = false;
 
     // One refresh budget for customer returns and held-output reconciliation. TF2GC's job
@@ -873,8 +933,13 @@ export default class MyHandler extends Handler {
         // Automatically retry any held crafting-service items (stuck intake fabricators, stuck
         // return offers) every few minutes, so transient Steam failures resolve themselves
         // without needing an admin to run !retryintake/!retryreturn manually.
+        this.bot.tf2.on('backpackLoaded', this.onCraftingEvidence);
+        this.bot.tf2.on('itemAcquired', this.onCraftingEvidence);
+        this.bot.tf2.on('itemChanged', this.onCraftingEvidence);
+        this.bot.tf2.on('itemRemoved', this.onCraftingEvidence);
+        this.onCraftingEvidence();
         this.heldItemsRetryInterval = setInterval(() => {
-            void this.retryAllHeldItems();
+            void this.retryAllHeldItems().catch(err => log.warn('Held item retry failed:', err));
         }, 3 * 60 * 1000);
 
         // Send notification to admin/Discord Webhook if there's any item failed to go through updateOldPrices
@@ -950,6 +1015,11 @@ export default class MyHandler extends Handler {
     }
 
     onShutdown(): Promise<void> {
+        clearInterval(this.heldItemsRetryInterval);
+        clearTimeout(this.craftingEvidenceTimer);
+        for (const event of ['backpackLoaded', 'itemAcquired', 'itemChanged', 'itemRemoved'] as const) {
+            this.bot.tf2.removeListener(event, this.onCraftingEvidence);
+        }
         if (this.poller) {
             clearInterval(this.poller);
         }
@@ -5920,11 +5990,11 @@ export default class MyHandler extends Handler {
      * batch of fabricators that got held together goes back out as one combined offer instead of
      * one offer per fabricator.
      */
-    private async retryAllHeldItems(): Promise<void> {
+    private async retryAllHeldItems(forceRefresh = true): Promise<void> {
         if (this.retryingHeldItems) return;
         this.retryingHeldItems = true;
         try {
-            await this.reconcileCraftingOperations(true);
+            await this.reconcileCraftingOperations(forceRefresh);
             await this.reconcileCraftingReturns();
             const heldByPartner = new Map<string, string[]>();
             for (const [fabAssetId, partnerSteamID64] of this.heldIntakeFabricators) {
@@ -6337,6 +6407,7 @@ export default class MyHandler extends Handler {
     }
 
     onTF2QueueCompleted(): void {
+        this.onCraftingEvidence();
         log.debug('Queue finished');
         this.bot.updateSteamGamePresence(true);
     }

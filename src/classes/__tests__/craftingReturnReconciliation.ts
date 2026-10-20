@@ -381,7 +381,7 @@ test('one fresh snapshot reconciles multiple held operations and retains their r
     const attrs = [
         [2012, 997], [2014, 3], [2013, 2004]
     ].map(([def_index, value]) => ({ def_index, value }));
-    handler.freshGCBackpack = jest.fn().mockResolvedValue([
+    handler.freshGCBackpack = jest.fn().mockResolvedValueOnce([]).mockResolvedValue([
         { id: 'rescue-kit', def_index: 6526, quality: 6, attribute: attrs },
         { id: 'other-kit', def_index: 6523, quality: 6 }
     ]);
@@ -512,4 +512,56 @@ test('a new accepted job during inventory refresh prevents sending the earlier r
     });
     expect(await handler.retryHeldReturn(customer.getSteamID64())).toContain('Waiting for all');
     expect(sendOffer).not.toHaveBeenCalled();
+});
+
+function stockOperation(id: string, startedAt: string, beforeIds: string[]): CraftOperation {
+    return {
+        id, kind: 'applyKSKitToBaseItem', inputIds: [`kit-${id}`], beforeIds, state: 'held', startedAt,
+        expected: { defindexes: [197, 7], attributes: { 2025: 1 }, newlyCreated: true }
+    };
+}
+const wrench = (id: string): CraftItem => ({
+    id, original_id: `original-${id}`, def_index: 197, quality: 6, attribute: [{ def_index: 2025, value: 1 }]
+});
+
+test('current evidence resolves sequential Wrenches during cooldown and sends one combined return', async () => {
+    const { sendOffer } = setupBatchReturns([]);
+    Object.assign(handler, { nextCraftingRefreshAt: Date.now() + 30 * 60 * 1000 });
+    const refresh = jest.fn();
+    handler.bot.tf2gc = { forceFreshBackpack: refresh };
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    handler.craftingJournal.update('source', { processingComplete: true });
+    handler.craftingJournal.addOperation('source', stockOperation('first', '2026-10-20T01:07:44Z', []));
+    handler.craftingJournal.addOperation('source', stockOperation('second', '2026-10-20T01:08:44Z', ['wrench-one']));
+    handler.freshGCBackpack = jest.fn().mockResolvedValue([wrench('wrench-one'), wrench('wrench-two')]);
+    await handler.reconcileCraftingOperations(true);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(handler.craftingJournal.get('source')?.operations?.map(op => op.outputId)).toEqual(['wrench-one', 'wrench-two']);
+    await handler.retryHeldReturn(customer.getSteamID64());
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+});
+
+test('two operations claiming the same sole output remain held', async () => {
+    setupBatchReturns([]);
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    handler.craftingJournal.addOperation('source', stockOperation('first', '2026-10-20T01:07:44Z', []));
+    handler.craftingJournal.addOperation('source', stockOperation('second', '2026-10-20T01:08:44Z', []));
+    handler.freshGCBackpack = jest.fn().mockResolvedValue([wrench('one')]);
+    await handler.reconcileCraftingOperations();
+    expect(handler.craftingJournal.get('source')?.operations?.map(op => op.state)).toEqual(['held', 'held']);
+    expect(handler.craftingJournal.get('source')?.returnAssetIds).toEqual([]);
+});
+
+test('unknown incoming trade arrivals cannot become stock application outputs', async () => {
+    setupBatchReturns([]);
+    handler.reconcileMissingCraftReceipts = jest.fn().mockResolvedValue(undefined);
+    handler.craftingJournal.addOperation('source', stockOperation('first', '2026-10-20T01:07:44Z', []));
+    handler.craftingJournal.recordAccepted('incoming', '76561198135282692', 'components', []);
+    handler.craftingJournal.update('incoming', { receiptPending: true, receiptSnapshotIds: [] });
+    const backpack = [wrench('unknown-arrival')];
+    Object.assign(handler.bot, { tf2: { haveGCSession: true, backpack } });
+    handler.freshGCBackpack = jest.fn().mockResolvedValue(backpack);
+    await handler.reconcileCraftingOperations();
+    expect(handler.craftingJournal.get('source')?.operations?.[0].state).toBe('held');
+    expect(handler.craftingJournal.get('source')?.returnAssetIds).toEqual([]);
 });

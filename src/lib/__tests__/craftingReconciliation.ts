@@ -141,3 +141,20 @@ test.each([
     ).toEqual([]);
     expect(operationOutputs(op, [{ ...output, original_id: 'traded-in' }], new Set())).toEqual([]);
 });
+
+test('stock kit outputs may change asset identity but still require consumption and new provenance', () => {
+    const stock: CraftOperation = {
+        ...operation, kind: 'applyKSKitToBaseItem', inputIds: ['tool'], beforeIds: ['tool', 'old'],
+        expected: { defindexes: [192, 2], attributes: { 2025: 1 }, newlyCreated: true }
+    };
+    const axe: CraftItem = {
+        id: '17707156882', original_id: '17707156881', def_index: 192, quality: 6,
+        attribute: [{ def_index: 2025, value: 1 }]
+    };
+    expect(operationOutputs(stock, [axe], new Set())).toEqual([axe]);
+    expect(operationOutputs(stock, [axe, { id: 'tool', def_index: 6528, quality: 6 }], new Set())).toEqual([]);
+    expect(operationOutputs(stock, [axe], new Set([axe.id]))).toEqual([]);
+    expect(operationOutputs(stock, [axe], new Set([axe.original_id]))).toEqual([]);
+    expect(operationOutputs(stock, [{ ...axe, original_id: 'old' }], new Set())).toEqual([]);
+    expect(operationOutputs(stock, [{ ...axe, attribute: [{ def_index: 2025, value: 2 }] }], new Set())).toEqual([]);
+});

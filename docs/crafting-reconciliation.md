@@ -89,3 +89,23 @@ For an older delivery absent from offer history, pass `sourceOfferId:trade-<trad
 The tool fetches the complete Steam exchange receipt and requires an exact match
 of the recorded return balance, or of all intake fabricators, to the customer or
 the configured owner. Intake records are archived only after this proof.
+
+## Stock weapon identities and prompt recovery (2026-10-20)
+
+Applying a kit to a stock weapon creates a base item and modifies its asset ID. The
+Fire Axe `17707156882` retains original ID `17707156881`; the held Wrenches show the
+same behavior. Only `applyKSKitToBaseItem` permits unequal original/current IDs for
+new outputs. Input consumption, expected attributes, before snapshots, received
+assets and other operation reservations still apply. An unresolved trade receipt
+quarantines its possible arrivals. Fabricator output provenance checks remain strict.
+Later operation snapshots can uniquely identify later outputs; resolving those
+claims can disambiguate earlier operations in the same pass. Competing sole claims
+remain held rather than assigning the item by iteration order.
+
+Recovery checks the current connected GC backpack before requesting a forced refresh.
+Backoff limits reconnect requests, not matching available evidence. Debounced item
+and backpack events schedule the existing combined-return sweep, and startup checks
+held operations immediately. Active operations finish before held matching runs.
+Forced refresh uses Steam's appQuit event and relaunches on the next event turn:
+node-tf2 deliberately emits no disconnectedFromGC event for a normal app exit.
+No journal migration or manual rewrite is required for existing held operations.
