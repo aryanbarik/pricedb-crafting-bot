@@ -22,8 +22,19 @@ const EXCLUDED_CRAFTING_RESKIN_DEFINDEXES = new Set([
     30667 // Batsaber
 ]);
 
+const EXCLUDED_CRAFTING_WEAPON_DEFINDEXES = new Set([
+    ...EXCLUDED_CRAFTING_RESKIN_DEFINDEXES,
+    237, // Rocket Jumper
+    265 // Stickybomb Jumper
+]);
+
 export function isExcludedCraftingReskinDefindex(defindex: number): boolean {
     return EXCLUDED_CRAFTING_RESKIN_DEFINDEXES.has(defindex);
+}
+
+/** Applied weapons that must never be consumed as automatic Fabricator ingredients. */
+export function isExcludedCraftingWeaponDefindex(defindex: number): boolean {
+    return EXCLUDED_CRAFTING_WEAPON_DEFINDEXES.has(defindex);
 }
 
 /**

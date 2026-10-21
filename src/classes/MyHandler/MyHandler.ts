@@ -50,7 +50,7 @@ import {
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
 import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
-import { hasExcludedHalloweenSpell, isExcludedCraftingReskinDefindex, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
+import { hasExcludedHalloweenSpell, isExcludedCraftingReskinDefindex, isExcludedCraftingWeaponDefindex, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
 
 import { noiseMakers } from '../../lib/data';
 import { sendAlert } from '../DiscordWebhook/export';
@@ -4173,8 +4173,8 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake: excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
-                    if (isExcludedCraftingReskinDefindex(skuDefindex)) {
-                        log.debug(`[craftingService] Intake: excluding promotional reskin SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                    if (isExcludedCraftingWeaponDefindex(skuDefindex)) {
+                        log.debug(`[craftingService] Intake: excluding blocked crafting weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
                     results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)).filter(id => allowedIngredientIds === null || allowedIngredientIds.has(id)));
@@ -4392,8 +4392,8 @@ export default class MyHandler extends Handler {
                         log.debug(`[craftingService] Intake (batch): excluding Festive weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
-                    if (isExcludedCraftingReskinDefindex(skuDefindex)) {
-                        log.debug(`[craftingService] Intake (batch): excluding promotional reskin SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
+                    if (isExcludedCraftingWeaponDefindex(skuDefindex)) {
+                        log.debug(`[craftingService] Intake (batch): excluding blocked crafting weapon SKU ${sku} from kt-${killstreakTier} weapon-slot candidates`);
                         continue;
                     }
                     results.push(...excludeSpelledIds(theirInventory.findBySKU(sku, tradableOnly)).filter(id => allowedIngredientIds === null || allowedIngredientIds.has(id)));
@@ -5507,7 +5507,7 @@ export default class MyHandler extends Handler {
                         sku === `${weapon.def_index};6` &&
                         !isProtectedItem(raw) &&
                         !hasExcludedHalloweenSpell(raw) &&
-                        !isExcludedCraftingReskinDefindex(weapon.def_index) &&
+                        !isExcludedCraftingWeaponDefindex(weapon.def_index) &&
                         !isFestiveWeaponDefindex(weapon.def_index, this.bot) &&
                         !this.bot.trades.isInTrade(id)
                     );

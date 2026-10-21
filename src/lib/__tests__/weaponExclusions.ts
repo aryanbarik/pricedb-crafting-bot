@@ -1,4 +1,4 @@
-import { isExcludedCraftingReskinDefindex } from '../weaponExclusions';
+import { isExcludedCraftingReskinDefindex, isExcludedCraftingWeaponDefindex } from '../weaponExclusions';
 
 describe('isExcludedCraftingReskinDefindex', () => {
     it.each([
@@ -22,6 +22,16 @@ describe('isExcludedCraftingReskinDefindex', () => {
         [298 + 1, 'unrelated neighboring defindex'],
         [1100 + 1, 'unrelated neighboring defindex']
     ])('allows %i (%s)', (defindex: number) => {
+        expect(isExcludedCraftingReskinDefindex(defindex)).toBe(false);
+    });
+});
+
+describe('isExcludedCraftingWeaponDefindex', () => {
+    it.each([
+        [237, 'Rocket Jumper'],
+        [265, 'Stickybomb Jumper']
+    ])('excludes %i (%s)', (defindex: number) => {
+        expect(isExcludedCraftingWeaponDefindex(defindex)).toBe(true);
         expect(isExcludedCraftingReskinDefindex(defindex)).toBe(false);
     });
 });
