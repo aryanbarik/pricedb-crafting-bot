@@ -4155,6 +4155,10 @@ export default class MyHandler extends Handler {
                         continue;
                     }
                     if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+                    if (!this.bot.craftWeapons.includes(`${skuDefindex};6`)) {
+                        log.debug(`[craftingService] Intake: excluding non-weapon Killstreak SKU ${sku}`);
+                        continue;
+                    }
                     // Non-Craftable items can't be used as crafting ingredients in TF2 at all —
                     // Steam's GC would reject the whole recipe fulfillment if one were included.
                     if (parts.includes('uncraftable')) {
@@ -4370,6 +4374,10 @@ export default class MyHandler extends Handler {
                         continue;
                     }
                     if (parts[1] !== '6' || !parts.includes(`kt-${killstreakTier}`)) continue;
+                    if (!this.bot.craftWeapons.includes(`${skuDefindex};6`)) {
+                        log.debug(`[craftingService] Intake (batch): excluding non-weapon Killstreak SKU ${sku}`);
+                        continue;
+                    }
                     // Non-Craftable items can't be used as crafting ingredients in TF2 at all —
                     // Steam's GC would reject the whole recipe fulfillment if one were included.
                     if (parts.includes('uncraftable')) {
