@@ -21,6 +21,9 @@ export interface BankCatalog {
 const METAL: Record<string, number> = { '5000;6': 1, '5001;6': 3, '5002;6': 9 };
 const MAX_WEAPONS = 50;
 const FREE_WEAPON_BANK_ADMIN = '76561198138534634';
+// These Medi Guns are useful enough to preserve and should not be purchased by the weapon bank.
+// Keep them available on the bot's buy side; this restriction applies only to customer sales.
+const SELL_EXCLUDED_DEFINDEXES = new Set<number>([411, 998]); // Quick-Fix, Vaccinator
 // Fail closed: targets found in current Steam Market Killstreak Kit listings (18 Sep 2026),
 // plus Widowmaker and Lollichop, verified on their individual Steam listing pages.
 // The schema's can_killstreakify flag alone also includes drinks, lunchboxes, boots, etc.
@@ -56,6 +59,11 @@ export function isEligible(item: EconItem, bot: Bot, allowProtected = false): bo
     if (item.descriptions?.some((description: { value?: string }) => description.value?.startsWith('Halloween:')))
         return false;
     return schemaItem?.capabilities?.can_killstreakify === true;
+}
+
+export function isSellEligible(item: EconItem, bot: Bot, allowProtected = false): boolean {
+    if (!isEligible(item, bot, allowProtected)) return false;
+    return !SELL_EXCLUDED_DEFINDEXES.has(Number(rawSku(item, bot).split(';')[0]));
 }
 
 function available(item: EconItem, bot: Bot, ours: boolean): boolean {
@@ -103,7 +111,7 @@ export function duplicateWeaponAssetIds(items: EconItem[], bot: Bot, allowProtec
     );
     const bySku = new Map<string, string[]>();
     for (const { item } of tradable) {
-        if (!isEligible(item, bot, allowProtected)) continue;
+        if (!isSellEligible(item, bot, allowProtected)) continue;
         const baseSku = rawSku(item, bot);
         const ids = bySku.get(baseSku) ?? [];
         ids.push(item.id);
@@ -118,7 +126,7 @@ export async function getBankCatalog(bot: Bot, steamId: string): Promise<BankCat
     const { yours, ours } = await inventories(bot, steamId);
     const list = (inventory: Inventory, isOurs: boolean): BankItem[] =>
         inventory.getRawItems
-            .filter(item => available(item, bot, isOurs) && isEligible(item, bot, true))
+            .filter(item => available(item, bot, isOurs) && (isOurs ? isEligible(item, bot, true) : isSellEligible(item, bot, true)))
             .map(item => ({
                 assetId: item.id,
                 name: item.market_name ?? item.name,
@@ -200,7 +208,8 @@ export async function sendBankOffer(
     const validate = (inventory: Inventory, ids: string[], isOurs: boolean): EconItem[] =>
         ids.map(id => {
             const item = inventory.getRawItems.find(candidate => candidate.id === id);
-            if (!item || !available(item, bot, isOurs) || !isEligible(item, bot, allowProtected)) {
+            const eligible = item && (isOurs ? isEligible(item, bot, allowProtected) : isSellEligible(item, bot, allowProtected));
+            if (!item || !available(item, bot, isOurs) || !eligible) {
                 throw new Error('A selected weapon is no longer available or eligible. Refresh the list.');
             }
             return item;
