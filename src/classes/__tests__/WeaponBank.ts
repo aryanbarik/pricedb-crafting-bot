@@ -1,6 +1,6 @@
 jest.mock('../Inventory', () => ({ __esModule: true, default: jest.fn() }));
 
-import { chooseMetal, duplicateWeaponAssetIds, isEligible, isSellEligible } from '../WeaponBank';
+import { chooseMetal, duplicateWeaponAssetIds, isBuyEligible, isEligible } from '../WeaponBank';
 import Bot from '../Bot';
 import { EconItem } from '@tf2autobot/tradeoffer-manager';
 
@@ -48,18 +48,18 @@ describe('weapon bank eligibility', () => {
         expect(isEligible(gifted, bot, true)).toBe(true);
     });
 
-    test('does not buy Quick-Fixes or Vaccinators from customers', () => {
+    test('accepts Quick-Fixes and Vaccinators from customers but does not sell them', () => {
         expect(isEligible(weapon('411;6'), bot)).toBe(true);
         expect(isEligible(weapon('998;6'), bot)).toBe(true);
-        expect(isSellEligible(weapon('411;6'), bot)).toBe(false);
-        expect(isSellEligible(weapon('998;6'), bot)).toBe(false);
-        expect(isSellEligible(weapon('414;6'), bot)).toBe(true);
+        expect(isBuyEligible(weapon('411;6'), bot)).toBe(false);
+        expect(isBuyEligible(weapon('998;6'), bot)).toBe(false);
+        expect(isBuyEligible(weapon('414;6'), bot)).toBe(true);
         expect(duplicateWeaponAssetIds([
             weapon('411;6', { id: 'quick-fix-1' }),
             weapon('411;6', { id: 'quick-fix-2' }),
             weapon('998;6', { id: 'vaccinator-1' }),
             weapon('998;6', { id: 'vaccinator-2' })
-        ], bot)).toEqual([]);
+        ], bot)).toEqual(['quick-fix-2', 'vaccinator-2']);
     });
 
     test('keeps one Unique copy and marks the remaining copies as duplicates', () => {
