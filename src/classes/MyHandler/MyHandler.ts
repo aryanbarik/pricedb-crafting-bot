@@ -49,7 +49,7 @@ import {
 } from '../../lib/craftingReconciliation';
 import { exponentialBackoff } from '../../lib/helpers';
 import { fetchInventoryViaExpressLoad } from '../../lib/expressLoadInventory';
-import { fetchTradeUrlToken, notifyComponentOffer, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
+import { fetchTradeUrlToken, notifyComponentOffer, notifyKillstreakifyRequest, notifyReturnOffer } from '../../lib/craftingWebsiteApi';
 import { hasExcludedHalloweenSpell, isExcludedCraftingReskinDefindex, isExcludedCraftingWeaponDefindex, isFestiveWeaponDefindex } from '../../lib/weaponExclusions';
 
 import { noiseMakers } from '../../lib/data';
@@ -4632,7 +4632,7 @@ export default class MyHandler extends Handler {
         prefix = '!',
         requestedPairs?: Array<{ kitAssetId: string; weaponAssetId?: string }>,
         allowProtected = false
-    ): Promise<void> {
+    ): Promise<{ offerId: string; pairCount: number }> {
         const partnerSteamID64 = partner.getSteamID64();
         this.bot.sendMessage(partner, '🔍 Scanning your inventory for Killstreak Kits, one moment...');
 
@@ -4656,12 +4656,12 @@ export default class MyHandler extends Handler {
                 partner,
                 '⚠️ Failed to load your inventory after 3 attempts — Steam might be down, or your inventory is private. Please make it public and try ' + prefix + 'killstreakify again.'
             );
-            return;
+            throw new Error('Failed to load the customer inventory after 3 attempts.');
         }
 
         const rawById = new Map(theirInventory.getRawItems.map(item => [item.id, item]));
         const usedIds = new Set<string>();
-        let pairs: { kitId: string; weaponId?: string; targetDefindex: number }[] = [];
+        let pairs: { kitId: string; weaponId?: string; targetDefindex: number; kitTier: 'basic' | 'specialized' }[] = [];
         for (const sku of Object.keys(theirInventory.getItems)) {
             const defindex = parseInt(sku.split(';')[0], 10);
             if (defindex !== 6527 && defindex !== 6523) continue;
@@ -4681,7 +4681,7 @@ export default class MyHandler extends Handler {
                 if (!allowProtected && kit && isProtectedItem(kit)) continue;
                 if (isBaseWeaponDefindex(targetDefindex, this.bot.schema)) {
                     usedIds.add(kitId);
-                    pairs.push({ kitId, targetDefindex });
+                    pairs.push({ kitId, targetDefindex, kitTier: defindex === 6527 ? 'specialized' : 'basic' });
                     continue;
                 }
 
@@ -4696,7 +4696,7 @@ export default class MyHandler extends Handler {
                 if (!weaponId) continue;
                 usedIds.add(kitId);
                 usedIds.add(weaponId);
-                pairs.push({ kitId, weaponId, targetDefindex });
+                pairs.push({ kitId, weaponId, targetDefindex, kitTier: defindex === 6527 ? 'specialized' : 'basic' });
             }
         }
 
@@ -4708,14 +4708,14 @@ export default class MyHandler extends Handler {
             if (new Set(keys).size !== keys.length || keys.some(key => !pairByKey.has(key))) {
                 throw new Error('A selected Kit or weapon is no longer available. Refresh the list and try again.');
             }
-            pairs = keys.map(key => pairByKey.get(key) as { kitId: string; weaponId?: string; targetDefindex: number });
+            pairs = keys.map(key => pairByKey.get(key) as { kitId: string; weaponId?: string; targetDefindex: number; kitTier: 'basic' | 'specialized' });
         }
         if (pairs.length === 0) {
             this.bot.sendMessage(
                 partner,
                 '❌ I could not find any tradable Killstreak Kit + craftable matching-weapon pairs. Non-Craftable weapons are never requested.'
             );
-            return;
+            throw new Error('No eligible Killstreak Kit and weapon pairs were found.');
         }
 
         const token = await fetchTradeUrlToken(partnerSteamID64);
@@ -4733,23 +4733,35 @@ export default class MyHandler extends Handler {
         });
         requestOffer.setMessage('Found ' + pairs.length + ' Killstreak Kit pair(s) — accept to apply them!');
 
-        const attemptSend = (retriesLeft: number): void => {
-            this.bot.trades.sendOffer(requestOffer)
-                .then(status => {
-                    if (status === 'pending') void this.bot.trades.acceptConfirmation(requestOffer);
-                    log.info('[killstreakifyService] Sent request offer ' + requestOffer.id + ' to ' + partnerSteamID64 + ' for ' + pairs.length + ' pair(s)');
-                })
-                .catch((sendErr: Error) => {
-                    if (retriesLeft > 0) {
-                        log.warn('[killstreakifyService] Failed to send request offer (' + this.describeSendError(sendErr) + '), retrying in 15s (' + retriesLeft + ' left)');
-                        setTimeout(() => attemptSend(retriesLeft - 1), 15000);
-                        return;
-                    }
-                    log.warn('[killstreakifyService] Failed to send request offer to ' + partnerSteamID64 + ': ' + this.describeSendError(sendErr));
-                    this.bot.sendMessage(partner, '⚠️ Failed to send the Killstreak Kit request offer — please try ' + prefix + 'killstreakify again in a bit.');
+        for (let retriesLeft = 3; ; retriesLeft--) {
+            try {
+                const status = await this.bot.trades.sendOffer(requestOffer);
+                if (status === 'pending') void this.bot.trades.acceptConfirmation(requestOffer);
+                log.info('[killstreakifyService] Sent request offer ' + requestOffer.id + ' to ' + partnerSteamID64 + ' for ' + pairs.length + ' pair(s)');
+                await notifyKillstreakifyRequest({
+                    steamId: partnerSteamID64,
+                    offerId: requestOffer.id,
+                    pairs: pairs.map(pair => {
+                        return {
+                            kitName: pair.kitTier === 'specialized' ? 'Specialized Killstreak Kit' : 'Killstreak Kit',
+                            weaponName: this.bot.schema.getItemByDefindex(pair.targetDefindex)?.item_name ?? `Weapon #${pair.targetDefindex}`,
+                            hasWeapon: pair.weaponId !== undefined
+                        };
+                    })
                 });
-        };
-        attemptSend(3);
+                return { offerId: requestOffer.id, pairCount: pairs.length };
+            } catch (sendErr) {
+                if (retriesLeft > 0) {
+                    log.warn('[killstreakifyService] Failed to send request offer (' + this.describeSendError(sendErr) + '), retrying in 15s (' + retriesLeft + ' left)');
+                    await new Promise(resolve => setTimeout(resolve, 15000));
+                    continue;
+                }
+                const reason = this.describeSendError(sendErr);
+                log.warn('[killstreakifyService] Failed to send request offer to ' + partnerSteamID64 + ': ' + reason);
+                this.bot.sendMessage(partner, '⚠️ Failed to send the Killstreak Kit request offer — please try ' + prefix + 'killstreakify again in a bit.');
+                throw new Error('Failed to send the Killstreakify intake offer: ' + reason);
+            }
+        }
     }
 
     private async handleKillstreakifyAccepted(offer: TradeOffer): Promise<void> {

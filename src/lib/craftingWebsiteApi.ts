@@ -76,3 +76,21 @@ export async function notifyReturnOffer(params: {
         console.warn('[craftingWebsiteApi] Failed to report return offer:', (err as Error).message);
     }
 }
+
+/** Record every Killstreakify intake, including requests started through Steam chat. */
+export async function notifyKillstreakifyRequest(params: {
+    steamId: string;
+    offerId: string;
+    pairs: Array<{ kitName: string; weaponName: string; hasWeapon: boolean }>;
+}): Promise<void> {
+    if (!API_KEY) return;
+
+    try {
+        await axios.post(`${WEBSITE_URL}/api/internal/killstreakify-request`, params, {
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            timeout: 5000
+        });
+    } catch (err) {
+        console.warn('[craftingWebsiteApi] Failed to report Killstreakify request:', (err as Error).message);
+    }
+}

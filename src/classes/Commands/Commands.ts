@@ -230,7 +230,9 @@ export default class Commands {
                     .join(' ');
                 void this.bot.handler.handleStrangifyCommand(steamID, args, prefix);
             } else if (command === 'killstreakify') {
-                void this.bot.handler.handleKillstreakifyCommand(steamID, prefix);
+                void this.bot.handler.handleKillstreakifyCommand(steamID, prefix).catch(error =>
+                    log.warn('[killstreakifyService] Chat request failed:', error)
+                );
             } else if (['deposit', 'd'].includes(command) && isAdmin) {
                 void this.depositCommand(steamID, message, prefix);
             } else if (['withdraw', 'w'].includes(command) && isAdmin) {

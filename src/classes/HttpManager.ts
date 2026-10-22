@@ -507,13 +507,13 @@ export default class HttpManager {
                 return;
             }
             try {
-                await this.bot.handler.handleKillstreakifyCommand(
+                const result = await this.bot.handler.handleKillstreakifyCommand(
                     new SteamID(steamId),
                     '!',
                     pairs as Array<{ kitAssetId: string; weaponAssetId?: string }> | undefined,
                     allowProtected === true
                 );
-                res.status(202).json({ success: true });
+                res.status(202).json({ success: true, ...result });
             } catch (error) {
                 log.error('[killstreakifyService] Website request failed:', error);
                 res.status(400).json({
